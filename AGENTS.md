@@ -60,6 +60,7 @@ Sources: Swift evolution (SE-0466 default isolation), TCA docs, SwiftLint rule d
 - `@Observable`, never `ObservableObject` / `@Published`, for non-TCA view models.
 - Swift Testing (`@Test` / `#expect` / `#require`, parameterized over copy-paste) for unit tests; XCTest only for `XCUIApplication` UI tests and perf metrics.
 - Typed `throws(MyError)` at fallible domain boundaries; `precondition` (not `fatalError`) for programmer errors.
+- `#Preview` for every SwiftUI view and component — canvas feedback stays instant as the UI grows. Previews live in app sources, so they follow production lint (no force-ops); seed them with literal state instead.
 - Enforcement lives in `.swiftlint.yml` (`strict: true`); never `only_rules`; SwiftUI-noisy rules stay disabled with reasons in the config comments.
 
 ## Lint + test gates (all mandatory, both languages)

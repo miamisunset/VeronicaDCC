@@ -15,4 +15,14 @@ struct EngineBridgeTests {
         #expect(second.tickCount > first.tickCount)
         #expect(first.entityCount == 3)
     }
+
+    /// The slice-1 graph externs are linked from `libveronica.a` and resolved
+    /// at runtime. This smoke pin proves the allocate/free boundary end to
+    /// end: the snapshot decodes as schema v1. Mutating intents stay covered
+    /// by the mock-backed tests and the UI flow (mock and real-engine modes)
+    /// to avoid shared-context races between parallel unit tests.
+    @Test func graphSnapshotDecodesAsVersion1() async throws {
+        let snapshot = try await EngineBridge.requestGraphSnapshot()
+        #expect(snapshot.version == GraphSnapshot.currentVersion)
+    }
 }

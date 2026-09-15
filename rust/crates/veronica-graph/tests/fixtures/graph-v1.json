@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "operators": [
+    {"id": 7, "kind": "container", "name": "Hero", "parent": null,
+     "position": {"x": 120.0, "y": 80.0}}
+  ],
+  "edges": []
+}

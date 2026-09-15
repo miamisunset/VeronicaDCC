@@ -82,3 +82,11 @@ struct ViewportView: View {
         .accessibilityIdentifier("viewportPane")
     }
 }
+
+#Preview {
+    ViewportView(
+        store: Store(initialState: ViewportFeature.State()) {
+            ViewportFeature()
+        }
+    )
+}

@@ -4,9 +4,15 @@
 //! Rust panics are caught and mapped to [`VrnResult`] codes, never
 //! propagated into Swift. All state lives behind an opaque pointer.
 
+use std::ffi::{CStr, CString};
+use std::os::raw::c_char;
 use std::sync::Mutex;
-use veronica_core::{MeshId, MeshTopology, MorphWeights, UndoHistory, validate_mesh_topology};
-use veronica_graph::NodeGraph;
+use veronica_core::{
+    MeshId, MeshTopology, MorphWeights, NodeId, UndoHistory, validate_mesh_topology,
+};
+use veronica_graph::{
+    GRAPH_SNAPSHOT_VERSION, GraphSnapshot, NodeGraph, OperatorGraph, OperatorKind, Position,
+};
 use veronica_scene::{DemoSceneIds, SceneWorld};
 
 /// Result codes returned across the FFI boundary.
@@ -27,10 +33,12 @@ pub enum VrnResult {
 #[derive(Debug)]
 #[allow(
     dead_code,
-    reason = "`graph`, `demo` + `mesh_history` wire up as the FFI surface grows"
+    reason = "`graph` + `demo` wire up as the FFI surface grows; `mesh_history` awaits its intents"
 )]
 pub struct VrnContext {
     graph: NodeGraph,
+    operator_graph: OperatorGraph,
+    graph_history: UndoHistory<GraphSnapshot>,
     scene: SceneWorld,
     demo: DemoSceneIds,
     mesh_history: UndoHistory<MeshTopology>,
@@ -42,6 +50,8 @@ impl VrnContext {
         let demo = scene.spawn_demo_scene();
         Self {
             graph: NodeGraph::new(),
+            operator_graph: OperatorGraph::new(),
+            graph_history: UndoHistory::new(64),
             scene,
             demo,
             mesh_history: UndoHistory::new(64),
@@ -49,10 +59,18 @@ impl VrnContext {
     }
 }
 
+/// Opaque engine-context handle crossing the FFI boundary.
+///
+/// The inner mutex is intentionally private: cbindgen emits this as an
+/// opaque `VrnContextHandle` struct instead of spelling `Mutex<VrnContext>`,
+/// which has no C spelling. All access goes through the `vrn_*` externs.
+#[derive(Debug)]
+pub struct VrnContextHandle(Mutex<VrnContext>);
+
 /// Create a new engine context. Returns null on allocation failure.
 #[unsafe(no_mangle)]
-pub extern "C" fn vrn_context_create() -> *mut Mutex<VrnContext> {
-    Box::into_raw(Box::new(Mutex::new(VrnContext::new())))
+pub extern "C" fn vrn_context_create() -> *mut VrnContextHandle {
+    Box::into_raw(Box::new(VrnContextHandle(Mutex::new(VrnContext::new()))))
 }
 
 /// Destroy a context created by [`vrn_context_create`]. Null-safe.
@@ -63,7 +81,7 @@ pub extern "C" fn vrn_context_create() -> *mut Mutex<VrnContext> {
 /// [`vrn_context_create`] that has not been destroyed yet. Each context
 /// must be destroyed at most once.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn vrn_context_destroy(context: *mut Mutex<VrnContext>) {
+pub unsafe extern "C" fn vrn_context_destroy(context: *mut VrnContextHandle) {
     if context.is_null() {
         return;
     }
@@ -97,16 +115,16 @@ pub extern "C" fn vrn_validate_mesh(positions_len: usize, indices_len: usize) ->
 /// [`vrn_context_create`]. Do not call concurrently with
 /// [`vrn_context_destroy`] on the same context.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn vrn_tick(context: *mut Mutex<VrnContext>) -> VrnResult {
+pub unsafe extern "C" fn vrn_tick(context: *mut VrnContextHandle) -> VrnResult {
     if context.is_null() {
         return VrnResult::NullArgument;
     }
     // SAFETY: non-null pointer from `vrn_context_create`, still alive.
     let guard = unsafe { context.as_ref() };
-    let Some(mutex) = guard else {
+    let Some(handle) = guard else {
         return VrnResult::NullArgument;
     };
-    match mutex.lock() {
+    match handle.0.lock() {
         Ok(mut ctx) => {
             ctx.scene.update();
             VrnResult::Ok
@@ -123,14 +141,14 @@ pub unsafe extern "C" fn vrn_tick(context: *mut Mutex<VrnContext>) -> VrnResult 
 /// must be a non-null, writable `u64` slot for the duration of the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vrn_tick_count(
-    context: *mut Mutex<VrnContext>,
+    context: *mut VrnContextHandle,
     out: *mut u64,
 ) -> VrnResult {
     if context.is_null() || out.is_null() {
         return VrnResult::NullArgument;
     }
     // SAFETY: both pointers checked non-null; context is alive per contract.
-    let (mutex, slot) = unsafe { (&*context, &mut *out) };
+    let (mutex, slot) = unsafe { (&(*context).0, &mut *out) };
     match mutex.lock() {
         Ok(ctx) => {
             *slot = ctx.scene.tick_count();
@@ -149,20 +167,292 @@ pub unsafe extern "C" fn vrn_tick_count(
 /// must be a non-null, writable `u64` slot for the duration of the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vrn_entity_count(
-    context: *mut Mutex<VrnContext>,
+    context: *mut VrnContextHandle,
     out: *mut u64,
 ) -> VrnResult {
     if context.is_null() || out.is_null() {
         return VrnResult::NullArgument;
     }
     // SAFETY: both pointers checked non-null; context is alive per contract.
-    let (mutex, slot) = unsafe { (&*context, &mut *out) };
+    let (mutex, slot) = unsafe { (&(*context).0, &mut *out) };
     match mutex.lock() {
         Ok(mut ctx) => {
             *slot = ctx.scene.entity_count() as u64;
             VrnResult::Ok
         }
         Err(_) => VrnResult::Internal,
+    }
+}
+
+/// Parse a strict operator-kind string from the FFI boundary.
+///
+/// Only `"container"` is accepted (ADR-0002); anything else is
+/// [`VrnResult::InvalidArgument`]. The graph core only ever sees the parsed
+/// [`OperatorKind`], so operator #2 extends here without touching it.
+fn parse_operator_kind(kind: *const c_char) -> Result<OperatorKind, VrnResult> {
+    if kind.is_null() {
+        return Err(VrnResult::NullArgument);
+    }
+    // SAFETY: non-null; the caller guarantees a valid NUL-terminated string
+    // for the duration of the call.
+    let text = unsafe { CStr::from_ptr(kind) };
+    match text.to_str() {
+        Ok("container") => Ok(OperatorKind::Container),
+        Ok(_) | Err(_) => Err(VrnResult::InvalidArgument),
+    }
+}
+
+/// Create a container operator at `(x, y)`, writing its fresh id to `out_id`.
+///
+/// `parent == 0` means the root (the FFI sentinel; [`NodeId`]`(0)` is never
+/// issued); any other value must name an existing operator.
+///
+/// # Safety
+///
+/// `context` must be a live pointer from [`vrn_context_create`], `kind` a
+/// valid NUL-terminated string, and `out_id` a non-null writable `u64` slot.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vrn_graph_create_operator(
+    context: *mut VrnContextHandle,
+    kind: *const c_char,
+    parent: u64,
+    x: f64,
+    y: f64,
+    out_id: *mut u64,
+) -> VrnResult {
+    if context.is_null() || kind.is_null() || out_id.is_null() {
+        return VrnResult::NullArgument;
+    }
+    let Ok(parsed) = parse_operator_kind(kind) else {
+        return VrnResult::InvalidArgument;
+    };
+    let parent = if parent == 0 {
+        None
+    } else {
+        Some(NodeId(parent))
+    };
+    // SAFETY: both pointers checked non-null; context is alive per contract.
+    let (mutex, slot) = unsafe { (&(*context).0, &mut *out_id) };
+    let Ok(mut ctx) = mutex.lock() else {
+        return VrnResult::Internal;
+    };
+    if let Some(id) = parent
+        && ctx.operator_graph.operator(id).is_none()
+    {
+        return VrnResult::InvalidArgument;
+    }
+    // Pre-image push precedes the first write (scrub-vs-structure rule).
+    let before = ctx.operator_graph.snapshot();
+    ctx.graph_history.push(before);
+    match ctx
+        .operator_graph
+        .create_operator(parsed, parent, Position { x, y })
+    {
+        Ok(id) => {
+            *slot = id.0;
+            VrnResult::Ok
+        }
+        Err(_) => VrnResult::InvalidArgument,
+    }
+}
+
+/// Move an operator to a new canvas position.
+///
+/// # Safety
+///
+/// `context` must be a live pointer from [`vrn_context_create`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vrn_graph_move_operator(
+    context: *mut VrnContextHandle,
+    id: u64,
+    x: f64,
+    y: f64,
+) -> VrnResult {
+    if context.is_null() {
+        return VrnResult::NullArgument;
+    }
+    // SAFETY: non-null pointer from `vrn_context_create`, still alive.
+    let mutex = unsafe { &(*context).0 };
+    let Ok(mut ctx) = mutex.lock() else {
+        return VrnResult::Internal;
+    };
+    let id = NodeId(id);
+    if ctx.operator_graph.operator(id).is_none() {
+        return VrnResult::InvalidArgument;
+    }
+    let before = ctx.operator_graph.snapshot();
+    ctx.graph_history.push(before);
+    match ctx.operator_graph.move_operator(id, Position { x, y }) {
+        Ok(()) => VrnResult::Ok,
+        Err(_) => VrnResult::InvalidArgument,
+    }
+}
+
+/// Rename an operator; empty or blank names are rejected.
+///
+/// # Safety
+///
+/// `context` must be a live pointer from [`vrn_context_create`] and `name`
+/// a valid NUL-terminated string for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vrn_graph_rename_operator(
+    context: *mut VrnContextHandle,
+    id: u64,
+    name: *const c_char,
+) -> VrnResult {
+    if context.is_null() || name.is_null() {
+        return VrnResult::NullArgument;
+    }
+    // SAFETY: non-null; the caller guarantees a valid NUL-terminated string
+    // for the duration of the call.
+    let text = unsafe { CStr::from_ptr(name) };
+    let Ok(name) = text.to_str() else {
+        return VrnResult::InvalidArgument;
+    };
+    // SAFETY: non-null pointer from `vrn_context_create`, still alive.
+    let mutex = unsafe { &(*context).0 };
+    let Ok(mut ctx) = mutex.lock() else {
+        return VrnResult::Internal;
+    };
+    let id = NodeId(id);
+    if ctx.operator_graph.operator(id).is_none() {
+        return VrnResult::InvalidArgument;
+    }
+    if name.trim().is_empty() {
+        return VrnResult::InvalidArgument;
+    }
+    let before = ctx.operator_graph.snapshot();
+    ctx.graph_history.push(before);
+    match ctx.operator_graph.rename_operator(id, name) {
+        Ok(()) => VrnResult::Ok,
+        Err(_) => VrnResult::InvalidArgument,
+    }
+}
+
+/// Delete an operator and its whole subtree (cascade).
+///
+/// # Safety
+///
+/// `context` must be a live pointer from [`vrn_context_create`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vrn_graph_delete_operator(
+    context: *mut VrnContextHandle,
+    id: u64,
+) -> VrnResult {
+    if context.is_null() {
+        return VrnResult::NullArgument;
+    }
+    // SAFETY: non-null pointer from `vrn_context_create`, still alive.
+    let mutex = unsafe { &(*context).0 };
+    let Ok(mut ctx) = mutex.lock() else {
+        return VrnResult::Internal;
+    };
+    let id = NodeId(id);
+    if ctx.operator_graph.operator(id).is_none() {
+        return VrnResult::InvalidArgument;
+    }
+    let before = ctx.operator_graph.snapshot();
+    ctx.graph_history.push(before);
+    match ctx.operator_graph.delete_operator(id) {
+        Ok(()) => VrnResult::Ok,
+        Err(_) => VrnResult::InvalidArgument,
+    }
+}
+
+/// Capture the whole graph as versioned JSON.
+///
+/// Rust allocates the string via [`CString::into_raw`]; the caller takes
+/// ownership and must release it with [`vrn_string_free`].
+///
+/// # Safety
+///
+/// `context` must be a live pointer from [`vrn_context_create`] and
+/// `out_json` a non-null writable pointer slot for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vrn_graph_snapshot(
+    context: *mut VrnContextHandle,
+    out_json: *mut *mut c_char,
+) -> VrnResult {
+    if context.is_null() || out_json.is_null() {
+        return VrnResult::NullArgument;
+    }
+    // SAFETY: both pointers checked non-null; context is alive per contract.
+    let (mutex, slot) = unsafe { (&(*context).0, &mut *out_json) };
+    let Ok(ctx) = mutex.lock() else {
+        return VrnResult::Internal;
+    };
+    let Ok(json) = serde_json::to_string(&ctx.operator_graph.snapshot()) else {
+        return VrnResult::Internal;
+    };
+    match CString::new(json) {
+        Ok(owned) => {
+            *slot = owned.into_raw();
+            VrnResult::Ok
+        }
+        Err(_) => VrnResult::Internal,
+    }
+}
+
+/// Replace the whole graph from versioned JSON (launch-load path).
+///
+/// Rejects `version != 1` and malformed payloads with
+/// [`VrnResult::InvalidArgument`]; the pre-image is pushed first so a bad
+/// file never destroys an undoable state silently.
+///
+/// # Safety
+///
+/// `context` must be a live pointer from [`vrn_context_create`] and `json`
+/// a valid NUL-terminated string for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vrn_graph_restore(
+    context: *mut VrnContextHandle,
+    json: *const c_char,
+) -> VrnResult {
+    if context.is_null() || json.is_null() {
+        return VrnResult::NullArgument;
+    }
+    // SAFETY: non-null; the caller guarantees a valid NUL-terminated string
+    // for the duration of the call.
+    let text = unsafe { CStr::from_ptr(json) };
+    let Ok(text) = text.to_str() else {
+        return VrnResult::InvalidArgument;
+    };
+    let Ok(snapshot): Result<GraphSnapshot, _> = serde_json::from_str(text) else {
+        return VrnResult::InvalidArgument;
+    };
+    // Reject the known-bad version before pushing any history.
+    if snapshot.version != GRAPH_SNAPSHOT_VERSION {
+        return VrnResult::InvalidArgument;
+    }
+    // SAFETY: non-null pointer from `vrn_context_create`, still alive.
+    let mutex = unsafe { &(*context).0 };
+    let Ok(mut ctx) = mutex.lock() else {
+        return VrnResult::Internal;
+    };
+    let before = ctx.operator_graph.snapshot();
+    ctx.graph_history.push(before);
+    match ctx.operator_graph.restore(snapshot) {
+        Ok(()) => VrnResult::Ok,
+        Err(_) => VrnResult::InvalidArgument,
+    }
+}
+
+/// Release a string allocated by [`vrn_graph_snapshot`]. Null-safe; the sole
+/// deallocator for FFI strings.
+///
+/// # Safety
+///
+/// `s` must be null or a pointer previously returned by
+/// [`vrn_graph_snapshot`] that has not been freed yet. Each string must be
+/// freed at most once.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vrn_string_free(s: *mut c_char) {
+    if s.is_null() {
+        return;
+    }
+    // SAFETY: non-null pointer from `vrn_graph_snapshot`, freed once.
+    unsafe {
+        drop(CString::from_raw(s));
     }
 }
 
@@ -259,6 +549,307 @@ mod stats_tests {
                 vrn_entity_count(context, ptr::null_mut()),
                 VrnResult::NullArgument
             );
+            vrn_context_destroy(context);
+        }
+    }
+}
+
+#[cfg(test)]
+mod graph_tests {
+    use super::*;
+    use std::ptr;
+
+    fn cstring(text: &str) -> CString {
+        CString::new(text).unwrap()
+    }
+
+    /// Snapshot the context and return the JSON as an owned string.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the snapshot call fails or the payload is not UTF-8;
+    /// both indicate a broken FFI boundary, not a test input problem.
+    fn snapshot_json(context: *mut VrnContextHandle) -> String {
+        let mut raw: *mut c_char = ptr::null_mut();
+        // SAFETY: just created, alive, single-threaded test; slot is live.
+        unsafe {
+            assert_eq!(vrn_graph_snapshot(context, &raw mut raw), VrnResult::Ok);
+            assert!(!raw.is_null());
+            let text = CStr::from_ptr(raw).to_str().unwrap().to_owned();
+            vrn_string_free(raw);
+            text
+        }
+    }
+
+    #[test]
+    fn create_move_rename_delete_round_trip() {
+        let context = vrn_context_create();
+        assert!(!context.is_null());
+        let kind = cstring("container");
+        let name = cstring("Hero");
+        let renamed = cstring("Villain");
+        let mut id = 0u64;
+        // SAFETY: just created, alive, single-threaded test; strings outlive calls.
+        unsafe {
+            assert_eq!(
+                vrn_graph_create_operator(
+                    context,
+                    kind.as_ptr().cast_mut(),
+                    0,
+                    120.0,
+                    80.0,
+                    &raw mut id
+                ),
+                VrnResult::Ok
+            );
+            assert_eq!(id, 1);
+            assert_eq!(
+                vrn_graph_move_operator(context, id, 10.0, 20.0),
+                VrnResult::Ok
+            );
+            assert_eq!(
+                vrn_graph_rename_operator(context, id, name.as_ptr().cast_mut()),
+                VrnResult::Ok
+            );
+            assert_eq!(
+                vrn_graph_rename_operator(context, id, renamed.as_ptr().cast_mut()),
+                VrnResult::Ok
+            );
+            let json = snapshot_json(context);
+            assert!(json.contains(r#""name":"Villain""#));
+            assert_eq!(vrn_graph_delete_operator(context, id), VrnResult::Ok);
+            let json = snapshot_json(context);
+            assert!(json.contains(r#""operators":[]"#));
+            vrn_context_destroy(context);
+        }
+    }
+
+    #[test]
+    fn strict_kind_validation_rejects_anything_but_container() {
+        let context = vrn_context_create();
+        assert!(!context.is_null());
+        let mut id = 0u64;
+        // SAFETY: just created, alive, single-threaded test.
+        unsafe {
+            for rejected in ["box", "Container", "CONTAINER", "", "container "] {
+                let kind = cstring(rejected);
+                assert_eq!(
+                    vrn_graph_create_operator(
+                        context,
+                        kind.as_ptr().cast_mut(),
+                        0,
+                        0.0,
+                        0.0,
+                        &raw mut id
+                    ),
+                    VrnResult::InvalidArgument,
+                    "kind {rejected:?} must be rejected"
+                );
+            }
+            // Null kind is a null-argument, not a validation failure.
+            assert_eq!(
+                vrn_graph_create_operator(context, ptr::null_mut(), 0, 0.0, 0.0, &raw mut id),
+                VrnResult::NullArgument
+            );
+            vrn_context_destroy(context);
+        }
+    }
+
+    #[test]
+    fn unknown_ids_and_blank_names_are_invalid() {
+        let context = vrn_context_create();
+        assert!(!context.is_null());
+        let blank = cstring("   ");
+        let empty = cstring("");
+        let name = cstring("Hero");
+        // SAFETY: just created, alive, single-threaded test.
+        unsafe {
+            assert_eq!(
+                vrn_graph_move_operator(context, 99, 0.0, 0.0),
+                VrnResult::InvalidArgument
+            );
+            assert_eq!(
+                vrn_graph_delete_operator(context, 99),
+                VrnResult::InvalidArgument
+            );
+            assert_eq!(
+                vrn_graph_rename_operator(context, 99, name.as_ptr().cast_mut()),
+                VrnResult::InvalidArgument
+            );
+            assert_eq!(
+                vrn_graph_rename_operator(context, 1, blank.as_ptr().cast_mut()),
+                VrnResult::InvalidArgument
+            );
+            assert_eq!(
+                vrn_graph_rename_operator(context, 1, empty.as_ptr().cast_mut()),
+                VrnResult::InvalidArgument
+            );
+            // Unknown parent on create.
+            let kind = cstring("container");
+            let mut id = 0u64;
+            assert_eq!(
+                vrn_graph_create_operator(
+                    context,
+                    kind.as_ptr().cast_mut(),
+                    7,
+                    0.0,
+                    0.0,
+                    &raw mut id
+                ),
+                VrnResult::InvalidArgument
+            );
+            vrn_context_destroy(context);
+        }
+    }
+
+    #[test]
+    fn graph_null_safety() {
+        let mut id = 0u64;
+        let mut raw: *mut c_char = ptr::null_mut();
+        // SAFETY: every extern below is documented null-safe.
+        unsafe {
+            assert_eq!(
+                vrn_graph_create_operator(
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    0,
+                    0.0,
+                    0.0,
+                    &raw mut id
+                ),
+                VrnResult::NullArgument
+            );
+            assert_eq!(
+                vrn_graph_move_operator(ptr::null_mut(), 1, 0.0, 0.0),
+                VrnResult::NullArgument
+            );
+            assert_eq!(
+                vrn_graph_rename_operator(ptr::null_mut(), 1, ptr::null_mut()),
+                VrnResult::NullArgument
+            );
+            assert_eq!(
+                vrn_graph_delete_operator(ptr::null_mut(), 1),
+                VrnResult::NullArgument
+            );
+            assert_eq!(
+                vrn_graph_snapshot(ptr::null_mut(), &raw mut raw),
+                VrnResult::NullArgument
+            );
+            assert_eq!(
+                vrn_graph_restore(ptr::null_mut(), ptr::null_mut()),
+                VrnResult::NullArgument
+            );
+            vrn_string_free(ptr::null_mut());
+        }
+        // Null out-slots on a live context.
+        let context = vrn_context_create();
+        assert!(!context.is_null());
+        let kind = cstring("container");
+        // SAFETY: just created, alive, single-threaded test.
+        unsafe {
+            assert_eq!(
+                vrn_graph_create_operator(
+                    context,
+                    kind.as_ptr().cast_mut(),
+                    0,
+                    0.0,
+                    0.0,
+                    ptr::null_mut()
+                ),
+                VrnResult::NullArgument
+            );
+            assert_eq!(
+                vrn_graph_snapshot(context, ptr::null_mut()),
+                VrnResult::NullArgument
+            );
+            vrn_context_destroy(context);
+        }
+    }
+
+    #[test]
+    fn restore_round_trip_and_rejects_v2_and_garbage() {
+        let context = vrn_context_create();
+        assert!(!context.is_null());
+        let kind = cstring("container");
+        let name = cstring("Hero");
+        let mut id = 0u64;
+        // SAFETY: just created, alive, single-threaded test.
+        unsafe {
+            assert_eq!(
+                vrn_graph_create_operator(
+                    context,
+                    kind.as_ptr().cast_mut(),
+                    0,
+                    120.0,
+                    80.0,
+                    &raw mut id
+                ),
+                VrnResult::Ok
+            );
+            assert_eq!(
+                vrn_graph_rename_operator(context, id, name.as_ptr().cast_mut()),
+                VrnResult::Ok
+            );
+            let json = snapshot_json(context);
+            // Restore the same payload into a fresh context.
+            let fresh = vrn_context_create();
+            let payload = cstring(&json);
+            assert_eq!(
+                vrn_graph_restore(fresh, payload.as_ptr().cast_mut()),
+                VrnResult::Ok
+            );
+            assert_eq!(snapshot_json(fresh), json);
+            // Wrong version and garbage are rejected; state is untouched.
+            let v2 = cstring(r#"{"version":2,"operators":[],"edges":[]}"#);
+            assert_eq!(
+                vrn_graph_restore(fresh, v2.as_ptr().cast_mut()),
+                VrnResult::InvalidArgument
+            );
+            let garbage = cstring("not json");
+            assert_eq!(
+                vrn_graph_restore(fresh, garbage.as_ptr().cast_mut()),
+                VrnResult::InvalidArgument
+            );
+            assert_eq!(snapshot_json(fresh), json);
+            vrn_context_destroy(context);
+            vrn_context_destroy(fresh);
+        }
+    }
+
+    /// Allocator-boundary pin (ADR-0002): repeated snapshot/free cycles must
+    /// neither leak the pointer nor corrupt the payload.
+    #[test]
+    fn looped_snapshot_and_free_is_stable() {
+        let context = vrn_context_create();
+        assert!(!context.is_null());
+        let kind = cstring("container");
+        let mut id = 0u64;
+        // SAFETY: just created, alive, single-threaded test.
+        unsafe {
+            assert_eq!(
+                vrn_graph_create_operator(
+                    context,
+                    kind.as_ptr().cast_mut(),
+                    0,
+                    1.0,
+                    2.0,
+                    &raw mut id
+                ),
+                VrnResult::Ok
+            );
+            let mut first = String::new();
+            for iteration in 0..128 {
+                let mut raw: *mut c_char = ptr::null_mut();
+                assert_eq!(vrn_graph_snapshot(context, &raw mut raw), VrnResult::Ok);
+                assert!(!raw.is_null());
+                let text = CStr::from_ptr(raw).to_str().unwrap().to_owned();
+                vrn_string_free(raw);
+                if iteration == 0 {
+                    first = text.clone();
+                } else {
+                    assert_eq!(text, first);
+                }
+            }
             vrn_context_destroy(context);
         }
     }
