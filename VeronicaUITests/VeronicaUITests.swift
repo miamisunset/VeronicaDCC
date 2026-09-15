@@ -34,6 +34,16 @@ final class VeronicaUITests: XCTestCase {
     }
 
     @MainActor
+    func testSplitShowsViewportAndNodeGraph() throws {
+        let app = XCUIApplication()
+        app.launch()
+
+        let panes = app.descendants(matching: .any)
+        XCTAssertTrue(panes["viewportPane"].waitForExistence(timeout: 5))
+        XCTAssertTrue(panes["nodeGraphPane"].waitForExistence(timeout: 5))
+    }
+
+    @MainActor
     func testLaunchPerformance() throws {
         // This measures how long it takes to launch your application.
         measure(metrics: [XCTApplicationLaunchMetric()]) {

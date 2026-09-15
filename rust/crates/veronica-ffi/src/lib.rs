@@ -7,7 +7,7 @@
 use std::sync::Mutex;
 use veronica_core::{MeshId, MeshTopology, MorphWeights, UndoHistory, validate_mesh_topology};
 use veronica_graph::NodeGraph;
-use veronica_scene::SceneWorld;
+use veronica_scene::{DemoSceneIds, SceneWorld};
 
 /// Result codes returned across the FFI boundary.
 #[repr(C)]
@@ -27,19 +27,23 @@ pub enum VrnResult {
 #[derive(Debug)]
 #[allow(
     dead_code,
-    reason = "`graph` + `mesh_history` wire up as the FFI surface grows"
+    reason = "`graph`, `demo` + `mesh_history` wire up as the FFI surface grows"
 )]
 pub struct VrnContext {
     graph: NodeGraph,
     scene: SceneWorld,
+    demo: DemoSceneIds,
     mesh_history: UndoHistory<MeshTopology>,
 }
 
 impl VrnContext {
     fn new() -> Self {
+        let mut scene = SceneWorld::new_headless();
+        let demo = scene.spawn_demo_scene();
         Self {
             graph: NodeGraph::new(),
-            scene: SceneWorld::new_headless(),
+            scene,
+            demo,
             mesh_history: UndoHistory::new(64),
         }
     }
@@ -111,6 +115,57 @@ pub unsafe extern "C" fn vrn_tick(context: *mut Mutex<VrnContext>) -> VrnResult 
     }
 }
 
+/// Read the scene tick counter. `out` receives ticks since context creation.
+///
+/// # Safety
+///
+/// `context` must be a live pointer from [`vrn_context_create`] and `out`
+/// must be a non-null, writable `u64` slot for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vrn_tick_count(
+    context: *mut Mutex<VrnContext>,
+    out: *mut u64,
+) -> VrnResult {
+    if context.is_null() || out.is_null() {
+        return VrnResult::NullArgument;
+    }
+    // SAFETY: both pointers checked non-null; context is alive per contract.
+    let (mutex, slot) = unsafe { (&*context, &mut *out) };
+    match mutex.lock() {
+        Ok(ctx) => {
+            *slot = ctx.scene.tick_count();
+            VrnResult::Ok
+        }
+        Err(_) => VrnResult::Internal,
+    }
+}
+
+/// Read the live entity count of the scene world. See [`vrn_tick_count`]
+/// for the pointer contract.
+///
+/// # Safety
+///
+/// `context` must be a live pointer from [`vrn_context_create`] and `out`
+/// must be a non-null, writable `u64` slot for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vrn_entity_count(
+    context: *mut Mutex<VrnContext>,
+    out: *mut u64,
+) -> VrnResult {
+    if context.is_null() || out.is_null() {
+        return VrnResult::NullArgument;
+    }
+    // SAFETY: both pointers checked non-null; context is alive per contract.
+    let (mutex, slot) = unsafe { (&*context, &mut *out) };
+    match mutex.lock() {
+        Ok(mut ctx) => {
+            *slot = ctx.scene.entity_count() as u64;
+            VrnResult::Ok
+        }
+        Err(_) => VrnResult::Internal,
+    }
+}
+
 /// Touch [`MeshId`] so the import stays live as the FFI surface grows.
 #[allow(dead_code, reason = "scaffold shim until the FFI surface grows")]
 fn mesh_id_ffi_layout(id: MeshId) -> u64 {
@@ -145,6 +200,15 @@ mod tests {
         unsafe {
             assert_eq!(vrn_tick(ptr::null_mut()), VrnResult::NullArgument);
             vrn_context_destroy(ptr::null_mut());
+            let mut slot = 0u64;
+            assert_eq!(
+                vrn_tick_count(ptr::null_mut(), &raw mut slot),
+                VrnResult::NullArgument
+            );
+            assert_eq!(
+                vrn_entity_count(ptr::null_mut(), &raw mut slot),
+                VrnResult::NullArgument
+            );
         }
     }
 
@@ -164,5 +228,34 @@ mod tests {
             }),
             1
         );
+    }
+}
+
+#[cfg(test)]
+mod stats_tests {
+    use super::*;
+    use std::ptr;
+
+    #[test]
+    fn demo_stats_advance_with_ticks() {
+        let context = vrn_context_create();
+        assert!(!context.is_null());
+        let mut ticks = 0u64;
+        let mut entities = 0u64;
+        // SAFETY: just created, alive, single-threaded test.
+        unsafe {
+            assert_eq!(vrn_entity_count(context, &raw mut entities), VrnResult::Ok);
+            assert_eq!(entities, 3);
+            assert_eq!(vrn_tick_count(context, &raw mut ticks), VrnResult::Ok);
+            assert_eq!(ticks, 0);
+            assert_eq!(vrn_tick(context), VrnResult::Ok);
+            assert_eq!(vrn_tick_count(context, &raw mut ticks), VrnResult::Ok);
+            assert_eq!(ticks, 1);
+            assert_eq!(
+                vrn_tick_count(context, ptr::null_mut()),
+                VrnResult::NullArgument
+            );
+            vrn_context_destroy(context);
+        }
     }
 }
