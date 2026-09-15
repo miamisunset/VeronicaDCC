@@ -113,6 +113,8 @@ struct NodeGraphView: View {
                         .accessibilityIdentifier("nodeGraphEmptyHint")
                 }
             }
+            // Stable space for box-drag translations (see `canvasSpaceName`).
+            .coordinateSpace(name: GraphCanvasLayout.canvasSpaceName)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .contentShape(Rectangle())
             .onContinuousHover { phase in

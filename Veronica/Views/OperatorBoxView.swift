@@ -92,7 +92,13 @@ struct OperatorBoxView: View {
                     }
             )
             .simultaneousGesture(
-                DragGesture(minimumDistance: 1, coordinateSpace: .local)
+                // Measured in the stable canvas space, never `.local`: this
+                // gesture moves its own box, so its own space would shift
+                // under the finger and the translation would feed back.
+                DragGesture(
+                    minimumDistance: 1,
+                    coordinateSpace: .named(GraphCanvasLayout.canvasSpaceName)
+                )
                     .onChanged { value in
                         // Touch-down reports a zero translation; only real
                         // movement previews, so taps never stain the preview.

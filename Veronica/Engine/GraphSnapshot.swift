@@ -155,6 +155,12 @@ nonisolated enum GraphCanvasLayout {
     static let tapSlop: Double = 2
     /// Keyboard nudge step in points (arrow keys move the selection).
     static let nudgeStep: Double = 10
+    /// Name of the stable canvas coordinate space box drags measure in.
+    ///
+    /// A drag that moves its own box must not use `.local`: the box's space
+    /// moves with every preview, so the cumulative translation feeds back
+    /// into itself and the box stops tracking the cursor 1:1.
+    static let canvasSpaceName = "NodeGraphCanvas"
 
     /// Returns the box frame for `mirrored` shifted by the Swift-local pan.
     static func boxFrame(for mirrored: OperatorMirror, pan: CGSize) -> CGRect {
