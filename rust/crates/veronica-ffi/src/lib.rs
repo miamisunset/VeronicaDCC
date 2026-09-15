@@ -255,6 +255,10 @@ mod stats_tests {
                 vrn_tick_count(context, ptr::null_mut()),
                 VrnResult::NullArgument
             );
+            assert_eq!(
+                vrn_entity_count(context, ptr::null_mut()),
+                VrnResult::NullArgument
+            );
             vrn_context_destroy(context);
         }
     }

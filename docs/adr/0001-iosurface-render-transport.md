@@ -9,7 +9,8 @@ The Viewport (left pane) must show real Bevy-rendered pixels inside the
 SwiftUI window, which refreshes natively (144 Hz target monitor) at full pane
 size. The Rust workspace currently forbids `bevy_render` / `winit` and runs a
 headless `bevy_app::App` with `ScheduleRunnerPlugin` only. The frame loop is
-Swift-driven via `CVDisplayLink` calling `vrn_tick` off-MainActor.
+Swift-driven: a view-vended `CADisplayLink` paces one `vrn_tick` per display
+refresh, issued off-MainActor.
 
 ## Options considered
 

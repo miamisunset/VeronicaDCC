@@ -32,16 +32,6 @@ nonisolated enum EngineBridge {
         }
     }
 
-    /// Tick the headless scene once, off the main actor.
-    static func tick() async {
-        await withCheckedContinuation { continuation in
-            engineQueue.async {
-                // Becomes `vrn_tick(context)` once the staticlib is linked.
-                continuation.resume()
-            }
-        }
-    }
-
     /// Tick once and return mirrored scene stats, off the main actor.
     ///
     /// Placeholder until `libveronica.a` is linked: advances a local counter

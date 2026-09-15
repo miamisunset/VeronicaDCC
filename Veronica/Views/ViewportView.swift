@@ -34,6 +34,8 @@ struct ViewportMetalHost: NSViewRepresentable {
     func makeNSView(context: Context) -> MTKView {
         let view = MTKView()
         view.device = MTLCreateSystemDefaultDevice()
+        // Inert until slice 2: the view never draws (`isPaused` below), so
+        // this only documents the intended clear once IOSurface frames land.
         view.clearColor = MTLClearColor(red: 0.05, green: 0.06, blue: 0.09, alpha: 1)
         view.enableSetNeedsDisplay = false
         view.isPaused = true

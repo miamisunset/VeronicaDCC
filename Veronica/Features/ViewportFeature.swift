@@ -37,6 +37,9 @@ struct ViewportFeature {
                     await send(.statsResponse(stats))
                 }
             case let .statsResponse(stats):
+                // Frames are independent effects with no ordering guarantee:
+                // a delayed response must never overwrite newer stats.
+                guard stats.tickCount > state.tickCount else { return .none }
                 state.tickCount = stats.tickCount
                 state.entityCount = stats.entityCount
                 state.frameCount += 1
