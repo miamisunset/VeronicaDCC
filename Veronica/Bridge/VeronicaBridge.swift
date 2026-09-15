@@ -107,6 +107,13 @@ nonisolated enum EngineBridge {
         _ context: UnsafeMutableRawPointer?,
         _ id: UInt64
     ) -> Int32
+    @_silgen_name("vrn_graph_set_parameter")
+    nonisolated private static func vrnGraphSetParameter(
+        _ context: UnsafeMutableRawPointer?,
+        _ id: UInt64,
+        _ key: UnsafePointer<CChar>?,
+        _ value: UnsafePointer<CChar>?
+    ) -> Int32
     @_silgen_name("vrn_graph_snapshot")
     nonisolated private static func vrnGraphSnapshot(
         _ context: UnsafeMutableRawPointer?,
@@ -263,6 +270,39 @@ nonisolated enum EngineBridge {
                     return
                 }
                 continuation.resume()
+            }
+        }
+    }
+
+    /// Sets one string parameter on a known operator id. The `"name"` key
+    /// carries rename semantics in Rust (trimmed, blank rejected).
+    ///
+    /// Explicitly `nonisolated` (see `createOperator`).
+    nonisolated static func setParameter(
+        id: UInt64,
+        key: String,
+        value: String
+    ) async throws(GraphEngineError) {
+        try await withCheckedThrowingContinuation { (continuation: GraphContinuation<Void>) in
+            engineQueue.async {
+                guard let context = requireGraphContext(
+                    continuation,
+                    operation: "setParameter"
+                ) else {
+                    return
+                }
+                let result: Result<Void, GraphEngineError> = key.withCString { keyPtr in
+                    value.withCString { valuePtr in
+                        let code = vrnGraphSetParameter(context, id, keyPtr, valuePtr)
+                        guard code == VrnResultCode.ok.rawValue else {
+                            return .failure(
+                                .ffiFailed(operation: "setParameter", code: code)
+                            )
+                        }
+                        return .success(())
+                    }
+                }
+                continuation.resume(with: result)
             }
         }
     }

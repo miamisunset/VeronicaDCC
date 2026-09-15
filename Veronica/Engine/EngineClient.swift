@@ -32,6 +32,9 @@ nonisolated struct EngineClient: Sendable {
     var moveOperator: @Sendable (UInt64, GraphPosition) async throws(GraphEngineError) -> Void
     /// Rename a known operator id. Blank names are rejected.
     var renameOperator: @Sendable (UInt64, String) async throws(GraphEngineError) -> Void
+    /// Set one string parameter on a known operator id. The `"name"` key
+    /// carries rename semantics (trimmed, blank rejected, old value kept).
+    var setParameter: @Sendable (UInt64, String, String) async throws(GraphEngineError) -> Void
     /// Delete an operator id, cascading its subtree.
     var deleteOperator: @Sendable (UInt64) async throws(GraphEngineError) -> Void
     /// Fetch the whole-graph mirror. Owns the allocate/free boundary — the
@@ -68,6 +71,12 @@ extension EngineClient: DependencyKey {
                 }
                 return try await EngineBridge.renameOperator(id: id, name: name)
             },
+            setParameter: { (id: UInt64, key: String, value: String) async throws(GraphEngineError) in
+                if GraphLaunchOptions.isMockEngineEnabled {
+                    return try await mock.setParameter(id: id, key: key, value: value)
+                }
+                return try await EngineBridge.setParameter(id: id, key: key, value: value)
+            },
             deleteOperator: { (id: UInt64) async throws(GraphEngineError) in
                 if GraphLaunchOptions.isMockEngineEnabled {
                     return try await mock.delete(id: id)
@@ -94,6 +103,7 @@ extension EngineClient: DependencyKey {
         createOperator: { _, _, _ in 1 },
         moveOperator: { _, _ in },
         renameOperator: { _, _ in },
+        setParameter: { _, _, _ in },
         deleteOperator: { _ in },
         requestSnapshot: { GraphSnapshot(operators: []) },
         restoreSnapshot: { _ in }

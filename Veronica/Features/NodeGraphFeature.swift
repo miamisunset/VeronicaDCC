@@ -42,6 +42,12 @@ struct NodeGraphFeature {
         var renaming: UInt64?
         /// Rename overlay draft text.
         var renameDraft = ""
+        /// Parameter-editor draft of the selected operator's name, seeded
+        /// from the mirror on selection.
+        var editorNameDraft = ""
+        /// True after the editor draft diverges from the mirror. A confirmed
+        /// round-trip re-seeds only while clean, so typing is never clobbered.
+        var editorDirty = false
         /// Monotonic epoch guarding snapshot responses against reordering.
         var snapshotEpoch: UInt64 = 0
         /// Last intent or persistence failure, shown in the status line.
@@ -91,6 +97,12 @@ struct NodeGraphFeature {
         case renameCommitted
         /// Rename overlay cancelled (Escape).
         case renameCancelled
+        /// Parameter-editor name draft changed.
+        case editorNameChanged(String)
+        /// Parameter-editor name committed (Enter or focus loss).
+        case editorNameCommitted
+        /// Parameter-editor edit reverted (Escape).
+        case editorNameReverted
         /// Delete key or menu requested deletion (cascades in Rust).
         case deleteRequested(UInt64)
     }
@@ -135,8 +147,17 @@ struct NodeGraphFeature {
                 case let .success(snapshot):
                     state.operators = snapshot.operators
                     state.lastError = nil
+                    // A clean editor follows the mirror; a dirty draft is the
+                    // user's unconfirmed typing and must survive the refresh.
+                    if !state.editorDirty {
+                        state.editorNameDraft = state.operators.first { $0.id == state.selected }?.name ?? ""
+                    }
                 case let .failure(error):
                     state.lastError = error.message
+                    // A failed round-trip may have cleared the dirty flag
+                    // optimistically (see `editorNameCommitted`): restore it
+                    // so the next success cannot clobber the typed value.
+                    state.editorDirty = true
                 }
                 return .none
 
@@ -149,24 +170,33 @@ struct NodeGraphFeature {
                 state.pendingCommit = nil
                 state.operators = snapshot.operators
                 state.lastError = error.message
+                // Same protection as the success path: only a clean editor
+                // follows the advanced mirror.
+                if !state.editorDirty {
+                    state.editorNameDraft = state.operators.first { $0.id == state.selected }?.name ?? ""
+                }
                 return .none
 
             case let .operatorSelected(id):
                 state.selected = id
+                seedEditor(&state)
                 return .none
 
             case let .diveRequested(id):
                 state.path.append(id)
+                seedEditor(&state)
                 return .none
 
             case let .breadcrumbSelected(depth):
                 state.path = Array(state.path.prefix(Swift.max(0, depth)))
+                seedEditor(&state)
                 return .none
 
             case .backToParent:
                 if !state.path.isEmpty {
                     state.path.removeLast()
                 }
+                seedEditor(&state)
                 return .none
 
             case let .panChanged(delta):
@@ -256,6 +286,8 @@ struct NodeGraphFeature {
             case let .deleteRequested(id):
                 if state.selected == id {
                     state.selected = nil
+                    state.editorNameDraft = ""
+                    state.editorDirty = false
                 }
                 state.snapshotEpoch += 1
                 return commit(
@@ -265,8 +297,43 @@ struct NodeGraphFeature {
                 ) { (client: EngineClient) async throws(GraphEngineError) in
                     try await client.deleteOperator(id)
                 }
+
+            case let .editorNameChanged(draft):
+                state.editorNameDraft = draft
+                state.editorDirty = true
+                return .none
+
+            case .editorNameCommitted:
+                // No-op unless the draft diverged and a selection exists.
+                guard state.editorDirty, let id = state.selected else {
+                    return .none
+                }
+                let draft = state.editorNameDraft
+                // Cleared optimistically; a failed round-trip restores it
+                // (see `snapshotResponse`) so the typed value survives.
+                state.editorDirty = false
+                state.snapshotEpoch += 1
+                return commit(
+                    engine: engine,
+                    persistence: persistence,
+                    epoch: state.snapshotEpoch
+                ) { (client: EngineClient) async throws(GraphEngineError) in
+                    try await client.setParameter(id, "name", draft)
+                }
+
+            case .editorNameReverted:
+                seedEditor(&state)
+                return .none
             }
         }
+    }
+
+    /// Seeds the parameter-editor draft from the selected mirror (`""` when
+    /// nothing or a dead id is selected) and marks it clean, discarding any
+    /// unconfirmed typing. Selection, dive, and revert paths enter here.
+    private func seedEditor(_ state: inout State) {
+        state.editorNameDraft = state.operators.first { $0.id == state.selected }?.name ?? ""
+        state.editorDirty = false
     }
 
     /// Runs one mutating intent, then refreshes the mirror, autosaves it,

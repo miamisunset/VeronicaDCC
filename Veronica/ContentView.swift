@@ -17,6 +17,10 @@ struct ContentView: View {
                 store: store.scope(state: \.nodeGraph, action: \.nodeGraph)
             )
             .frame(minWidth: 300, minHeight: 300)
+            ParameterEditorView(
+                store: store.scope(state: \.nodeGraph, action: \.nodeGraph)
+            )
+            .frame(minWidth: 240, minHeight: 300)
         }
         .navigationTitle("Veronica")
     }
