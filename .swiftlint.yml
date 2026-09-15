@@ -1,0 +1,29 @@
+included:
+  - Veronica
+  - VeronicaTests
+excluded:
+  - DerivedData
+  - .build
+  - Pods
+  - rust
+
+disabled_rules:
+  - line_length
+  - file_length
+  - type_body_length
+  - function_body_length
+  - cyclomatic_complexity
+  - identifier_name
+  - todo
+
+opt_in_rules:
+  - empty_count
+  - redundant_nil_coalescing
+  - first_where
+  - closure_spacing
+
+redundant_discardable_let:
+  ignore_swiftui_view_bodies: true
+
+# Swift 6 / TCA / SwiftUI: do NOT enable force_unwrapping, force_cast:error,
+# missing_docs, no_magic_numbers — they fight ViewBuilder and @Reducer idioms.

@@ -1,0 +1,76 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/veronica-core",
+  "crates/veronica-graph",
+  "crates/veronica-scene",
+  "crates/veronica-ffi",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+# Granular Bevy sub-crates only — never the `bevy` facade with DefaultPlugins.
+# Headless: no bevy_render / bevy_winit / bevy_window / bevy_pbr.
+bevy_ecs = "0.19"
+bevy_app = "0.19"
+bevy_transform = "0.19"
+bevy_asset = "0.19"
+bevy_mesh = "0.19"
+petgraph = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+cbindgen = "0.27"
+veronica-core = { path = "crates/veronica-core" }
+veronica-graph = { path = "crates/veronica-graph" }
+veronica-scene = { path = "crates/veronica-scene" }
+
+# Lint enforcement. Single source of truth — crates opt in via
+# `lints.workspace = true` (veronica-ffi keeps a manual copy because the
+# FFI boundary needs `unsafe`; see its Cargo.toml).
+#
+# Enforced with: `cargo clippy --workspace --all-targets -- -D warnings`
+# The toolchain is pinned in rust-toolchain.toml so new Clippy lints can't
+# break the build unexpectedly. `cargo fmt --check` is enforced the same way.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+# `correctness` is always an error; everything else warns locally and
+# becomes an error via `-D warnings` on CI. Group priority -1 lets
+# individual lints below take precedence (see clippy::lint_groups_priority).
+correctness = { level = "deny", priority = -1 }
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+# Unpublished app-internal crates: publish metadata is noise.
+cargo_common_metadata = "allow"
+# Transitive Bevy tree pulls duplicate versions (foldhash, hashbrown, syn);
+# not actionable from this workspace.
+multiple_crate_versions = "allow"
+# Cherry-picked restriction lints. Never enable the whole `restriction`
+# group — its lints contradict each other (e.g. big vs little endian).
+# Deferred candidates, not yet enforced: `indexing_slicing`.
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+unreachable = "warn"
+dbg_macro = "warn"
+get_unwrap = "warn"
+undocumented_unsafe_blocks = "warn"
+# Every suppression must carry a reason; no silent `#[allow]`.
+allow_attributes_without_reason = "warn"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

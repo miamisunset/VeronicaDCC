@@ -1,0 +1,17 @@
+# Workspace-wide Clippy tuning. Lives beside rust/Cargo.toml; Clippy finds it
+# by walking up from each crate directory.
+# Full option list: https://doc.rust-lang.org/clippy/configuration.html
+
+# Must match `rust-version` in Cargo.toml so Clippy never suggests APIs
+# newer than our MSRV.
+msrv = "1.95"
+
+# Default is 25; procedural evaluation functions legitimately branch.
+cognitive-complexity-threshold = 30
+
+# Test code may unwrap / panic / dbg freely; production code may not
+# (see `unwrap_used`, `expect_used`, `panic`, `dbg_macro` in Cargo.toml).
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-dbg-in-tests = true

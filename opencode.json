@@ -1,0 +1,20 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "xcodebuildmcp": {
+      "type": "local",
+      "command": ["npx", "-y", "xcodebuildmcp@latest", "mcp"],
+      "enabled": true
+    }
+  },
+  "permission": {
+    "skill": {
+      "*": "ask",
+      "rust-skills": "allow",
+      "swift-architecture-skill": "allow",
+      "swiftui-pro": "allow",
+      "swift-testing-pro": "allow",
+      "swift-api-design-guidelines-skill": "allow"
+    }
+  }
+}

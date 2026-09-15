@@ -1,0 +1,49 @@
+[package]
+name = "veronica-ffi"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "veronica"
+crate-type = ["staticlib"]
+
+# Manual mirror of `[workspace.lints]` in rust/Cargo.toml — keep in sync.
+# Cargo forbids mixing `lints.workspace = true` with overrides, and the FFI
+# boundary inherently needs `unsafe` (raw pointers, no_mangle exports).
+# Every unsafe block carries a `// SAFETY:` comment instead.
+[lints.rust]
+unsafe_code = "allow"
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+correctness = { level = "deny", priority = -1 }
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+# Unpublished app-internal crates: publish metadata is noise.
+cargo_common_metadata = "allow"
+# Transitive Bevy tree pulls duplicate versions (foldhash, hashbrown, syn);
+# not actionable from this workspace.
+multiple_crate_versions = "allow"
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+unreachable = "warn"
+dbg_macro = "warn"
+get_unwrap = "warn"
+undocumented_unsafe_blocks = "warn"
+allow_attributes_without_reason = "warn"
+
+[dependencies]
+veronica-core.workspace = true
+veronica-graph.workspace = true
+veronica-scene.workspace = true
+thiserror.workspace = true
+
+[build-dependencies]
+cbindgen.workspace = true
