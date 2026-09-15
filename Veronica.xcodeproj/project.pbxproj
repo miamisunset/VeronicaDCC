@@ -6,6 +6,10 @@
 	objectVersion = 110;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		FA3FC5B23059BC6500A21D85 /* ComposableArchitecture in Frameworks */ = {isa = PBXBuildFile; productRef = FA3FC5B13059BC6500A21D85 /* ComposableArchitecture */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		FA3FC5893059989200A21D85 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -51,6 +55,7 @@
 		FA3FC5783059989200A21D85 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			files = (
+				FA3FC5B23059BC6500A21D85 /* ComposableArchitecture in Frameworks */,
 			);
 		};
 		FA3FC5853059989200A21D85 /* Frameworks */ = {
@@ -103,6 +108,9 @@
 				FA3FC57D3059989200A21D85 /* Veronica */,
 			);
 			name = Veronica;
+			packageProductDependencies = (
+				FA3FC5B13059BC6500A21D85 /* ComposableArchitecture */,
+			);
 			productName = Veronica;
 			productReference = FA3FC57B3059989200A21D85 /* Veronica.app */;
 			productType = "com.apple.product-type.application";
@@ -181,6 +189,9 @@
 			);
 			mainGroup = FA3FC5723059989200A21D85;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				FA3FC5B03059BC6500A21D85 /* XCRemoteSwiftPackageReference "swift-composable-architecture" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = FA3FC57C3059989200A21D85 /* Products */;
 			projectDirPath = "";
@@ -547,6 +558,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		FA3FC5B03059BC6500A21D85 /* XCRemoteSwiftPackageReference "swift-composable-architecture" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/pointfreeco/swift-composable-architecture";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.26.2;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		FA3FC5B13059BC6500A21D85 /* ComposableArchitecture */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = FA3FC5B03059BC6500A21D85 /* XCRemoteSwiftPackageReference "swift-composable-architecture" */;
+			productName = ComposableArchitecture;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = FA3FC5733059989200A21D85 /* Project object */;
 	validationLevel = 1;
