@@ -1,5 +1,9 @@
 # AGENTS.md — Veronica
 
+## Branching (mandated)
+- Never commit or push directly to `main`. All work happens on short-lived feature branches (`<type>/<slug>`, e.g. `feat/node-graph-eval`) merged back via pull request.
+- `main` is protected on GitHub (no direct pushes, no force-pushes, PR review required). If protection is missing, re-enable it before merging anything.
+
 ## Mandated skills (load before touching code)
 Load via the `skill` tool; they are pre-allowed in `opencode.json`.
 - Any Rust work (write or review): `rust-skills`.
