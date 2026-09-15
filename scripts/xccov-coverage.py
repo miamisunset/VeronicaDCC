@@ -10,6 +10,14 @@ import json
 import subprocess
 import sys
 
+# First-party targets only: SPM dependencies (TCA and its transitive tree)
+# ship inside the same bundle report with ~0 exercised lines, which would
+# make any threshold meaningless. Third-party code is not ours to cover.
+# Names are product names as reported by `xccov` (`Veronica.app`, …).
+FIRST_PARTY_TARGETS = frozenset(
+    {"Veronica.app", "VeronicaTests.xctest", "VeronicaUITests.xctest"}
+)
+
 
 def main() -> int:
     bundle, threshold = sys.argv[1], float(sys.argv[2])
@@ -21,6 +29,8 @@ def main() -> int:
     ).stdout
     executable = covered = 0
     for target in json.loads(raw).get("targets", []):
+        if target.get("name") not in FIRST_PARTY_TARGETS:
+            continue
         for file in target.get("files", []):
             executable += file.get("executableLines", 0)
             covered += file.get("coveredLines", 0)

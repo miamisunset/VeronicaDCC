@@ -9,7 +9,10 @@ struct EngineBridgeTests {
         await #expect(!EngineBridge.validateMesh(positionsCount: 3, indicesCount: 4))
     }
 
-    @Test func tickCompletesOffMainActor() async {
-        await EngineBridge.tick()
+    @Test func tickWithStatsAdvancesMonotonicallyOffMainActor() async {
+        let first = await EngineBridge.tickWithStats()
+        let second = await EngineBridge.tickWithStats()
+        #expect(second.tickCount > first.tickCount)
+        #expect(first.entityCount == 3)
     }
 }

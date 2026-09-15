@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 
 /// Swift side of the Rust bridge.
 ///
@@ -16,6 +17,9 @@ nonisolated enum EngineBridge {
         qos: .userInitiated
     )
 
+    /// Serialized placeholder tick counter (engine queue only).
+    private static let tickCounter = Mutex<UInt64>(0)
+
     /// Validate mesh buffer sizes via Rust without touching scene state.
     static func validateMesh(positionsCount: Int, indicesCount: Int) async -> Bool {
         await withCheckedContinuation { continuation in
@@ -28,12 +32,21 @@ nonisolated enum EngineBridge {
         }
     }
 
-    /// Tick the headless scene once, off the main actor.
-    static func tick() async {
+    /// Tick once and return mirrored scene stats, off the main actor.
+    ///
+    /// Placeholder until `libveronica.a` is linked: advances a local counter
+    /// and reports the Rust-owned demo scene size (camera, light, cube).
+    /// Becomes `vrn_tick` + `vrn_tick_count` + `vrn_entity_count`.
+    static func tickWithStats() async -> SceneStats {
         await withCheckedContinuation { continuation in
             engineQueue.async {
-                // Becomes `vrn_tick(context)` once the staticlib is linked.
-                continuation.resume()
+                let tick = tickCounter.withLock { counter in
+                    counter += 1
+                    return counter
+                }
+                continuation.resume(
+                    returning: SceneStats(tickCount: tick, entityCount: 3)
+                )
             }
         }
     }

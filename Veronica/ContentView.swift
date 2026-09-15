@@ -1,25 +1,31 @@
-//
-//  ContentView.swift
-//  Veronica
-//
-//  Created by Alex Yermolaev on 9/15/26.
-//
-
+import ComposableArchitecture
 import SwiftUI
 
+/// Main window: Houdini-style split — Bevy viewport left, node graph right.
+///
+/// The divider is freely resizable with sensible minimums on both panes.
 struct ContentView: View {
+    @Bindable var store: StoreOf<AppFeature>
+
     var body: some View {
-        VStack {
-            Image(systemName: "globe")
-                .imageScale(.large)
-                .foregroundStyle(.tint)
-                .accessibilityHidden(true)
-            Text("Hello, world!")
+        HSplitView {
+            ViewportView(
+                store: store.scope(state: \.viewport, action: \.viewport)
+            )
+            .frame(minWidth: 300, minHeight: 300)
+            NodeGraphView(
+                store: store.scope(state: \.nodeGraph, action: \.nodeGraph)
+            )
+            .frame(minWidth: 300, minHeight: 300)
         }
-        .padding()
+        .navigationTitle("Veronica")
     }
 }
 
 #Preview {
-    ContentView()
+    ContentView(
+        store: Store(initialState: AppFeature.State()) {
+            AppFeature()
+        }
+    )
 }
