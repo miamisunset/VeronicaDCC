@@ -1,0 +1,6 @@
+# Tests + Previews may force-unwrap (XCTUnwrap, fixtures). Production code may not.
+disabled_rules:
+  - force_unwrapping
+  - force_try
+  - force_cast
+  - implicitly_unwrapped_optional

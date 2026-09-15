@@ -38,11 +38,29 @@ No `Cargo.toml`, no Rust bridge, no node-graph/viewport code yet. First backend 
 - Deployment target `MACOSX_DEPLOYMENT_TARGET=27.0`, `SDKROOT=macosx`, bundle `com.github.miamisunset.Veronica`. Keep new targets consistent.
 - `ENABLE_USER_SCRIPT_SANDBOXING=YES` — custom build phases needing network/fs access will fail unless allowlisted.
 
-## Rust error handling (mandated)
-- Every crate defines domain errors with `thiserror` (`#[derive(Error)]`); it is in `rust/` `[workspace.dependencies]` — add it to any new crate's `[dependencies]`.
-- `anyhow` is banned in library crates; allowed only in future binaries/harnesses at the edge.
-- No `unwrap()` / `expect()` / `panic!()` in production code — enforced by Clippy (`unwrap_used`, `expect_used`, `panic` + `-D warnings`). Only tests and `build.rs` are exempt (see `rust/clippy.toml`, `build.rs` header).
-- FFI boundary maps errors to `VrnResult` codes; never propagate panics or Rust error types into Swift.
+## Rust best practices (mandated, researched 2026)
+Sources: Azure SDK for Rust guidelines (`azure.github.io/azure-sdk`), `rust-skills`.
+- Domain errors with `thiserror` in every crate (`#[derive(Error)]`); it is in `rust/` `[workspace.dependencies]` — add it to any new crate's `[dependencies]`. `anyhow` is banned in library crates; allowed only in future binaries/harnesses at the edge.
+- Propagate with `?` + `#[from]` / `#[source]`; match on error kinds, never on message strings; never `map_err` away the source chain.
+- Workspace lints are the only lint config (`[workspace.lints]` + `[lints] workspace = true`); `veronica-ffi` keeps a synced manual copy (Cargo forbids inherit+override). Enforced: `cargo clippy --workspace --all-targets -- -D warnings`.
+- Every `-> Result` documents `# Errors`; every `unsafe fn` documents `# Safety` plus `// SAFETY:` per block (enforced: `missing_errors_doc`, `undocumented_unsafe_blocks`).
+- `#[must_use]` on constructors, builders, validators, and pure fallibles (enforced: `must_use_candidate`).
+- Newtypes at I/O boundaries (`NodeId`, `MeshId`); parse, don't validate; accept `&str` / `&[T]`, never `&String` / `&Vec<T>`.
+- Edition 2024 FFI hygiene: `unsafe extern`, `#[unsafe(no_mangle)]`, minimal unsafe scope. FFI maps errors to `VrnResult` codes; never propagate panics or Rust error types into Swift.
+- Libraries emit `tracing` with structured fields — never install a subscriber, never log secrets; only binaries choose the subscriber.
+- Serde wire contract is explicit: `rename_all`, `default` on additive fields, deliberate enum tagging.
+
+## Swift best practices (mandated, researched 2026)
+Sources: Swift evolution (SE-0466 default isolation), TCA docs, SwiftLint rule directory.
+- Swift 6 language mode everywhere; no `@preconcurrency` as a permanent fix. Verify `SWIFT_TREAT_WARNINGS_AS_ERRORS=YES` at the next build-settings touch.
+- `Sendable` on all value-type models; `@unchecked Sendable` only with a `// SAFETY:` invariant comment.
+- No `try!` / `as!` / `!` in production — enforced as lint errors (`force_unwrapping/cast/try`). Only tests and `#Preview`s are exempt (child `.swiftlint.yml`s).
+- Isolation by default: app target stays `MainActor`-isolated; background work explicitly `nonisolated` / detached (see `Veronica/Bridge/`).
+- TCA for new features: `@Reducer` + `@ObservableState`, `@Bindable` stores, `@Presents` destinations; `State: Sendable + Equatable`; effects capture snapshots, never mutable state.
+- `@Observable`, never `ObservableObject` / `@Published`, for non-TCA view models.
+- Swift Testing (`@Test` / `#expect` / `#require`, parameterized over copy-paste) for unit tests; XCTest only for `XCUIApplication` UI tests and perf metrics.
+- Typed `throws(MyError)` at fallible domain boundaries; `precondition` (not `fatalError`) for programmer errors.
+- Enforcement lives in `.swiftlint.yml` (`strict: true`); never `only_rules`; SwiftUI-noisy rules stay disabled with reasons in the config comments.
 
 ## Lint + test gates (all mandatory, both languages)
 - Swift lint: `swiftlint lint` from repo root (config `.swiftlint.yml`) — zero violations.
