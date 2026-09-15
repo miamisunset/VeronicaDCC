@@ -162,6 +162,13 @@ struct NodeGraphFeature {
                 return .none
 
             case let .panChanged(delta):
+                // A box drag fires the background pan gesture from the same
+                // touch (simultaneous gestures). While a preview is live the
+                // preview owns all movement; applying the pan too would move
+                // the dragged box twice and drift every other box.
+                guard state.dragPreview == nil else {
+                    return .none
+                }
                 state.panOffset.width += delta.width
                 state.panOffset.height += delta.height
                 return .none

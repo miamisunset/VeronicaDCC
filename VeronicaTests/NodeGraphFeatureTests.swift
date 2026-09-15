@@ -296,8 +296,28 @@ struct NodeGraphFeatureTests {
         #expect(recorded == [IntentRecorder.Moved(id: 1, position: commit)])
     }
 
-    @Test func dragCancelledClearsPreview() async {
+    @Test func panIsIgnoredWhileDragPreviewIsLive() async {
+        let preview = GraphPosition(x: 40, y: 30)
         var state = NodeGraphFeature.State()
+        state.dragPreview = NodeGraphFeature.DragPreview(id: 1, position: preview)
+        let store = TestStore(initialState: state) {
+            NodeGraphFeature()
+        }
+        // The background pan gesture fires from the same touch as a box
+        // drag; while the preview owns the movement these deltas must not
+        // shift the canvas (no state change, so no trailing closure).
+        await store.send(.panChanged(delta: CGSize(width: 25, height: -10)))
+        #expect(store.state.panOffset == .zero)
+        await store.send(.dragCancelled) {
+            $0.dragPreview = nil
+        }
+        // Pan works again once the drag is over.
+        await store.send(.panChanged(delta: CGSize(width: 25, height: -10))) {
+            $0.panOffset = CGSize(width: 25, height: -10)
+        }
+    }
+
+    @Test func dragCancelledClearsPreview() async {        var state = NodeGraphFeature.State()
         state.dragPreview = NodeGraphFeature.DragPreview(
             id: 1,
             position: GraphPosition(x: 40, y: 30)
