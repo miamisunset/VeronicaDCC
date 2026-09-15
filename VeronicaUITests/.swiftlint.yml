@@ -1,0 +1,6 @@
+# UI tests drive the real app; fixtures and queries may force-unwrap.
+disabled_rules:
+  - force_unwrapping
+  - force_try
+  - force_cast
+  - implicitly_unwrapped_optional

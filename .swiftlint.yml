@@ -1,6 +1,13 @@
+# Enforcement without guessing: the compiler (Swift 6 mode, MainActor default,
+# strict memory safety) plus this file. Gate: `swiftlint lint` (`strict: true`
+# below turns warnings into errors). Never use `only_rules` — it silently
+# drops new defaults.
+strict: true
+
 included:
   - Veronica
   - VeronicaTests
+  - VeronicaUITests
 excluded:
   - DerivedData
   - .build
@@ -8,22 +15,43 @@ excluded:
   - rust
 
 disabled_rules:
-  - line_length
-  - file_length
-  - type_body_length
-  - function_body_length
-  - cyclomatic_complexity
-  - identifier_name
-  - todo
+  # Noisy in SwiftUI/TCA by documented experience — enforced by review instead:
+  - line_length # punishes SwiftUI DSL + Previews
+  - file_length # TCA features + views are legitimately long
+  - type_body_length # same
+  - function_body_length # same
+  - function_parameter_count # punishes SwiftUI init + reducer deps
+  - cyclomatic_complexity # punishes exhaustive TCA reduce switches
+  - multiple_closures_with_trailing_closure # fights SwiftUI trailing-closure idiom
+  - identifier_name # false-positives on TCA State/Action idioms
+  - todo # track in issues, not lint
 
 opt_in_rules:
-  - empty_count
-  - redundant_nil_coalescing
+  # Safe as errors in SwiftUI/TCA (verified on this repo):
+  - sorted_imports
+  - modifier_order
   - first_where
-  - closure_spacing
+  - last_where
+  - empty_count
+  - contains_over_filter_count
+  - contains_over_first_not_nil
+  - redundant_nil_coalescing
+  - redundant_type_annotation
+  - shorthand_optional_binding
+  - unneeded_parentheses_in_closure_argument
+  - force_unwrapping # opt-in per SwiftLint docs; error in prod, exempt in tests/Previews
+  - force_try
+  - implicitly_unwrapped_optional
+  - untyped_error_in_catch
+  - unhandled_throwing_task
+  - accessibility_label_for_image
+  - accessibility_trait_for_button
+  - private_swiftui_state
+
+# Production force-ops are errors. Tests + Previews exempt via child configs.
+force_unwrapping: error
+force_cast: error
+force_try: error
 
 redundant_discardable_let:
-  ignore_swiftui_view_bodies: true
-
-# Swift 6 / TCA / SwiftUI: do NOT enable force_unwrapping, force_cast:error,
-# missing_docs, no_magic_numbers — they fight ViewBuilder and @Reducer idioms.
+  ignore_swiftui_view_bodies: true # required: fixes #Preview/ViewBuilder false positives
