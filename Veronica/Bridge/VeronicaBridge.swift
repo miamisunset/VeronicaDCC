@@ -76,8 +76,8 @@ nonisolated enum EngineBridge {
     //
     // The prebuilt `libveronica.a` (OTHER_LDFLAGS `-lveronica`) backs these;
     // a missing symbol fails the LINK, never silently at runtime. Signatures
-    // were verified against the header and ADR-0002 (the `char *` inputs are
-    // read-only on both sides despite the non-const pointer type).
+    // were verified against the generated header and ADR-0002: the string
+    // inputs are `const char *` (read-only on both sides).
     @_silgen_name("vrn_context_create")
     nonisolated private static func vrnContextCreate() -> UnsafeMutableRawPointer?
     @_silgen_name("vrn_graph_create_operator")

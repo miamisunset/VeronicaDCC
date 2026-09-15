@@ -236,14 +236,13 @@ struct NodeGraphView: View {
     /// Dotted background grid, shifted by the Swift-local pan offset.
     private func drawGrid(context: inout GraphicsContext, size: CGSize, pan: CGSize) {
         let spacing = GraphCanvasLayout.gridSpacing
-        func origin(_ pan: Double, _ length: Double) -> Double {
+        func origin(_ pan: Double) -> Double {
             let remainder = pan.truncatingRemainder(dividingBy: spacing)
-            let start = remainder <= 0 ? remainder : remainder - spacing
-            return Swift.min(start, length)
+            return remainder <= 0 ? remainder : remainder - spacing
         }
         var dots = Path()
-        let startX = origin(pan.width, size.width)
-        let startY = origin(pan.height, size.height)
+        let startX = origin(pan.width)
+        let startY = origin(pan.height)
         for x in stride(from: startX, to: size.width, by: spacing) {
             for y in stride(from: startY, to: size.height, by: spacing) {
                 dots.addRect(CGRect(x: x, y: y, width: 1.5, height: 1.5))

@@ -31,6 +31,9 @@ pub enum GraphError {
     /// A rename (or snapshot entry) carried an empty or blank name.
     #[error("operator name must not be empty")]
     EmptyName,
+    /// A snapshot carried the same id twice.
+    #[error("duplicate node: {0:?}")]
+    DuplicateNode(NodeId),
     /// A snapshot was written by an incompatible format version.
     #[error("unsupported graph snapshot version: {0}")]
     UnsupportedVersion(u32),
@@ -382,17 +385,27 @@ impl OperatorGraph {
     /// # Errors
     ///
     /// Returns [`GraphError::UnsupportedVersion`] when `snapshot.version` is
-    /// not [`GRAPH_SNAPSHOT_VERSION`], or [`GraphError::UnknownNode`] for a
-    /// zero id or a dangling parent/edge reference.
+    /// not [`GRAPH_SNAPSHOT_VERSION`], [`GraphError::DuplicateNode`] for a
+    /// repeated id, [`GraphError::EmptyName`] for a blank entry name, or
+    /// [`GraphError::UnknownNode`] for a zero id or a dangling
+    /// parent/edge reference.
     pub fn restore(&mut self, snapshot: GraphSnapshot) -> Result<(), GraphError> {
         if snapshot.version != GRAPH_SNAPSHOT_VERSION {
             return Err(GraphError::UnsupportedVersion(snapshot.version));
         }
         let ids: HashSet<NodeId> = snapshot.operators.iter().map(|o| o.id).collect();
+        let mut seen = HashSet::new();
         for operator in &snapshot.operators {
+            if !seen.insert(operator.id) {
+                return Err(GraphError::DuplicateNode(operator.id));
+            }
             // `NodeId(0)` is the FFI root-parent sentinel, never an operator.
             if operator.id == NodeId(0) {
                 return Err(GraphError::UnknownNode(operator.id));
+            }
+            // The rename path rejects blank names; restore holds the line too.
+            if operator.name.trim().is_empty() {
+                return Err(GraphError::EmptyName);
             }
             if let Some(parent) = operator.parent
                 && !ids.contains(&parent)
@@ -605,6 +618,49 @@ mod operator_tests {
             graph.restore(dangling),
             Err(GraphError::UnknownNode(NodeId(7)))
         );
+        assert!(graph.is_empty());
+    }
+
+    #[test]
+    fn restore_rejects_duplicate_ids_and_blank_names() {
+        let mut graph = OperatorGraph::new();
+        let duplicate = GraphSnapshot {
+            version: GRAPH_SNAPSHOT_VERSION,
+            operators: vec![
+                Operator::new(
+                    NodeId(1),
+                    OperatorKind::Container,
+                    "First",
+                    None,
+                    position(0.0, 0.0),
+                ),
+                Operator::new(
+                    NodeId(1),
+                    OperatorKind::Container,
+                    "Second",
+                    None,
+                    position(1.0, 1.0),
+                ),
+            ],
+            edges: vec![],
+        };
+        assert_eq!(
+            graph.restore(duplicate),
+            Err(GraphError::DuplicateNode(NodeId(1)))
+        );
+
+        let blank = GraphSnapshot {
+            version: GRAPH_SNAPSHOT_VERSION,
+            operators: vec![Operator::new(
+                NodeId(1),
+                OperatorKind::Container,
+                "   ",
+                None,
+                position(0.0, 0.0),
+            )],
+            edges: vec![],
+        };
+        assert_eq!(graph.restore(blank), Err(GraphError::EmptyName));
         assert!(graph.is_empty());
     }
 

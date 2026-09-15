@@ -158,14 +158,18 @@ final class NodeGraphFlowTests: XCTestCase {
         XCTAssertTrue(element(relaunch, "breadcrumbSegment-0").waitForExistence(timeout: 5))
         XCTAssertTrue(element(relaunch, "operatorBox-2").waitForExistence(timeout: 5))
 
-        // Delete key removes the selection, cascading the subtree.
+        // Delete key removes the selection, cascading the subtree. Still
+        // dived in: box 1 is already hidden, so the nested box disappearing
+        // plus the empty hint is the in-session proof (box 1's absence here
+        // would pass vacuously).
         relaunch.typeKey(.delete, modifierFlags: [])
-        let gone = expectation(
+        let nestedGone = expectation(
             for: NSPredicate(format: "exists == false"),
-            evaluatedWith: element(relaunch, "operatorBox-1"),
+            evaluatedWith: element(relaunch, "operatorBox-2"),
             handler: nil
         )
-        wait(for: [gone], timeout: 5)
+        wait(for: [nestedGone], timeout: 5)
+        XCTAssertTrue(element(relaunch, "nodeGraphEmptyHint").waitForExistence(timeout: 5))
 
         // A final relaunch proves the empty graph persisted.
         relaunch.terminate()

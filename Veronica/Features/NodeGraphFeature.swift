@@ -56,6 +56,9 @@ struct NodeGraphFeature {
         case appeared
         /// Snapshot fetch or post-mutation refresh answered.
         case snapshotResponse(Result<GraphSnapshot, GraphEngineError>, epoch: UInt64)
+        /// Post-mutation refresh answered but autosave failed: the mirror
+        /// still advances (the engine already committed) and the error shows.
+        case snapshotSaveFailed(GraphSnapshot, GraphEngineError, epoch: UInt64)
         /// Click selected a box, or background cleared the selection.
         case operatorSelected(UInt64?)
         /// Double-click dove into a container. Never touches FFI.
@@ -128,6 +131,16 @@ struct NodeGraphFeature {
                 case let .failure(error):
                     state.lastError = error.message
                 }
+                return .none
+
+            case let .snapshotSaveFailed(snapshot, error, epoch):
+                // Same ordering guard: a delayed save-failure must not
+                // overwrite a newer mirror either.
+                guard epoch == state.snapshotEpoch else {
+                    return .none
+                }
+                state.operators = snapshot.operators
+                state.lastError = error.message
                 return .none
 
             case let .operatorSelected(id):
@@ -240,6 +253,10 @@ struct NodeGraphFeature {
 
     /// Runs one mutating intent, then refreshes the mirror, autosaves it,
     /// and reports the outcome epoch-guarded.
+    ///
+    /// A failed autosave still delivers the fresh mirror: the engine already
+    /// committed, so the UI must not show stale boxes. The persistence error
+    /// travels alongside instead of replacing the snapshot.
     private func commit(
         engine: EngineClient,
         persistence: GraphPersistence,
@@ -250,7 +267,12 @@ struct NodeGraphFeature {
             do {
                 try await operation(engine)
                 let snapshot = try await engine.requestSnapshot()
-                try await persistence.save(snapshot)
+                do {
+                    try await persistence.save(snapshot)
+                } catch let error as GraphEngineError {
+                    await send(.snapshotSaveFailed(snapshot, error, epoch: epoch))
+                    return
+                }
                 await send(.snapshotResponse(.success(snapshot), epoch: epoch))
             } catch let error as GraphEngineError {
                 await send(.snapshotResponse(.failure(error), epoch: epoch))

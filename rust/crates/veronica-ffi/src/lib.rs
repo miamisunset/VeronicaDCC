@@ -396,8 +396,8 @@ pub unsafe extern "C" fn vrn_graph_snapshot(
 /// Replace the whole graph from versioned JSON (launch-load path).
 ///
 /// Rejects `version != 1` and malformed payloads with
-/// [`VrnResult::InvalidArgument`]; the pre-image is pushed first so a bad
-/// file never destroys an undoable state silently.
+/// [`VrnResult::InvalidArgument`]; the pre-image is pushed only when restore
+/// succeeds, so a bad file neither destroys state nor pollutes history.
 ///
 /// # Safety
 ///
@@ -430,9 +430,11 @@ pub unsafe extern "C" fn vrn_graph_restore(
         return VrnResult::Internal;
     };
     let before = ctx.operator_graph.snapshot();
-    ctx.graph_history.push(before);
     match ctx.operator_graph.restore(snapshot) {
-        Ok(()) => VrnResult::Ok,
+        Ok(()) => {
+            ctx.graph_history.push(before);
+            VrnResult::Ok
+        }
         Err(_) => VrnResult::InvalidArgument,
     }
 }

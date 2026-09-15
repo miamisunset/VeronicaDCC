@@ -75,8 +75,7 @@ struct MockGraphEngineTests {
         #expect(snapshot.operators.map(\.name) == ["Container", "Container"])
     }
 
-    @Test func createRejectsUnknownKindAndParent() async {
-        let engine = MockGraphEngine()
+    @Test func createRejectsUnknownKindAndParent() async {        let engine = MockGraphEngine()
         await #expect(throws: GraphEngineError.self) {
             try await engine.create(
                 kind: "blur",
@@ -91,6 +90,57 @@ struct MockGraphEngineTests {
                 position: GraphPosition(x: 0, y: 0)
             )
         }
+    }
+
+    @Test func restoreRejectsZeroDuplicateBlankAndDangling() async {
+        let engine = MockGraphEngine()
+        func snapshot(operators: [OperatorMirror]) -> GraphSnapshot {
+            GraphSnapshot(operators: operators)
+        }
+        let good = OperatorMirror(
+            id: 1,
+            kind: "container",
+            name: "Root",
+            parent: nil,
+            position: GraphPosition(x: 0, y: 0)
+        )
+        await #expect(throws: GraphEngineError.self) {
+            try await engine.restore(snapshot(operators: [
+                OperatorMirror(
+                    id: 0,
+                    kind: "container",
+                    name: "Zero",
+                    parent: nil,
+                    position: GraphPosition(x: 0, y: 0)
+                )
+            ]))
+        }
+        await #expect(throws: GraphEngineError.self) {
+            try await engine.restore(snapshot(operators: [good, good]))
+        }
+        await #expect(throws: GraphEngineError.self) {
+            try await engine.restore(snapshot(operators: [
+                OperatorMirror(
+                    id: 2,
+                    kind: "container",
+                    name: "   ",
+                    parent: nil,
+                    position: GraphPosition(x: 0, y: 0)
+                )
+            ]))
+        }
+        await #expect(throws: GraphEngineError.self) {
+            try await engine.restore(snapshot(operators: [
+                OperatorMirror(
+                    id: 3,
+                    kind: "container",
+                    name: "Orphan",
+                    parent: 999,
+                    position: GraphPosition(x: 0, y: 0)
+                )
+            ]))
+        }
+        #expect(await engine.snapshot().operators.isEmpty)
     }
 
     @Test func moveRenameDeleteFlow() async throws {

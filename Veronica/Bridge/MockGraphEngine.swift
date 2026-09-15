@@ -89,10 +89,29 @@ actor MockGraphEngine {
         GraphSnapshot(operators: operators.values.sorted { $0.id < $1.id })
     }
 
-    /// Replaces the whole DAG. Rejects `version != 1`.
+    /// Replaces the whole DAG. Rejects `version != 1`, zero ids, blank
+    /// names, and dangling parent/edge references — mirroring Rust so the
+    /// double never accepts what the engine rejects.
     func restore(_ snapshot: GraphSnapshot) throws(GraphEngineError) {
         guard snapshot.version == GraphSnapshot.currentVersion else {
             throw .ffiFailed(operation: "vrn_graph_restore", code: 2)
+        }
+        let ids = Set(snapshot.operators.map(\.id))
+        guard !ids.contains(0), ids.count == snapshot.operators.count else {
+            throw .ffiFailed(operation: "vrn_graph_restore", code: 2)
+        }
+        for mirrored in snapshot.operators {
+            guard !mirrored.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw .ffiFailed(operation: "vrn_graph_restore", code: 2)
+            }
+            if let parent = mirrored.parent, !ids.contains(parent) {
+                throw .ffiFailed(operation: "vrn_graph_restore", code: 2)
+            }
+        }
+        for edge in snapshot.edges {
+            guard edge.count == 2, ids.contains(edge[0]), ids.contains(edge[1]) else {
+                throw .ffiFailed(operation: "vrn_graph_restore", code: 2)
+            }
         }
         operators = Dictionary(uniqueKeysWithValues: snapshot.operators.map { ($0.id, $0) })
         nextId = (snapshot.operators.map(\.id).max() ?? 0) + 1

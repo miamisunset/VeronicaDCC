@@ -234,6 +234,33 @@ struct NodeGraphFeatureTests {
         #expect(await recorder.saved == [snapshot])
     }
 
+    @Test func failedAutosaveStillAdvancesMirror() async {
+        let created = container(id: 42, x: 120, y: 100)
+        let snapshot = GraphSnapshot(operators: [created])
+        let store = TestStore(initialState: NodeGraphFeature.State()) {
+            NodeGraphFeature()
+        } withDependencies: {
+            $0.engineClient.createOperator = { _, _, _ in 42 }
+            $0.engineClient.requestSnapshot = { snapshot }
+            $0.graphPersistence.save = { @Sendable (_: GraphSnapshot) async throws(GraphEngineError) in
+                throw GraphEngineError.persistenceFailed("disk full")
+            }
+        }
+        await store.send(
+            .createRequested(kind: "container", position: GraphPosition(x: 120, y: 100))
+        ) {
+            $0.snapshotEpoch = 1
+        }
+        // The engine committed, so the mirror advances even though the
+        // autosave failed; the persistence error shows in the status line.
+        await store.receive(
+            .snapshotSaveFailed(snapshot, .persistenceFailed("disk full"), epoch: 1)
+        ) {
+            $0.operators = snapshot.operators
+            $0.lastError = GraphEngineError.persistenceFailed("disk full").message
+        }
+    }
+
     @Test func dragPreviewsLocallyThenCommits() async {
         let recorder = IntentRecorder()
         let start = container(id: 1, x: 10, y: 10)
