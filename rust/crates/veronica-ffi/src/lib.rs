@@ -113,13 +113,13 @@ pub unsafe extern "C" fn vrn_tick(context: *mut Mutex<VrnContext>) -> VrnResult 
 
 /// Touch [`MeshId`] so the import stays live as the FFI surface grows.
 #[allow(dead_code, reason = "scaffold shim until the FFI surface grows")]
-fn _mesh_id_is_ffi_stable(id: MeshId) -> u64 {
+fn mesh_id_ffi_layout(id: MeshId) -> u64 {
     id.0
 }
 
 /// Touch [`MorphWeights`] so weight layout stays covered by this crate.
 #[allow(dead_code, reason = "scaffold shim until the FFI surface grows")]
-fn _morph_weights_is_ffi_stable(weights: &MorphWeights) -> usize {
+fn morph_weights_ffi_layout(weights: &MorphWeights) -> usize {
     weights.weights.len()
 }
 
@@ -157,9 +157,9 @@ mod tests {
 
     #[test]
     fn id_and_weight_layout_shims() {
-        assert_eq!(_mesh_id_is_ffi_stable(MeshId(7)), 7);
+        assert_eq!(mesh_id_ffi_layout(MeshId(7)), 7);
         assert_eq!(
-            _morph_weights_is_ffi_stable(&MorphWeights {
+            morph_weights_ffi_layout(&MorphWeights {
                 weights: vec![0.25]
             }),
             1

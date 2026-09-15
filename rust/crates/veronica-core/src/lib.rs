@@ -156,6 +156,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "comparing against exact literal constants"
+    )]
     fn bone_transform_default_is_identity() {
         let transform = BoneTransform::default();
         assert_eq!(transform.translation, [0.0; 3]);
