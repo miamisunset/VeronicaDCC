@@ -48,6 +48,10 @@ struct NodeGraphFeature {
         /// True after the editor draft diverges from the mirror. A confirmed
         /// round-trip re-seeds only while clean, so typing is never clobbered.
         var editorDirty = false
+        /// Epoch of the in-flight editor commit, if any. Only the matching
+        /// response may restore the optimistically cleared dirty flag, so
+        /// unrelated intent failures never dirty a clean editor.
+        var editorCommitEpoch: UInt64?
         /// Monotonic epoch guarding snapshot responses against reordering.
         var snapshotEpoch: UInt64 = 0
         /// Last intent or persistence failure, shown in the status line.
@@ -143,6 +147,10 @@ struct NodeGraphFeature {
                 // Any confirmed round-trip retires the pending position: the
                 // mirror below is authoritative again from here on.
                 state.pendingCommit = nil
+                // The editor commit this response answers (if any) is no
+                // longer in flight, whatever any newer commit did after it.
+                let editorLanded = state.editorCommitEpoch == epoch
+                state.editorCommitEpoch = nil
                 switch result {
                 case let .success(snapshot):
                     state.operators = snapshot.operators
@@ -154,10 +162,13 @@ struct NodeGraphFeature {
                     }
                 case let .failure(error):
                     state.lastError = error.message
-                    // A failed round-trip may have cleared the dirty flag
-                    // optimistically (see `editorNameCommitted`): restore it
-                    // so the next success cannot clobber the typed value.
-                    state.editorDirty = true
+                    // Only the failed editor commit restores the
+                    // optimistically cleared flag (see
+                    // `editorNameCommitted`): the typed value survives, and
+                    // unrelated failures leave a clean editor clean.
+                    if editorLanded {
+                        state.editorDirty = true
+                    }
                 }
                 return .none
 
@@ -168,6 +179,7 @@ struct NodeGraphFeature {
                     return .none
                 }
                 state.pendingCommit = nil
+                state.editorCommitEpoch = nil
                 state.operators = snapshot.operators
                 state.lastError = error.message
                 // Same protection as the success path: only a clean editor
@@ -288,6 +300,7 @@ struct NodeGraphFeature {
                     state.selected = nil
                     state.editorNameDraft = ""
                     state.editorDirty = false
+                    state.editorCommitEpoch = nil
                 }
                 state.snapshotEpoch += 1
                 return commit(
@@ -308,11 +321,22 @@ struct NodeGraphFeature {
                 guard state.editorDirty, let id = state.selected else {
                     return .none
                 }
-                let draft = state.editorNameDraft
-                // Cleared optimistically; a failed round-trip restores it
-                // (see `snapshotResponse`) so the typed value survives.
+                // Trim client-side like the rename overlay: the engines store
+                // values verbatim, so padding must never leave the client.
+                // Blank names are rejected at the FFI boundary; cancel
+                // locally instead of sending a doomed intent.
+                let draft = state.editorNameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !draft.isEmpty else {
+                    seedEditor(&state)
+                    return .none
+                }
+                state.editorNameDraft = draft
+                // Cleared optimistically; only the matching failed response
+                // restores it (see `snapshotResponse`) so the typed value
+                // survives.
                 state.editorDirty = false
                 state.snapshotEpoch += 1
+                state.editorCommitEpoch = state.snapshotEpoch
                 return commit(
                     engine: engine,
                     persistence: persistence,
@@ -331,9 +355,12 @@ struct NodeGraphFeature {
     /// Seeds the parameter-editor draft from the selected mirror (`""` when
     /// nothing or a dead id is selected) and marks it clean, discarding any
     /// unconfirmed typing. Selection, dive, and revert paths enter here.
+    /// Seeding establishes draft == mirror, so any in-flight editor commit
+    /// is moot from here on: late responses follow the normal clean rules.
     private func seedEditor(_ state: inout State) {
         state.editorNameDraft = state.operators.first { $0.id == state.selected }?.name ?? ""
         state.editorDirty = false
+        state.editorCommitEpoch = nil
     }
 
     /// Runs one mutating intent, then refreshes the mirror, autosaves it,

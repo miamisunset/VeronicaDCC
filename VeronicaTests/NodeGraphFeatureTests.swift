@@ -384,14 +384,15 @@ struct NodeGraphFeatureTests {
             $0.snapshotEpoch = 1
         }
         // The move failed, so the hold releases and the box falls back to
-        // the mirror with the error in the status line. The editor guards
-        // its draft by going dirty so the next success cannot clobber it.
+        // the mirror with the error in the status line. The failure is
+        // unrelated to the editor, so a clean editor stays clean.
         let failure = GraphEngineError.ffiFailed(operation: "requestSnapshot", code: 9)
         await store.receive(.snapshotResponse(.failure(failure), epoch: 1)) {
             $0.pendingCommit = nil
             $0.lastError = failure.message
-            $0.editorDirty = true
         }
+        #expect(store.state.editorDirty == false)
+        #expect(store.state.editorNameDraft == "")
     }
 
     @Test func panIsIgnoredWhileDragPreviewIsLive() async {
@@ -575,8 +576,9 @@ struct NodeGraphFeatureTests {
         await store.receive(.snapshotResponse(.failure(failure), epoch: 1)) {
             $0.pendingCommit = nil
             $0.lastError = failure.message
-            $0.editorDirty = true
         }
+        // The failed drag is unrelated to the editor: clean stays clean.
+        #expect(store.state.editorDirty == false)
     }
 
     @Test func panAccumulatesAndHoverTracks() async {
@@ -649,20 +651,51 @@ struct NodeGraphFeatureTests {
             $0.editorNameDraft = "  Hero  "
             $0.editorDirty = true
         }
+        // Commit trims client-side like the rename overlay, normalizes the
+        // draft, and records the in-flight epoch for failure scoping.
         await store.send(.editorNameCommitted) {
+            $0.editorNameDraft = "Hero"
             $0.editorDirty = false
             $0.snapshotEpoch = 1
+            $0.editorCommitEpoch = 1
         }
-        // The confirmed mirror wins: the raw draft is replaced by the
-        // engine-trimmed name.
+        // The confirmed mirror wins: the draft already matches the
+        // client-trimmed name the intent carried.
         await store.receive(
             .snapshotResponse(.success(GraphSnapshot(operators: [renamed])), epoch: 1)
         ) {
             $0.operators = [renamed]
-            $0.editorNameDraft = "Hero"
+            $0.editorCommitEpoch = nil
         }
         let recorded = await recorder.parametersSet
-        #expect(recorded == [IntentRecorder.ParameterSet(id: 1, key: "name", value: "  Hero  ")])
+        #expect(recorded == [IntentRecorder.ParameterSet(id: 1, key: "name", value: "Hero")])
+    }
+
+    @Test func editorCommitBlankCancelsLocally() async {
+        let recorder = IntentRecorder()
+        var state = NodeGraphFeature.State()
+        state.operators = [container(id: 1, name: "Old")]
+        state.selected = 1
+        state.editorNameDraft = "Old"
+        let store = TestStore(initialState: state) {
+            NodeGraphFeature()
+        } withDependencies: {
+            $0.engineClient.setParameter = { id, key, value in
+                await recorder.recordSetParameter(id: id, key: key, value: value)
+            }
+        }
+        await store.send(.editorNameChanged("   ")) {
+            $0.editorNameDraft = "   "
+            $0.editorDirty = true
+        }
+        // Blank is rejected at the FFI boundary, so the commit cancels
+        // locally: the draft re-seeds from the mirror and no intent leaves
+        // (no effect to receive).
+        await store.send(.editorNameCommitted) {
+            $0.editorNameDraft = "Old"
+            $0.editorDirty = false
+        }
+        #expect(await recorder.parametersSet.isEmpty)
     }
 
     @Test func editorCommitFailureKeepsDraft() async {
@@ -683,10 +716,14 @@ struct NodeGraphFeatureTests {
         await store.send(.editorNameCommitted) {
             $0.editorDirty = false
             $0.snapshotEpoch = 1
+            $0.editorCommitEpoch = 1
         }
+        // Only the matching failed response restores the flag: this is the
+        // editor's own commit, so the typed value is protected.
         await store.receive(.snapshotResponse(.failure(failure), epoch: 1)) {
             $0.lastError = failure.message
             $0.editorDirty = true
+            $0.editorCommitEpoch = nil
         }
         #expect(store.state.editorNameDraft == "Typed")
         // A later success must not clobber the protected draft either.

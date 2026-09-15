@@ -66,23 +66,25 @@ actor MockGraphEngine {
     }
 
     /// Sets one string parameter. Unknown ids and blank keys are rejected;
-    /// the `"name"` key mirrors `rename` (trimmed, blank rejected, the old
-    /// value preserved on failure).
+    /// the `"name"` key mirrors `rename` (blank rejected, the old value
+    /// preserved on failure). Keys are trimmed and values stored verbatim,
+    /// mirroring Rust so the double never accepts what the engine rejects
+    /// or normalizes what it stores.
     func setParameter(id: UInt64, key: String, value: String) throws(GraphEngineError) {
         guard var mirrored = operators[id] else {
             throw .ffiFailed(operation: "setParameter", code: 2)
         }
-        guard !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        let trimmedKey = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedKey.isEmpty else {
             throw .ffiFailed(operation: "setParameter", code: 2)
         }
-        if key == "name" {
-            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else {
+        if trimmedKey == "name" {
+            guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 throw .ffiFailed(operation: "setParameter", code: 2)
             }
-            mirrored.name = trimmed
+            mirrored.name = value
         } else {
-            mirrored.parameters[key] = value
+            mirrored.parameters[trimmedKey] = value
         }
         operators[id] = mirrored
     }
