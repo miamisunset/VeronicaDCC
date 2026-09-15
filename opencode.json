@@ -14,7 +14,12 @@
       "swift-architecture-skill": "allow",
       "swiftui-pro": "allow",
       "swift-testing-pro": "allow",
-      "swift-api-design-guidelines-skill": "allow"
+      "swift-api-design-guidelines-skill": "allow",
+      "triage": "allow",
+      "to-spec": "allow",
+      "to-tickets": "allow",
+      "wayfinder": "allow",
+      "implement": "allow"
     }
   }
 }

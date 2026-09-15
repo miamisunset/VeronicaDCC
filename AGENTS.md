@@ -77,3 +77,17 @@ Sources: Swift evolution (SE-0466 default isolation), TCA docs, SwiftLint rule d
 - SwiftUI owns: node editor UI, viewport hosting, menus, document model. Bevy owns: procedural evaluation / scene data.
 - When creating the Rust side: new `rust/` Cargo workspace (edition 2024), Bevy as headless/staticlib dependency, exposed to Swift via UniFFI or C-ABI + `Veronica/Bridge/`. Do not embed Bevy event loop inside SwiftUI view hierarchy without a bridge layer.
 - Procedural graph state must live in Rust (single source of truth); Swift mirrors it read-only for rendering/editing. No dual-writable graph model.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in GitHub Issues (`miamisunset/VeronicaDCC`, via `gh`). See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Five canonical roles, label strings equal to role names. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: root `CONTEXT.md` + `docs/adr/`, created lazily. See `docs/agents/domain.md`.
