@@ -65,6 +65,30 @@ actor MockGraphEngine {
         operators[id] = mirrored
     }
 
+    /// Sets one string parameter. Unknown ids and blank keys are rejected;
+    /// the `"name"` key mirrors `rename` (blank rejected, the old value
+    /// preserved on failure). Keys are trimmed and values stored verbatim,
+    /// mirroring Rust so the double never accepts what the engine rejects
+    /// or normalizes what it stores.
+    func setParameter(id: UInt64, key: String, value: String) throws(GraphEngineError) {
+        guard var mirrored = operators[id] else {
+            throw .ffiFailed(operation: "setParameter", code: 2)
+        }
+        let trimmedKey = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedKey.isEmpty else {
+            throw .ffiFailed(operation: "setParameter", code: 2)
+        }
+        if trimmedKey == "name" {
+            guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw .ffiFailed(operation: "setParameter", code: 2)
+            }
+            mirrored.name = value
+        } else {
+            mirrored.parameters[trimmedKey] = value
+        }
+        operators[id] = mirrored
+    }
+
     /// Deletes an operator id, cascading its subtree.
     func delete(id: UInt64) throws(GraphEngineError) {
         guard operators[id] != nil else {
@@ -90,8 +114,8 @@ actor MockGraphEngine {
     }
 
     /// Replaces the whole DAG. Rejects `version != 1`, zero ids, blank
-    /// names, and dangling parent/edge references — mirroring Rust so the
-    /// double never accepts what the engine rejects.
+    /// names, blank parameter keys, and dangling parent/edge references —
+    /// mirroring Rust so the double never accepts what the engine rejects.
     func restore(_ snapshot: GraphSnapshot) throws(GraphEngineError) {
         guard snapshot.version == GraphSnapshot.currentVersion else {
             throw .ffiFailed(operation: "vrn_graph_restore", code: 2)
@@ -103,6 +127,11 @@ actor MockGraphEngine {
         for mirrored in snapshot.operators {
             guard !mirrored.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 throw .ffiFailed(operation: "vrn_graph_restore", code: 2)
+            }
+            for key in mirrored.parameters.keys {
+                guard !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw .ffiFailed(operation: "vrn_graph_restore", code: 2)
+                }
             }
             if let parent = mirrored.parent, !ids.contains(parent) {
                 throw .ffiFailed(operation: "vrn_graph_restore", code: 2)

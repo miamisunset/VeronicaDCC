@@ -50,6 +50,49 @@ final class NodeGraphFlowTests: XCTestCase {
         try runSliceFlow(mocked: false)
     }
 
+    /// Slice-1 parameter editor: create, select, edit the name in the third
+    /// pane, commit, and see the box follow (mock engine).
+    ///
+    /// Single-click selection is driven by double-click here (see the class
+    /// docs); the click also dives, so the rename is verified back at root.
+    @MainActor
+    func testParameterEditorRenamesSelection() throws {
+        let app = XCUIApplication()
+        app.launchArguments = launchArguments(mocked: true, reset: true)
+        app.launch()
+
+        XCTAssertTrue(element(app, "nodeGraphPane").waitForExistence(timeout: 10))
+        // No selection yet: the editor shows its empty state.
+        XCTAssertTrue(element(app, "parameterEmptyState").waitForExistence(timeout: 5))
+
+        try createContainer(app, at: rootOrigin)
+        let box1 = element(app, "operatorBox-1")
+        XCTAssertTrue(box1.waitForExistence(timeout: 5))
+
+        // Double-click selects (and dives); the editor mirrors the selection.
+        box1.doubleClick()
+        let field = element(app, "parameterNameField")
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        XCTAssertEqual(field.value as? String, "Container")
+
+        // Editing the field and committing renames through setParameter.
+        field.click()
+        app.typeKey("a", modifierFlags: .command)
+        app.typeText("Hero")
+        app.typeKey(.return, modifierFlags: [])
+        let committed = expectation(
+            for: NSPredicate(format: "value == %@", "Hero"),
+            evaluatedWith: field,
+            handler: nil
+        )
+        wait(for: [committed], timeout: 5)
+
+        // Back at root the box shows the new name.
+        element(app, "breadcrumbRoot").click()
+        XCTAssertTrue(box1.waitForExistence(timeout: 5))
+        XCTAssertEqual(box1.label, "Hero")
+    }
+
     /// Queries any descendant by accessibility identifier (fresh each call).
     private func element(_ app: XCUIApplication, _ identifier: String) -> XCUIElement {
         app.descendants(matching: .any)[identifier]

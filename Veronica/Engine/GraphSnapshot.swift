@@ -34,6 +34,37 @@ nonisolated struct OperatorMirror: Codable, Equatable, Sendable, Identifiable {
     var parent: UInt64?
     /// Canvas position owned by Rust.
     var position: GraphPosition
+    /// Per-operator parameter map (slice-1 parameter editor; string map).
+    /// Additive: absent on the wire decodes to empty.
+    var parameters: [String: String] = [:]
+
+    /// Creates a mirror. `parameters` defaults to empty for slice-1 call sites.
+    init(
+        id: UInt64,
+        kind: String,
+        name: String,
+        parent: UInt64?,
+        position: GraphPosition,
+        parameters: [String: String] = [:]
+    ) {
+        self.id = id
+        self.kind = kind
+        self.name = name
+        self.parent = parent
+        self.position = position
+        self.parameters = parameters
+    }
+
+    /// Decodes a mirror, tolerating a missing `parameters` key on additive reads.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UInt64.self, forKey: .id)
+        kind = try container.decode(String.self, forKey: .kind)
+        name = try container.decode(String.self, forKey: .name)
+        parent = try container.decodeIfPresent(UInt64.self, forKey: .parent)
+        position = try container.decode(GraphPosition.self, forKey: .position)
+        parameters = try container.decodeIfPresent([String: String].self, forKey: .parameters) ?? [:]
+    }
 }
 
 /// Whole-graph mirror decoded from `vrn_graph_snapshot` JSON (schema v1).

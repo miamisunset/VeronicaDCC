@@ -329,6 +329,63 @@ pub unsafe extern "C" fn vrn_graph_rename_operator(
     }
 }
 
+/// Set a string parameter on an operator; `key == "name"` renames.
+///
+/// Keys are trimmed, values stored verbatim (see
+/// [`OperatorGraph::set_parameter`]). Guards mirror
+/// [`vrn_graph_rename_operator`]: null → [`VrnResult::NullArgument`],
+/// non-UTF8, unknown id, blank key, or blank value on the rename path →
+/// [`VrnResult::InvalidArgument`], all before the pre-image history push.
+///
+/// # Safety
+///
+/// `context` must be a live pointer from [`vrn_context_create`] and `key`
+/// plus `value` valid NUL-terminated strings for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vrn_graph_set_parameter(
+    context: *mut VrnContextHandle,
+    id: u64,
+    key: *const c_char,
+    value: *const c_char,
+) -> VrnResult {
+    if context.is_null() || key.is_null() || value.is_null() {
+        return VrnResult::NullArgument;
+    }
+    // SAFETY: non-null; the caller guarantees a valid NUL-terminated string
+    // for the duration of the call.
+    let key_text = unsafe { CStr::from_ptr(key) };
+    let Ok(key) = key_text.to_str() else {
+        return VrnResult::InvalidArgument;
+    };
+    // SAFETY: non-null; the caller guarantees a valid NUL-terminated string
+    // for the duration of the call.
+    let value_text = unsafe { CStr::from_ptr(value) };
+    let Ok(value) = value_text.to_str() else {
+        return VrnResult::InvalidArgument;
+    };
+    // SAFETY: non-null pointer from `vrn_context_create`, still alive.
+    let mutex = unsafe { &(*context).0 };
+    let Ok(mut ctx) = mutex.lock() else {
+        return VrnResult::Internal;
+    };
+    let id = NodeId(id);
+    if ctx.operator_graph.operator(id).is_none() {
+        return VrnResult::InvalidArgument;
+    }
+    if key.trim().is_empty() {
+        return VrnResult::InvalidArgument;
+    }
+    if key.trim() == "name" && value.trim().is_empty() {
+        return VrnResult::InvalidArgument;
+    }
+    let before = ctx.operator_graph.snapshot();
+    ctx.graph_history.push(before);
+    match ctx.operator_graph.set_parameter(id, key, value) {
+        Ok(()) => VrnResult::Ok,
+        Err(_) => VrnResult::InvalidArgument,
+    }
+}
+
 /// Delete an operator and its whole subtree (cascade).
 ///
 /// # Safety
@@ -730,6 +787,10 @@ mod graph_tests {
                 VrnResult::NullArgument
             );
             assert_eq!(
+                vrn_graph_set_parameter(ptr::null_mut(), 1, ptr::null_mut(), ptr::null_mut()),
+                VrnResult::NullArgument
+            );
+            assert_eq!(
                 vrn_graph_delete_operator(ptr::null_mut(), 1),
                 VrnResult::NullArgument
             );
@@ -815,6 +876,143 @@ mod graph_tests {
             assert_eq!(snapshot_json(fresh), json);
             vrn_context_destroy(context);
             vrn_context_destroy(fresh);
+        }
+    }
+
+    #[test]
+    fn set_parameter_round_trip_is_visible_in_snapshot() {
+        let context = vrn_context_create();
+        assert!(!context.is_null());
+        let kind = cstring("container");
+        let key = cstring("label");
+        let value = cstring("Hero");
+        let name_key = cstring("name");
+        let renamed = cstring("Villain");
+        let mut id = 0u64;
+        // SAFETY: just created, alive, single-threaded test; strings outlive calls.
+        unsafe {
+            assert_eq!(
+                vrn_graph_create_operator(
+                    context,
+                    kind.as_ptr().cast_mut(),
+                    0,
+                    0.0,
+                    0.0,
+                    &raw mut id
+                ),
+                VrnResult::Ok
+            );
+            assert_eq!(
+                vrn_graph_set_parameter(
+                    context,
+                    id,
+                    key.as_ptr().cast_mut(),
+                    value.as_ptr().cast_mut()
+                ),
+                VrnResult::Ok
+            );
+            let json = snapshot_json(context);
+            assert!(json.contains(r#""label":"Hero""#));
+            // The `name` key delegates to the rename path.
+            assert_eq!(
+                vrn_graph_set_parameter(
+                    context,
+                    id,
+                    name_key.as_ptr().cast_mut(),
+                    renamed.as_ptr().cast_mut()
+                ),
+                VrnResult::Ok
+            );
+            let json = snapshot_json(context);
+            assert!(json.contains(r#""name":"Villain""#));
+            vrn_context_destroy(context);
+        }
+    }
+
+    #[test]
+    fn set_parameter_guards_map_to_result_codes() {
+        let context = vrn_context_create();
+        assert!(!context.is_null());
+        let kind = cstring("container");
+        let key = cstring("label");
+        let value = cstring("Hero");
+        let blank = cstring("   ");
+        let empty = cstring("");
+        let mut id = 0u64;
+        // SAFETY: just created, alive, single-threaded test; strings outlive calls.
+        unsafe {
+            assert_eq!(
+                vrn_graph_create_operator(
+                    context,
+                    kind.as_ptr().cast_mut(),
+                    0,
+                    0.0,
+                    0.0,
+                    &raw mut id
+                ),
+                VrnResult::Ok
+            );
+            // Null key / null value / null context.
+            assert_eq!(
+                vrn_graph_set_parameter(context, id, ptr::null_mut(), value.as_ptr().cast_mut()),
+                VrnResult::NullArgument
+            );
+            assert_eq!(
+                vrn_graph_set_parameter(context, id, key.as_ptr().cast_mut(), ptr::null_mut()),
+                VrnResult::NullArgument
+            );
+            assert_eq!(
+                vrn_graph_set_parameter(
+                    ptr::null_mut(),
+                    id,
+                    key.as_ptr().cast_mut(),
+                    value.as_ptr().cast_mut()
+                ),
+                VrnResult::NullArgument
+            );
+            // Unknown id.
+            assert_eq!(
+                vrn_graph_set_parameter(
+                    context,
+                    99,
+                    key.as_ptr().cast_mut(),
+                    value.as_ptr().cast_mut()
+                ),
+                VrnResult::InvalidArgument
+            );
+            // Blank keys rejected; blank rename values rejected too.
+            assert_eq!(
+                vrn_graph_set_parameter(
+                    context,
+                    id,
+                    blank.as_ptr().cast_mut(),
+                    value.as_ptr().cast_mut()
+                ),
+                VrnResult::InvalidArgument
+            );
+            assert_eq!(
+                vrn_graph_set_parameter(
+                    context,
+                    id,
+                    empty.as_ptr().cast_mut(),
+                    value.as_ptr().cast_mut()
+                ),
+                VrnResult::InvalidArgument
+            );
+            let name_key = cstring("name");
+            assert_eq!(
+                vrn_graph_set_parameter(
+                    context,
+                    id,
+                    name_key.as_ptr().cast_mut(),
+                    blank.as_ptr().cast_mut()
+                ),
+                VrnResult::InvalidArgument
+            );
+            // Rejected writes leave the snapshot untouched.
+            let json = snapshot_json(context);
+            assert!(!json.contains(r#""label""#));
+            vrn_context_destroy(context);
         }
     }
 

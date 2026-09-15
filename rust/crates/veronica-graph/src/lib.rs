@@ -6,7 +6,7 @@
 use petgraph::algo::toposort;
 use petgraph::graph::{DiGraph, NodeIndex};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use thiserror::Error;
 use veronica_core::NodeId;
 
@@ -31,6 +31,9 @@ pub enum GraphError {
     /// A rename (or snapshot entry) carried an empty or blank name.
     #[error("operator name must not be empty")]
     EmptyName,
+    /// A parameter key was empty or blank (symmetric with [`GraphError::EmptyName`]).
+    #[error("parameter key must not be empty")]
+    EmptyParameterKey,
     /// A snapshot carried the same id twice.
     #[error("duplicate node: {0:?}")]
     DuplicateNode(NodeId),
@@ -181,6 +184,12 @@ pub struct Operator {
     pub parent: Option<NodeId>,
     /// Canvas position in unbounded `f64` coordinates.
     pub position: Position,
+    /// String parameter map (slice 1: `ParameterEditor`).
+    ///
+    /// Sorted keys keep snapshots stable; missing on old payloads decodes
+    /// to an empty map via `default` (wire v1 stays).
+    #[serde(default)]
+    pub parameters: BTreeMap<String, String>,
 }
 
 impl Operator {
@@ -199,6 +208,7 @@ impl Operator {
             name: name.into(),
             parent,
             position,
+            parameters: BTreeMap::new(),
         }
     }
 }
@@ -334,6 +344,34 @@ impl OperatorGraph {
         Ok(())
     }
 
+    /// Set a string parameter on an operator.
+    ///
+    /// Keys are trimmed, values are stored verbatim. A trimmed key of
+    /// `"name"` delegates to the rename path ([`OperatorGraph::rename_operator`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GraphError::UnknownNode`] when `id` is not in the graph,
+    /// [`GraphError::EmptyParameterKey`] when `key` is empty or blank, or
+    /// [`GraphError::EmptyName`] when delegating to rename with a blank value.
+    pub fn set_parameter(&mut self, id: NodeId, key: &str, value: &str) -> Result<(), GraphError> {
+        let trimmed = key.trim();
+        if trimmed == "name" {
+            return self.rename_operator(id, value);
+        }
+        let operator = self
+            .operators
+            .get_mut(&id)
+            .ok_or(GraphError::UnknownNode(id))?;
+        if trimmed.is_empty() {
+            return Err(GraphError::EmptyParameterKey);
+        }
+        operator
+            .parameters
+            .insert(trimmed.to_owned(), value.to_owned());
+        Ok(())
+    }
+
     /// Delete an operator and its whole subtree.
     ///
     /// Children are operators whose `parent` chain leads to `id`; the visited
@@ -386,7 +424,8 @@ impl OperatorGraph {
     ///
     /// Returns [`GraphError::UnsupportedVersion`] when `snapshot.version` is
     /// not [`GRAPH_SNAPSHOT_VERSION`], [`GraphError::DuplicateNode`] for a
-    /// repeated id, [`GraphError::EmptyName`] for a blank entry name, or
+    /// repeated id, [`GraphError::EmptyName`] for a blank entry name,
+    /// [`GraphError::EmptyParameterKey`] for a blank parameter key, or
     /// [`GraphError::UnknownNode`] for a zero id or a dangling
     /// parent/edge reference.
     pub fn restore(&mut self, snapshot: GraphSnapshot) -> Result<(), GraphError> {
@@ -406,6 +445,10 @@ impl OperatorGraph {
             // The rename path rejects blank names; restore holds the line too.
             if operator.name.trim().is_empty() {
                 return Err(GraphError::EmptyName);
+            }
+            // Symmetric with blank-name rejection: blank parameter keys fail restore.
+            if operator.parameters.keys().any(|key| key.trim().is_empty()) {
+                return Err(GraphError::EmptyParameterKey);
             }
             if let Some(parent) = operator.parent
                 && !ids.contains(&parent)
@@ -748,5 +791,144 @@ mod operator_tests {
             .create_operator(OperatorKind::Container, None, position(0.0, 0.0))
             .unwrap();
         assert_eq!(next, NodeId(3));
+    }
+
+    #[test]
+    fn new_operators_start_with_empty_parameters() {
+        let mut graph = OperatorGraph::new();
+        let id = graph
+            .create_operator(OperatorKind::Container, None, position(0.0, 0.0))
+            .unwrap();
+        assert!(graph.operator(id).unwrap().parameters.is_empty());
+    }
+
+    #[test]
+    fn set_parameter_stores_custom_keys_verbatim_values() {
+        let mut graph = OperatorGraph::new();
+        let id = graph
+            .create_operator(OperatorKind::Container, None, position(0.0, 0.0))
+            .unwrap();
+        graph.set_parameter(id, "label", "  spaced  ").unwrap();
+        // Keys trim; values keep every byte.
+        graph.set_parameter(id, "  padded  ", "v").unwrap();
+        let operator = graph.operator(id).unwrap();
+        assert_eq!(operator.parameters["label"], "  spaced  ");
+        assert_eq!(operator.parameters["padded"], "v");
+        assert!(!operator.parameters.contains_key("  padded  "));
+    }
+
+    #[test]
+    fn set_parameter_name_key_delegates_to_rename() {
+        let mut graph = OperatorGraph::new();
+        let id = graph
+            .create_operator(OperatorKind::Container, None, position(0.0, 0.0))
+            .unwrap();
+        graph.set_parameter(id, "name", "Hero").unwrap();
+        assert_eq!(graph.operator(id).unwrap().name, "Hero");
+        // Padded "name" still renames.
+        graph.set_parameter(id, "  name  ", "Villain").unwrap();
+        assert_eq!(graph.operator(id).unwrap().name, "Villain");
+        // Blank rename values are rejected and preserve the old name.
+        assert_eq!(
+            graph.set_parameter(id, "name", "   "),
+            Err(GraphError::EmptyName)
+        );
+        assert_eq!(graph.operator(id).unwrap().name, "Villain");
+    }
+
+    #[test]
+    fn set_parameter_rejects_blank_keys_and_unknown_ids() {
+        let mut graph = OperatorGraph::new();
+        let id = graph
+            .create_operator(OperatorKind::Container, None, position(0.0, 0.0))
+            .unwrap();
+        assert_eq!(
+            graph.set_parameter(id, "", "v"),
+            Err(GraphError::EmptyParameterKey)
+        );
+        assert_eq!(
+            graph.set_parameter(id, "   ", "v"),
+            Err(GraphError::EmptyParameterKey)
+        );
+        assert_eq!(
+            graph.set_parameter(NodeId(99), "label", "v"),
+            Err(GraphError::UnknownNode(NodeId(99)))
+        );
+        assert_eq!(
+            graph.set_parameter(NodeId(99), "name", "Hero"),
+            Err(GraphError::UnknownNode(NodeId(99)))
+        );
+        // Failed writes leave existing parameters untouched.
+        assert!(graph.operator(id).unwrap().parameters.is_empty());
+    }
+
+    #[test]
+    fn restore_rejects_blank_parameter_keys() {
+        let mut graph = OperatorGraph::new();
+        let mut bad = Operator::new(
+            NodeId(1),
+            OperatorKind::Container,
+            "Hero",
+            None,
+            position(0.0, 0.0),
+        );
+        bad.parameters.insert(String::new(), "v".to_owned());
+        let snapshot = GraphSnapshot {
+            version: GRAPH_SNAPSHOT_VERSION,
+            operators: vec![bad],
+            edges: vec![],
+        };
+        assert_eq!(graph.restore(snapshot), Err(GraphError::EmptyParameterKey));
+        assert!(graph.is_empty());
+
+        let mut blank = Operator::new(
+            NodeId(1),
+            OperatorKind::Container,
+            "Hero",
+            None,
+            position(0.0, 0.0),
+        );
+        blank.parameters.insert("   ".to_owned(), "v".to_owned());
+        let snapshot = GraphSnapshot {
+            version: GRAPH_SNAPSHOT_VERSION,
+            operators: vec![blank],
+            edges: vec![],
+        };
+        assert_eq!(graph.restore(snapshot), Err(GraphError::EmptyParameterKey));
+        assert!(graph.is_empty());
+    }
+
+    #[test]
+    fn snapshot_round_trip_carries_parameters_bit_identical() {
+        let mut graph = OperatorGraph::new();
+        let id = graph
+            .create_operator(OperatorKind::Container, None, position(1.0, 2.0))
+            .unwrap();
+        graph.set_parameter(id, "label", "Hero").unwrap();
+        graph.set_parameter(id, "note", "  verbatim  ").unwrap();
+        let before = serde_json::to_string(&graph.snapshot()).unwrap();
+        let mut revived = OperatorGraph::new();
+        let parsed: GraphSnapshot = serde_json::from_str(&before).unwrap();
+        revived.restore(parsed).unwrap();
+        let after = serde_json::to_string(&revived.snapshot()).unwrap();
+        assert_eq!(before, after);
+        assert_eq!(
+            revived.operator(id).unwrap().parameters,
+            graph.operator(id).unwrap().parameters
+        );
+    }
+
+    #[test]
+    fn fixture_without_parameters_decodes_to_empty_map() {
+        let snapshot: GraphSnapshot = serde_json::from_str(
+            r#"{"version":1,"operators":[{"id":7,"kind":"container","name":"Hero","parent":null,"position":{"x":120.0,"y":80.0}}],"edges":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(snapshot.operators.len(), 1);
+        assert!(snapshot.operators[0].parameters.is_empty());
+        // Restoring the parameter-less payload succeeds.
+        let mut graph = OperatorGraph::new();
+        graph.restore(snapshot).unwrap();
+        assert!(graph.operator(NodeId(7)).unwrap().parameters.is_empty());
     }
 }

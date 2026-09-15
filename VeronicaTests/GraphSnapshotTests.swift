@@ -78,6 +78,30 @@ struct GraphSnapshotTests {
         #expect(decoded.edges.isEmpty)
     }
 
+    @Test func missingParametersDefaultsToEmpty() throws {
+        let json = """
+        {"version": 1, "operators": [
+            {"id": 1, "kind": "container", "name": "P",
+             "parent": null, "position": {"x": 1.0, "y": 2.0}}
+        ], "edges": []}
+        """
+        let decoded = try JSONDecoder().decode(GraphSnapshot.self, from: Data(json.utf8))
+        #expect(decoded.operators.first?.parameters == [:])
+    }
+
+    @Test func parametersSurviveRoundTrip() throws {
+        let mirrored = OperatorMirror(
+            id: 1, kind: "container", name: "P", parent: nil,
+            position: GraphPosition(x: 1, y: 2),
+            parameters: ["seed": "7"]
+        )
+        let snapshot = GraphSnapshot(operators: [mirrored])
+        let data = try JSONEncoder().encode(snapshot)
+        let roundTripped = try JSONDecoder().decode(GraphSnapshot.self, from: data)
+        #expect(roundTripped == snapshot)
+        #expect(roundTripped.operators.first?.parameters == ["seed": "7"])
+    }
+
     @Test func codableUsesDoubleNeverFloat() throws {
         // `position` must decode full `f64` precision, not `Float` mush.
         let json = """

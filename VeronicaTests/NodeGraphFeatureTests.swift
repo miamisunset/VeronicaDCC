@@ -33,12 +33,24 @@ private actor IntentRecorder {
         var name: String
     }
 
+    /// One set-parameter intent.
+    struct ParameterSet: Equatable, Sendable {
+        /// Target operator id.
+        var id: UInt64
+        /// Parameter key.
+        var key: String
+        /// Parameter value.
+        var value: String
+    }
+
     /// Created intents.
     var created: [Created] = []
     /// Moved intents.
     var moved: [Moved] = []
     /// Renamed intents.
     var renamed: [Renamed] = []
+    /// Set-parameter intents.
+    var parametersSet: [ParameterSet] = []
     /// Deleted ids.
     var deleted: [UInt64] = []
     /// Restored snapshots.
@@ -59,6 +71,11 @@ private actor IntentRecorder {
     /// Records a rename.
     func recordRename(id: UInt64, name: String) {
         renamed.append(Renamed(id: id, name: name))
+    }
+
+    /// Records a set-parameter intent.
+    func recordSetParameter(id: UInt64, key: String, value: String) {
+        parametersSet.append(ParameterSet(id: id, key: key, value: value))
     }
 
     /// Records a deletion.
@@ -367,12 +384,15 @@ struct NodeGraphFeatureTests {
             $0.snapshotEpoch = 1
         }
         // The move failed, so the hold releases and the box falls back to
-        // the mirror with the error in the status line.
+        // the mirror with the error in the status line. The failure is
+        // unrelated to the editor, so a clean editor stays clean.
         let failure = GraphEngineError.ffiFailed(operation: "requestSnapshot", code: 9)
         await store.receive(.snapshotResponse(.failure(failure), epoch: 1)) {
             $0.pendingCommit = nil
             $0.lastError = failure.message
         }
+        #expect(store.state.editorDirty == false)
+        #expect(store.state.editorNameDraft == "")
     }
 
     @Test func panIsIgnoredWhileDragPreviewIsLive() async {
@@ -528,6 +548,8 @@ struct NodeGraphFeatureTests {
             .snapshotResponse(.success(GraphSnapshot(operators: [survivor])), epoch: 1)
         ) {
             $0.operators = [survivor]
+            // A clean editor follows the confirmed mirror.
+            $0.editorNameDraft = "Container"
         }
         #expect(store.state.selected == 6)
     }
@@ -555,6 +577,8 @@ struct NodeGraphFeatureTests {
             $0.pendingCommit = nil
             $0.lastError = failure.message
         }
+        // The failed drag is unrelated to the editor: clean stays clean.
+        #expect(store.state.editorDirty == false)
     }
 
     @Test func panAccumulatesAndHoverTracks() async {
@@ -569,6 +593,250 @@ struct NodeGraphFeatureTests {
         }
         await store.send(.hoverPositionChanged(GraphPosition(x: 3, y: 4))) {
             $0.pendingCreatePosition = GraphPosition(x: 3, y: 4)
+        }
+    }
+
+    @Test func editorSeedsDraftOnSelection() async {
+        var state = NodeGraphFeature.State()
+        state.operators = [container(id: 1, name: "Old")]
+        let store = TestStore(initialState: state) {
+            NodeGraphFeature()
+        }
+        await store.send(.operatorSelected(1)) {
+            $0.selected = 1
+            $0.editorNameDraft = "Old"
+        }
+        await store.send(.operatorSelected(nil)) {
+            $0.selected = nil
+            $0.editorNameDraft = ""
+        }
+        // Dead ids seed empty instead of crashing or keeping a stale draft.
+        await store.send(.operatorSelected(999)) {
+            $0.selected = 999
+            $0.editorNameDraft = ""
+        }
+    }
+
+    @Test func editorDraftChangeMarksDirty() async {
+        var state = NodeGraphFeature.State()
+        state.operators = [container(id: 1, name: "Old")]
+        state.selected = 1
+        state.editorNameDraft = "Old"
+        let store = TestStore(initialState: state) {
+            NodeGraphFeature()
+        }
+        await store.send(.editorNameChanged("New")) {
+            $0.editorNameDraft = "New"
+            $0.editorDirty = true
+        }
+    }
+
+    @Test func editorCommitSendsSetParameterAndReseeds() async {
+        let recorder = IntentRecorder()
+        let renamed = container(id: 1, name: "Hero")
+        var state = NodeGraphFeature.State()
+        state.operators = [container(id: 1, name: "Old")]
+        state.selected = 1
+        state.editorNameDraft = "Old"
+        let store = TestStore(initialState: state) {
+            NodeGraphFeature()
+        } withDependencies: {
+            $0.engineClient.setParameter = { id, key, value in
+                await recorder.recordSetParameter(id: id, key: key, value: value)
+            }
+            $0.engineClient.requestSnapshot = { GraphSnapshot(operators: [renamed]) }
+            $0.graphPersistence.save = { _ in }
+        }
+        await store.send(.editorNameChanged("  Hero  ")) {
+            $0.editorNameDraft = "  Hero  "
+            $0.editorDirty = true
+        }
+        // Commit trims client-side like the rename overlay, normalizes the
+        // draft, and records the in-flight epoch for failure scoping.
+        await store.send(.editorNameCommitted) {
+            $0.editorNameDraft = "Hero"
+            $0.editorDirty = false
+            $0.snapshotEpoch = 1
+            $0.editorCommitEpoch = 1
+        }
+        // The confirmed mirror wins: the draft already matches the
+        // client-trimmed name the intent carried.
+        await store.receive(
+            .snapshotResponse(.success(GraphSnapshot(operators: [renamed])), epoch: 1)
+        ) {
+            $0.operators = [renamed]
+            $0.editorCommitEpoch = nil
+        }
+        let recorded = await recorder.parametersSet
+        #expect(recorded == [IntentRecorder.ParameterSet(id: 1, key: "name", value: "Hero")])
+    }
+
+    @Test func editorCommitBlankCancelsLocally() async {
+        let recorder = IntentRecorder()
+        var state = NodeGraphFeature.State()
+        state.operators = [container(id: 1, name: "Old")]
+        state.selected = 1
+        state.editorNameDraft = "Old"
+        let store = TestStore(initialState: state) {
+            NodeGraphFeature()
+        } withDependencies: {
+            $0.engineClient.setParameter = { id, key, value in
+                await recorder.recordSetParameter(id: id, key: key, value: value)
+            }
+        }
+        await store.send(.editorNameChanged("   ")) {
+            $0.editorNameDraft = "   "
+            $0.editorDirty = true
+        }
+        // Blank is rejected at the FFI boundary, so the commit cancels
+        // locally: the draft re-seeds from the mirror and no intent leaves
+        // (no effect to receive).
+        await store.send(.editorNameCommitted) {
+            $0.editorNameDraft = "Old"
+            $0.editorDirty = false
+        }
+        #expect(await recorder.parametersSet.isEmpty)
+    }
+
+    @Test func editorCommitFailureKeepsDraft() async {
+        let failure = GraphEngineError.ffiFailed(operation: "setParameter", code: 2)
+        var state = NodeGraphFeature.State()
+        state.operators = [container(id: 1, name: "Old")]
+        state.selected = 1
+        state.editorNameDraft = "Typed"
+        state.editorDirty = true
+        let store = TestStore(initialState: state) {
+            NodeGraphFeature()
+        } withDependencies: {
+            $0.engineClient.setParameter = { (_: UInt64, _: String, _: String) async throws(GraphEngineError) in
+                throw failure
+            }
+            $0.graphPersistence.save = { _ in }
+        }
+        await store.send(.editorNameCommitted) {
+            $0.editorDirty = false
+            $0.snapshotEpoch = 1
+            $0.editorCommitEpoch = 1
+        }
+        // Only the matching failed response restores the flag: this is the
+        // editor's own commit, so the typed value is protected.
+        await store.receive(.snapshotResponse(.failure(failure), epoch: 1)) {
+            $0.lastError = failure.message
+            $0.editorDirty = true
+            $0.editorCommitEpoch = nil
+        }
+        #expect(store.state.editorNameDraft == "Typed")
+        // A later success must not clobber the protected draft either.
+        await store.send(
+            .snapshotResponse(.success(GraphSnapshot(operators: [container(id: 1, name: "Old")])), epoch: 1)
+        ) {
+            $0.lastError = nil
+        }
+        #expect(store.state.editorNameDraft == "Typed")
+        #expect(store.state.editorDirty)
+    }
+
+    @Test func editorCommitNoopsWhenCleanOrUnselected() async {
+        var state = NodeGraphFeature.State()
+        state.operators = [container(id: 1, name: "Old")]
+        state.selected = 1
+        state.editorNameDraft = "Old"
+        let store = TestStore(initialState: state) {
+            NodeGraphFeature()
+        }
+        // Clean: nothing diverged, so no intent leaves (no effect to receive).
+        await store.send(.editorNameCommitted)
+        await store.send(.editorNameChanged("Typed")) {
+            $0.editorNameDraft = "Typed"
+            $0.editorDirty = true
+        }
+        await store.send(.operatorSelected(nil)) {
+            $0.selected = nil
+            $0.editorNameDraft = ""
+            $0.editorDirty = false
+        }
+        await store.send(.editorNameChanged("Orphan")) {
+            $0.editorNameDraft = "Orphan"
+            $0.editorDirty = true
+        }
+        // Dirty but unselected: still no intent.
+        await store.send(.editorNameCommitted)
+        #expect(store.state.editorNameDraft == "Orphan")
+        #expect(store.state.editorDirty)
+    }
+
+    @Test func editorRevertReseedsMirror() async {
+        var state = NodeGraphFeature.State()
+        state.operators = [container(id: 1, name: "Old")]
+        state.selected = 1
+        state.editorNameDraft = "Old"
+        let store = TestStore(initialState: state) {
+            NodeGraphFeature()
+        }
+        await store.send(.editorNameChanged("Typed")) {
+            $0.editorNameDraft = "Typed"
+            $0.editorDirty = true
+        }
+        await store.send(.editorNameReverted) {
+            $0.editorNameDraft = "Old"
+            $0.editorDirty = false
+        }
+    }
+
+    @Test func deleteSelectedClearsEditor() async {
+        var state = NodeGraphFeature.State()
+        state.operators = [container(id: 5), container(id: 6, parent: 5)]
+        state.selected = 5
+        state.editorNameDraft = "Five"
+        state.editorDirty = true
+        let store = TestStore(initialState: state) {
+            NodeGraphFeature()
+        } withDependencies: {
+            $0.engineClient.deleteOperator = { _ in }
+            $0.engineClient.requestSnapshot = { GraphSnapshot(operators: []) }
+            $0.graphPersistence.save = { _ in }
+        }
+        await store.send(.deleteRequested(5)) {
+            $0.selected = nil
+            $0.editorNameDraft = ""
+            $0.editorDirty = false
+            $0.snapshotEpoch = 1
+        }
+        await store.receive(.snapshotResponse(.success(GraphSnapshot(operators: [])), epoch: 1)) {
+            $0.operators = []
+        }
+    }
+
+    @Test func diveDiscardsEditorDraft() async {
+        var state = NodeGraphFeature.State()
+        state.operators = [container(id: 1, name: "Root")]
+        state.selected = 1
+        state.editorNameDraft = "Typed"
+        state.editorDirty = true
+        let store = TestStore(initialState: state) {
+            NodeGraphFeature()
+        }
+        await store.send(.diveRequested(1)) {
+            $0.path = [1]
+            $0.editorNameDraft = "Root"
+            $0.editorDirty = false
+        }
+        await store.send(.editorNameChanged("Typed")) {
+            $0.editorNameDraft = "Typed"
+            $0.editorDirty = true
+        }
+        await store.send(.breadcrumbSelected(depth: 0)) {
+            $0.path = []
+            $0.editorNameDraft = "Root"
+            $0.editorDirty = false
+        }
+        await store.send(.editorNameChanged("Typed")) {
+            $0.editorNameDraft = "Typed"
+            $0.editorDirty = true
+        }
+        await store.send(.backToParent) {
+            $0.editorNameDraft = "Root"
+            $0.editorDirty = false
         }
     }
 }
