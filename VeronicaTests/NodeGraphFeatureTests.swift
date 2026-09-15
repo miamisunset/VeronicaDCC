@@ -285,15 +285,119 @@ struct NodeGraphFeatureTests {
         let commit = GraphPosition(x: 60, y: 50)
         await store.send(.dragCommitted(id: 1, position: commit)) {
             $0.dragPreview = nil
+            $0.pendingCommit = NodeGraphFeature.DragPreview(id: 1, position: commit)
             $0.snapshotEpoch = 1
         }
         await store.receive(
             .snapshotResponse(.success(GraphSnapshot(operators: [moved])), epoch: 1)
         ) {
+            $0.pendingCommit = nil
             $0.operators = [moved]
         }
         let recorded = await recorder.moved
         #expect(recorded == [IntentRecorder.Moved(id: 1, position: commit)])
+    }
+
+    @Test func dragCommitHoldsPositionUntilSnapshot() async {
+        let start = container(id: 1, x: 10, y: 10)
+        let moved = container(id: 1, x: 60, y: 50)
+        var state = NodeGraphFeature.State()
+        state.operators = [start]
+        let store = TestStore(initialState: state) {
+            NodeGraphFeature()
+        } withDependencies: {
+            $0.engineClient.moveOperator = { _, _ in }
+            $0.engineClient.requestSnapshot = { GraphSnapshot(operators: [moved]) }
+            $0.graphPersistence.save = { _ in }
+        }
+        // Release retires the preview but holds the committed spot: the
+        // mirror still shows the stale slot until the snapshot lands.
+        let commit = GraphPosition(x: 60, y: 50)
+        await store.send(.dragCommitted(id: 1, position: commit)) {
+            $0.dragPreview = nil
+            $0.pendingCommit = NodeGraphFeature.DragPreview(id: 1, position: commit)
+            $0.snapshotEpoch = 1
+        }
+        await store.receive(
+            .snapshotResponse(.success(GraphSnapshot(operators: [moved])), epoch: 1)
+        ) {
+            $0.pendingCommit = nil
+            $0.operators = [moved]
+        }
+        // The canvas stays interactive after the round-trip.
+        await store.send(.panChanged(delta: CGSize(width: 5, height: 5))) {
+            $0.panOffset = CGSize(width: 5, height: 5)
+        }
+    }
+
+    @Test func panAppliesWhileCommitIsPending() async {
+        var state = NodeGraphFeature.State()
+        state.operators = [container(id: 1, x: 10, y: 10)]
+        state.pendingCommit = NodeGraphFeature.DragPreview(
+            id: 1,
+            position: GraphPosition(x: 60, y: 50)
+        )
+        let store = TestStore(initialState: state) {
+            NodeGraphFeature()
+        }
+        // Only live previews block pan; an unconfirmed commit must not
+        // freeze the canvas mid-round-trip (no effect to receive).
+        await store.send(.panChanged(delta: CGSize(width: 5, height: 5))) {
+            $0.panOffset = CGSize(width: 5, height: 5)
+        }
+        #expect(store.state.pendingCommit?.position == GraphPosition(x: 60, y: 50))
+    }
+
+    @Test func dragCommitFailureReleasesPending() async {
+        var state = NodeGraphFeature.State()
+        state.operators = [container(id: 1, x: 10, y: 10)]
+        let store = TestStore(initialState: state) {
+            NodeGraphFeature()
+        } withDependencies: {
+            $0.engineClient.moveOperator = { _, _ in }
+            $0.engineClient.requestSnapshot = { @Sendable () async throws(GraphEngineError) -> GraphSnapshot in
+                throw GraphEngineError.ffiFailed(operation: "requestSnapshot", code: 9)
+            }
+            $0.graphPersistence.save = { _ in }
+        }
+        let commit = GraphPosition(x: 60, y: 50)
+        await store.send(.dragCommitted(id: 1, position: commit)) {
+            $0.dragPreview = nil
+            $0.pendingCommit = NodeGraphFeature.DragPreview(id: 1, position: commit)
+            $0.snapshotEpoch = 1
+        }
+        // The move failed, so the hold releases and the box falls back to
+        // the mirror with the error in the status line.
+        let failure = GraphEngineError.ffiFailed(operation: "requestSnapshot", code: 9)
+        await store.receive(.snapshotResponse(.failure(failure), epoch: 1)) {
+            $0.pendingCommit = nil
+            $0.lastError = failure.message
+        }
+    }
+
+    @Test func panIsIgnoredWhileDragPreviewIsLive() async {
+        let preview = GraphPosition(x: 40, y: 30)
+        let store = TestStore(initialState: NodeGraphFeature.State()) {
+            NodeGraphFeature()
+        }
+        await store.send(.dragPreviewChanged(id: 1, position: preview)) {
+            $0.dragPreview = NodeGraphFeature.DragPreview(id: 1, position: preview)
+        }
+        // The background pan gesture fires from the same touch as a box
+        // drag; while the preview owns the movement these deltas must be
+        // dropped — the canvas stays put and the preview is untouched
+        // (no state change, so no trailing closure).
+        await store.send(.panChanged(delta: CGSize(width: 25, height: -10)))
+        await store.send(.panChanged(delta: CGSize(width: -7, height: 4)))
+        #expect(store.state.panOffset == .zero)
+        #expect(store.state.dragPreview?.position == preview)
+        await store.send(.dragCancelled) {
+            $0.dragPreview = nil
+        }
+        // Pan works again once the drag is over.
+        await store.send(.panChanged(delta: CGSize(width: 25, height: -10))) {
+            $0.panOffset = CGSize(width: 25, height: -10)
+        }
     }
 
     @Test func dragCancelledClearsPreview() async {
@@ -441,9 +545,14 @@ struct NodeGraphFeatureTests {
             $0.graphPersistence.save = { _ in }
         }
         await store.send(.dragCommitted(id: 1, position: GraphPosition(x: 5, y: 5))) {
+            $0.pendingCommit = NodeGraphFeature.DragPreview(
+                id: 1,
+                position: GraphPosition(x: 5, y: 5)
+            )
             $0.snapshotEpoch = 1
         }
         await store.receive(.snapshotResponse(.failure(failure), epoch: 1)) {
+            $0.pendingCommit = nil
             $0.lastError = failure.message
         }
     }

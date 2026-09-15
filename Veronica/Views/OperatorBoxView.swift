@@ -38,11 +38,14 @@ struct OperatorBoxView: View {
         }
     }
 
-    /// Center of the box in canvas space, following the drag preview.
+    /// Center of the box in canvas space, following the drag preview and,
+    /// after release, the unconfirmed commit until the mirror catches up.
     private func center(for mirrored: OperatorMirror) -> CGPoint {
         var placed = mirrored
         if let preview = store.dragPreview, preview.id == mirrored.id {
             placed.position = preview.position
+        } else if let pending = store.pendingCommit, pending.id == mirrored.id {
+            placed.position = pending.position
         }
         let frame = GraphCanvasLayout.boxFrame(for: placed, pan: store.panOffset)
         return CGPoint(x: frame.midX, y: frame.midY)
@@ -92,7 +95,13 @@ struct OperatorBoxView: View {
                     }
             )
             .simultaneousGesture(
-                DragGesture(minimumDistance: 1, coordinateSpace: .local)
+                // Measured in the stable canvas space, never `.local`: this
+                // gesture moves its own box, so its own space would shift
+                // under the finger and the translation would feed back.
+                DragGesture(
+                    minimumDistance: 1,
+                    coordinateSpace: .named(GraphCanvasLayout.canvasSpaceName)
+                )
                     .onChanged { value in
                         // Touch-down reports a zero translation; only real
                         // movement previews, so taps never stain the preview.
