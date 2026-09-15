@@ -25,15 +25,78 @@ nonisolated struct SceneStats: Equatable, Sendable {
 nonisolated struct EngineClient: Sendable {
     /// Advance the scene one tick and return the resulting stats.
     var tick: @Sendable () async -> SceneStats
+    /// Create an operator of `kind` under `parent` (`nil` for root) and
+    /// return the Rust-issued id. Slice 1 accepts only `"container"`.
+    var createOperator: @Sendable (String, UInt64?, GraphPosition) async throws(GraphEngineError) -> UInt64
+    /// Move a known operator id to a new canvas position.
+    var moveOperator: @Sendable (UInt64, GraphPosition) async throws(GraphEngineError) -> Void
+    /// Rename a known operator id. Blank names are rejected.
+    var renameOperator: @Sendable (UInt64, String) async throws(GraphEngineError) -> Void
+    /// Delete an operator id, cascading its subtree.
+    var deleteOperator: @Sendable (UInt64) async throws(GraphEngineError) -> Void
+    /// Fetch the whole-graph mirror. Owns the allocate/free boundary — the
+    /// raw FFI pointer never escapes `EngineBridge`.
+    var requestSnapshot: @Sendable () async throws(GraphEngineError) -> GraphSnapshot
+    /// Replace the whole DAG from a snapshot. Rejects `version != 1`.
+    var restoreSnapshot: @Sendable (GraphSnapshot) async throws(GraphEngineError) -> Void
 }
 
 extension EngineClient: DependencyKey {
-    static let liveValue = EngineClient(
-        tick: { await EngineBridge.tickWithStats() }
-    )
+    static let liveValue: EngineClient = {
+        let mock = MockGraphEngine()
+        return EngineClient(
+            tick: { await EngineBridge.tickWithStats() },
+            createOperator: { (kind: String, parent: UInt64?, position: GraphPosition) async throws(GraphEngineError) -> UInt64 in
+                if GraphLaunchOptions.isMockEngineEnabled {
+                    return try await mock.create(kind: kind, parent: parent, position: position)
+                }
+                return try await EngineBridge.createOperator(
+                    kind: kind,
+                    parent: parent,
+                    position: position
+                )
+            },
+            moveOperator: { (id: UInt64, position: GraphPosition) async throws(GraphEngineError) in
+                if GraphLaunchOptions.isMockEngineEnabled {
+                    return try await mock.move(id: id, position: position)
+                }
+                return try await EngineBridge.moveOperator(id: id, position: position)
+            },
+            renameOperator: { (id: UInt64, name: String) async throws(GraphEngineError) in
+                if GraphLaunchOptions.isMockEngineEnabled {
+                    return try await mock.rename(id: id, name: name)
+                }
+                return try await EngineBridge.renameOperator(id: id, name: name)
+            },
+            deleteOperator: { (id: UInt64) async throws(GraphEngineError) in
+                if GraphLaunchOptions.isMockEngineEnabled {
+                    return try await mock.delete(id: id)
+                }
+                return try await EngineBridge.deleteOperator(id: id)
+            },
+            requestSnapshot: { () async throws(GraphEngineError) -> GraphSnapshot in
+                if GraphLaunchOptions.isMockEngineEnabled {
+                    return await mock.snapshot()
+                }
+                return try await EngineBridge.requestGraphSnapshot()
+            },
+            restoreSnapshot: { (snapshot: GraphSnapshot) async throws(GraphEngineError) in
+                if GraphLaunchOptions.isMockEngineEnabled {
+                    return try await mock.restore(snapshot)
+                }
+                return try await EngineBridge.restoreGraphSnapshot(snapshot)
+            }
+        )
+    }()
 
     static let testValue = EngineClient(
-        tick: { SceneStats(tickCount: 7, entityCount: 3) }
+        tick: { SceneStats(tickCount: 7, entityCount: 3) },
+        createOperator: { _, _, _ in 1 },
+        moveOperator: { _, _ in },
+        renameOperator: { _, _ in },
+        deleteOperator: { _ in },
+        requestSnapshot: { GraphSnapshot(operators: []) },
+        restoreSnapshot: { _ in }
     )
 }
 

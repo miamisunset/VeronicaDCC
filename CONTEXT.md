@@ -25,3 +25,23 @@ read-only once the graph FFI surface exists.
 One advancement of the Scene (`SceneWorld::update` / `vrn_tick`). The frame
 loop is Swift-driven: each display refresh requests exactly one Tick, then
 publishes the resulting frame handle to the UI thread.
+
+## Operator
+
+The behavior-carrying element of the procedural graph (a Houdini "OP": it
+evaluates/cooks). Rust owns Operators and the DAG; Swift renders them and
+sends intents. `NodeId` is the storage key identifying an Operator. "Node"
+means only the visual box on the canvas, if it is used at all.
+
+## Container
+
+An Operator that only organizes: it holds a subnetwork of child Operators,
+has no ports, and does not cook. Its children cook in place as if the
+Container weren't there. There is exactly one network kind (the Scene
+network); hierarchy comes from Containers, not from switching contexts.
+
+## Network
+
+One level of the procedural graph: the Operators directly inside a Container,
+or at the root. Diving navigates between Networks; the breadcrumb shows the
+path from the root to the Network on screen.

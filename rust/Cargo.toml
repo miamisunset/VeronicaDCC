@@ -24,7 +24,7 @@ petgraph = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-cbindgen = "0.27"
+cbindgen = "0.28"
 veronica-core = { path = "crates/veronica-core" }
 veronica-graph = { path = "crates/veronica-graph" }
 veronica-scene = { path = "crates/veronica-scene" }

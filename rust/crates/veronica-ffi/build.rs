@@ -17,8 +17,8 @@ fn main() {
         eprintln!("cbindgen failed: {err}");
         std::process::exit(1);
     });
-    let out_path = format!("{crate_dir}/../../target/include/veronica.h");
-    std::fs::create_dir_all(format!("{crate_dir}/../../target/include")).unwrap();
+    let out_path = format!("{crate_dir}/include/veronica.h");
+    std::fs::create_dir_all(format!("{crate_dir}/include")).unwrap();
     bindings.write_to_file(&out_path);
     println!("cargo:rerun-if-changed=src/lib.rs");
     println!("cargo:rerun-if-changed=cbindgen.toml");
