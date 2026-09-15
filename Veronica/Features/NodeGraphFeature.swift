@@ -34,6 +34,10 @@ struct NodeGraphFeature {
         var pendingCreatePosition = GraphPosition(x: 0, y: 0)
         /// Active box-drag preview, cleared on commit.
         var dragPreview: DragPreview?
+        /// Committed-but-unconfirmed position, shown until the post-commit
+        /// snapshot arrives. Without it the box snaps back to its stale
+        /// mirror slot for the round-trip and flickers as a ghost.
+        var pendingCommit: DragPreview?
         /// Operator id under the inline rename overlay, if any.
         var renaming: UInt64?
         /// Rename overlay draft text.
@@ -124,6 +128,9 @@ struct NodeGraphFeature {
                 guard epoch == state.snapshotEpoch else {
                     return .none
                 }
+                // Any confirmed round-trip retires the pending position: the
+                // mirror below is authoritative again from here on.
+                state.pendingCommit = nil
                 switch result {
                 case let .success(snapshot):
                     state.operators = snapshot.operators
@@ -139,6 +146,7 @@ struct NodeGraphFeature {
                 guard epoch == state.snapshotEpoch else {
                     return .none
                 }
+                state.pendingCommit = nil
                 state.operators = snapshot.operators
                 state.lastError = error.message
                 return .none
@@ -187,6 +195,9 @@ struct NodeGraphFeature {
 
             case let .dragCommitted(id, position):
                 state.dragPreview = nil
+                // Hold the committed spot on screen until the confirming
+                // snapshot arrives; the mirror still shows the stale slot.
+                state.pendingCommit = DragPreview(id: id, position: position)
                 state.snapshotEpoch += 1
                 return commit(
                     engine: engine,

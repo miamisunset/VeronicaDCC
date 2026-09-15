@@ -38,11 +38,14 @@ struct OperatorBoxView: View {
         }
     }
 
-    /// Center of the box in canvas space, following the drag preview.
+    /// Center of the box in canvas space, following the drag preview and,
+    /// after release, the unconfirmed commit until the mirror catches up.
     private func center(for mirrored: OperatorMirror) -> CGPoint {
         var placed = mirrored
         if let preview = store.dragPreview, preview.id == mirrored.id {
             placed.position = preview.position
+        } else if let pending = store.pendingCommit, pending.id == mirrored.id {
+            placed.position = pending.position
         }
         let frame = GraphCanvasLayout.boxFrame(for: placed, pan: store.panOffset)
         return CGPoint(x: frame.midX, y: frame.midY)
