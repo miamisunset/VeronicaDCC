@@ -18,7 +18,12 @@ differ because Scene state advanced, not because Swift re-rendered.
 
 The right pane of the main window. Scaffold for the future procedural node
 graph editor. Currently an empty placeholder; it will mirror the Rust DAG
-read-only once the graph FFI surface exists.
+read-only once the graph FFI surface exists. Also called "node editor".
+
+## Canvas
+
+The visual surface inside the NodeGraphPane showing one Network. Operator
+boxes are positioned on it; pan and hover are canvas-local.
 
 ## Tick
 
@@ -45,3 +50,14 @@ network); hierarchy comes from Containers, not from switching contexts.
 One level of the procedural graph: the Operators directly inside a Container,
 or at the root. Diving navigates between Networks; the breadcrumb shows the
 path from the root to the Network on screen.
+
+## Parameter
+
+A named, editable value carried by an Operator. Rust owns Parameters; the
+parameter editor shows the selected Operator's Parameters. Cross-Network
+parameter binding is future work, not part of the term.
+
+## ParameterEditor
+
+The pane showing the selected Operator's Parameters. Selection-driven with
+an explicit empty state; a fixed third pane until rearrangement lands.
