@@ -108,8 +108,10 @@ pub enum SurfaceError {
 
 /// One context-owned `IOSurface` plus its fixed extents.
 ///
-/// Created lazily on the first tick; Swift borrows the handle for the
-/// context lifetime and must not release it.
+/// Created lazily on the first tick and recreated whenever the published
+/// frame extents drift (viewport re-target); the handle address changes on
+/// recreation and Swift re-adopts it via its address-change path. Swift
+/// borrows the handle for the context lifetime and must not release it.
 #[derive(Debug)]
 pub struct FrameSurface {
     surface: IOSurfaceRef,

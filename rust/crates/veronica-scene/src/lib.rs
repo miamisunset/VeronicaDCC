@@ -35,7 +35,8 @@ mod render;
 pub use cook::{CookedMesh, SourceOperator};
 pub use mesh::render_mesh_from_evaluated;
 pub use render::{
-    FRAME_BYTES_PER_PIXEL, FRAME_HEIGHT, FRAME_WIDTH, RenderFrame, render_demo_frame,
+    FRAME_BYTES_PER_PIXEL, FRAME_HEIGHT, FRAME_WIDTH, MAX_VIEWPORT_EDGE, RenderFrame,
+    render_demo_frame,
 };
 
 /// Errors for scene operations.
@@ -82,6 +83,21 @@ pub enum SceneError {
     /// A frame was requested with a zero width or height.
     #[error("frame extents must be nonzero, got {width}x{height}")]
     InvalidFrameSize {
+        /// Requested width in pixels.
+        width: u32,
+        /// Requested height in pixels.
+        height: u32,
+    },
+    /// The requested viewport size is zero or exceeds the
+    /// [`MAX_VIEWPORT_EDGE`](crate::render::MAX_VIEWPORT_EDGE) long-edge cap.
+    ///
+    /// Separate from [`SceneError::InvalidFrameSize`]: that guards the
+    /// deterministic CPU oracle's arbitrary extents, while this guards the
+    /// live GPU target (staging-buffer memory is bounded by the cap).
+    #[error(
+        "invalid viewport size {width}x{height}: extents must be nonzero with longest edge <= 2048"
+    )]
+    InvalidViewportSize {
         /// Requested width in pixels.
         width: u32,
         /// Requested height in pixels.
@@ -253,6 +269,10 @@ impl SceneWorld {
         };
         app.world_mut()
             .insert_resource(gpu::GpuFrameTarget { handle: target });
+        app.world_mut().insert_resource(gpu::GpuViewportSize {
+            width: render::FRAME_WIDTH,
+            height: render::FRAME_HEIGHT,
+        });
         Self { app }
     }
 
@@ -357,7 +377,71 @@ impl SceneWorld {
         })
     }
 
-    /// Render the current demo-scene state into a fixed-size frame.
+    /// Live viewport extents in pixels (initially `FRAME_WIDTH` x
+    /// `FRAME_HEIGHT`, re-targeted by [`SceneWorld::set_viewport_size`]).
+    #[must_use]
+    pub fn viewport_size(&self) -> (u32, u32) {
+        let size = self.app.world().resource::<gpu::GpuViewportSize>();
+        (size.width, size.height)
+    }
+
+    /// Re-target the offscreen viewport to `width` x `height` pixels.
+    ///
+    /// Recreates the offscreen [`Image`] target, re-points the demo camera
+    /// at it, and drops the staging buffer (lazily rebuilt at the new size
+    /// on the next [`SceneWorld::render_frame`]). Idempotent: requesting
+    /// the current size is a no-op that touches neither the target nor the
+    /// camera. The Bevy camera aspect follows the target texture
+    /// automatically, so no projection code runs here.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SceneError::InvalidViewportSize`] when either extent is
+    /// zero or the longest edge exceeds
+    /// [`MAX_VIEWPORT_EDGE`](crate::render::MAX_VIEWPORT_EDGE).
+    pub fn set_viewport_size(&mut self, width: u32, height: u32) -> Result<(), SceneError> {
+        use render::MAX_VIEWPORT_EDGE;
+        if width == 0 || height == 0 || width.max(height) > MAX_VIEWPORT_EDGE {
+            return Err(SceneError::InvalidViewportSize { width, height });
+        }
+        if self.viewport_size() == (width, height) {
+            return Ok(());
+        }
+        let old_handle = self
+            .app
+            .world()
+            .resource::<gpu::GpuFrameTarget>()
+            .handle
+            .clone();
+        let new_handle = {
+            let mut images = self.app.world_mut().resource_mut::<Assets<Image>>();
+            images.remove(&old_handle);
+            gpu::create_frame_target_sized(&mut images, width, height)
+        };
+        self.app.world_mut().insert_resource(gpu::GpuFrameTarget {
+            handle: new_handle.clone(),
+        });
+        self.app
+            .world_mut()
+            .insert_resource(gpu::GpuViewportSize { width, height });
+        self.app
+            .world_mut()
+            .remove_resource::<gpu::GpuFrameStaging>();
+        {
+            let mut cameras = self
+                .app
+                .world_mut()
+                .query_filtered::<&mut RenderTarget, With<DemoCamera>>();
+            let world = self.app.world_mut();
+            for mut target in cameras.iter_mut(world) {
+                *target = RenderTarget::from(new_handle.clone());
+            }
+        }
+        Ok(())
+    }
+
+    /// Render the current demo-scene state into a frame at the live viewport
+    /// extents.
     ///
     /// The frame-publish seam: Swift presents whatever this returns without
     /// interpreting scene content. Pixels come off the GPU
@@ -498,5 +582,38 @@ mod tests {
         assert_eq!(world.tick_count(), 1);
         let after = *world.app.world().get::<Transform>(ids.cube).unwrap();
         assert_ne!(before.rotation, after.rotation);
+    }
+
+    #[test]
+    fn viewport_size_validation_and_idempotency() {
+        let mut world = SceneWorld::new_headless();
+        assert_eq!(
+            world.viewport_size(),
+            (render::FRAME_WIDTH, render::FRAME_HEIGHT)
+        );
+        for (width, height) in [
+            (0, 200),
+            (320, 0),
+            (render::MAX_VIEWPORT_EDGE + 1, 100),
+            (100, render::MAX_VIEWPORT_EDGE + 1),
+        ] {
+            assert!(
+                matches!(
+                    world.set_viewport_size(width, height),
+                    Err(SceneError::InvalidViewportSize { .. })
+                ),
+                "extents {width}x{height} must be rejected"
+            );
+        }
+        // Rejected sizes leave the live extents untouched.
+        assert_eq!(
+            world.viewport_size(),
+            (render::FRAME_WIDTH, render::FRAME_HEIGHT)
+        );
+        world.set_viewport_size(256, 192).unwrap();
+        assert_eq!(world.viewport_size(), (256, 192));
+        // Same size again is a no-op, not an error.
+        world.set_viewport_size(256, 192).unwrap();
+        assert_eq!(world.viewport_size(), (256, 192));
     }
 }

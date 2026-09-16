@@ -4,6 +4,42 @@ import Metal
 import MetalKit
 import SwiftUI
 
+/// Long-edge cap mirrored from Rust `MAX_VIEWPORT_EDGE` (veronica-scene).
+/// Both sides clamp to it, so Swift never sends what Rust would reject.
+let viewportMaxEdge: UInt32 = 2048
+/// Minimum per-axis backing-pixel delta before a size intent crosses FFI.
+///
+/// `updateNSView` runs every tick; without hysteresis, rounding jitter on
+/// fractional scales would re-target the GPU target (a full texture +
+/// staging rebuild) every frame. 2px is invisible and kills the churn.
+let viewportSizeHysteresis: UInt32 = 2
+
+/// Compute the viewport size intent for the current layout, or `nil` when no
+/// FFI call is owed.
+///
+/// Backing pixels are `bounds * scale`, rounded and clamped to
+/// `1...viewportMaxEdge`. Empty or hidden views (`bounds <= 0`, `scale <= 0`)
+/// send nothing (a zero intent is an FFI error), and sub-hysteresis jitter
+/// stays quiet so per-tick updates cost only the compare. Pure for testing.
+func viewportSizeIntent(
+    bounds: CGSize,
+    scale: CGFloat,
+    lastSent: (width: UInt32, height: UInt32)?
+) -> (width: UInt32, height: UInt32)? {
+    guard bounds.width > 0, bounds.height > 0, scale > 0 else { return nil }
+    let maxEdge = CGFloat(viewportMaxEdge)
+    let width = UInt32(max(1, min((bounds.width * scale).rounded(), maxEdge)))
+    let height = UInt32(max(1, min((bounds.height * scale).rounded(), maxEdge)))
+    if let lastSent {
+        let deltaWidth = abs(Int(width) - Int(lastSent.width))
+        let deltaHeight = abs(Int(height) - Int(lastSent.height))
+        if deltaWidth < Int(viewportSizeHysteresis), deltaHeight < Int(viewportSizeHysteresis) {
+            return nil
+        }
+    }
+    return (width, height)
+}
+
 /// Hosts the Metal view presenting Rust-published `IOSurface` frames, and
 /// owns the display link pacing the loop.
 ///
@@ -11,10 +47,14 @@ import SwiftUI
 /// lifetime; Swift never releases it). Each display refresh fires `onFrame`
 /// on the main run loop; the TCA effect in `ViewportFeature` hops
 /// off-MainActor to tick Rust and publish stats plus the frame handle.
-/// `adopt(frame:)` wraps a new handle in an `MTLTexture` once and reuses
-/// it; `draw(in:)` blits it into the drawable, so consecutive frames differ
-/// because Scene state advanced. `dismantleNSView` invalidates the link,
-/// breaking the link → coordinator retain cycle.
+/// `adopt(frame:)` wraps a new handle in an `MTLTexture` once and re-wraps
+/// on address change (viewport re-targets recreate the surface); `draw(in:)`
+/// centers the blit over the letterbox clear, so consecutive frames differ
+/// because Scene state advanced. `updateNSView` drives `drawableSize` from
+/// the published frame with `autoResizeDrawable = false` and sends backing-
+/// pixel size intents to Rust only on hysteresis-exceeding change.
+/// `dismantleNSView` invalidates the link, breaking the link → coordinator
+/// retain cycle.
 struct ViewportMetalHost: NSViewRepresentable {
     /// Invoked on the main thread, once per display refresh.
     var onFrame: () -> Void
@@ -28,6 +68,10 @@ struct ViewportMetalHost: NSViewRepresentable {
         private var commandQueue: MTLCommandQueue?
         private var cachedAddress: UInt64?
         private var frameTexture: MTLTexture?
+        /// Last backing-pixel size sent to Rust. Compared per tick in
+        /// `updateNSView`; the FFI call fires only on hysteresis-exceeding
+        /// change, so steady-state ticks cost just the compare.
+        var lastSentSize: (width: UInt32, height: UInt32)?
 
         init(onFrame: @escaping () -> Void) {
             self.onFrame = onFrame
@@ -73,9 +117,10 @@ struct ViewportMetalHost: NSViewRepresentable {
         }
 
         func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
-            // Fixed-size frames (slice 2): no resize handling yet. Deliberately
-            // empty — restoring `drawableSize` here re-triggers this callback
-            // and deadlocks layout during pane swaps (see slice-2 diagnosis).
+            // Deliberately empty: `drawableSize` is driven from the published
+            // frame in `updateNSView` with `autoResizeDrawable = false`, so
+            // restoring it here would re-trigger this callback and deadlock
+            // layout during pane swaps (see slice-2 diagnosis).
         }
 
         func draw(in view: MTKView) {
@@ -86,14 +131,15 @@ struct ViewportMetalHost: NSViewRepresentable {
             else {
                 return
             }
-            guard drawable.texture.width == texture.width,
-                drawable.texture.height == texture.height
+            guard drawable.texture.width >= texture.width,
+                drawable.texture.height >= texture.height
             else {
-                // Size drift (e.g. relayout racing the fixed drawable):
-                // skip the frame loudly rather than presenting a black view
-                // with no trace. Scaling blits belong to the resize slice.
+                // Resize racing the drawable: the published frame is newer
+                // than `drawableSize`. Skip loudly rather than presenting a
+                // black view with no trace; the next `updateNSView` adopts
+                // the new frame size.
                 NSLog(
-                    "Viewport: drawable %dx%d != frame %dx%d, skipping blit",
+                    "Viewport: drawable %dx%d < frame %dx%d, skipping blit",
                     drawable.texture.width,
                     drawable.texture.height,
                     texture.width,
@@ -105,7 +151,22 @@ struct ViewportMetalHost: NSViewRepresentable {
             // return with a live un-ended encoder aborts under Metal
             // validation when the autorelease pool drains.
             guard let blit = buffer.makeBlitCommandEncoder() else { return }
-            blit.copy(from: texture, to: drawable.texture)
+            // Aspect-fit: the drawable matches the frame in steady state
+            // (offset zero); mid-resize the smaller frame centers over the
+            // letterbox clear instead of stretching.
+            let originX = (drawable.texture.width - texture.width) / 2
+            let originY = (drawable.texture.height - texture.height) / 2
+            blit.copy(
+                from: texture,
+                sourceSlice: 0,
+                sourceLevel: 0,
+                sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                sourceSize: MTLSize(width: texture.width, height: texture.height, depth: 1),
+                to: drawable.texture,
+                destinationSlice: 0,
+                destinationLevel: 0,
+                destinationOrigin: MTLOrigin(x: originX, y: originY, z: 0)
+            )
             blit.endEncoding()
             buffer.present(drawable)
             buffer.commit()
@@ -124,6 +185,11 @@ struct ViewportMetalHost: NSViewRepresentable {
         // illegal on framebuffer-only textures (Metal validation aborts:
         // "destinationTexture must not be a framebufferOnly texture").
         view.framebufferOnly = false
+        // The drawable is driven from the published frame size (see
+        // `updateNSView`). Auto-resize would fight that every layout pass:
+        // the view resets `drawableSize` behind our back and the size-guard
+        // in `draw(in:)` skips frames forever (the slice-2 resize freeze).
+        view.autoResizeDrawable = false
         view.clearColor = MTLClearColor(red: 0.05, green: 0.06, blue: 0.09, alpha: 1)
         view.enableSetNeedsDisplay = false
         view.isPaused = false
@@ -138,6 +204,20 @@ struct ViewportMetalHost: NSViewRepresentable {
     func updateNSView(_ nsView: MTKView, context: Context) {
         context.coordinator.onFrame = onFrame
         context.coordinator.adopt(frame: frame)
+        // Backing-pixel intent from the live layout, sent only on
+        // hysteresis-exceeding change: `updateNSView` runs every tick, but
+        // the FFI call (a GPU target rebuild) fires only on real resizes.
+        // `setViewportSize` hops to the engine queue itself, so this stays
+        // MainActor-cheap and never blocks the frame.
+        let scale = nsView.window?.backingScaleFactor ?? 1
+        if let intent = viewportSizeIntent(
+            bounds: nsView.bounds.size,
+            scale: scale,
+            lastSent: context.coordinator.lastSentSize
+        ) {
+            context.coordinator.lastSentSize = intent
+            EngineBridge.setViewportSize(width: intent.width, height: intent.height)
+        }
         if let frame {
             nsView.drawableSize = CGSize(
                 width: CGFloat(frame.width),

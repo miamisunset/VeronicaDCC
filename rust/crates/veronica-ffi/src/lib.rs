@@ -13,7 +13,7 @@ use veronica_core::{
 use veronica_graph::{
     GRAPH_SNAPSHOT_VERSION, GraphSnapshot, NodeGraph, OperatorGraph, OperatorKind, Position,
 };
-use veronica_scene::{DemoSceneIds, SceneWorld};
+use veronica_scene::{DemoSceneIds, MAX_VIEWPORT_EDGE, SceneWorld};
 
 mod surface;
 
@@ -48,6 +48,10 @@ pub struct VrnContext {
     mesh_history: UndoHistory<MeshTopology>,
     /// Published `IOSurface`, created lazily on the first tick.
     surface: Option<FrameSurface>,
+    /// Viewport size intent from [`vrn_viewport_set_size`], applied ahead of
+    /// the next [`vrn_tick`]'s scene update (before the render, so the tick's
+    /// own frame already matches the new surface).
+    pending_size: Option<(u32, u32)>,
 }
 
 impl VrnContext {
@@ -62,7 +66,24 @@ impl VrnContext {
             demo,
             mesh_history: UndoHistory::new(64),
             surface: None,
+            pending_size: None,
         }
+    }
+
+    /// Apply the pending viewport intent, if any, ahead of a tick.
+    ///
+    /// Runs before [`SceneWorld::update`] so the tick itself uploads the new
+    /// target to the GPU: the same tick's [`VrnContext::publish_frame`] then
+    /// reads back the new size instead of hitting [`SceneError::NoGpuImage`].
+    /// The intent is pre-validated by [`vrn_viewport_set_size`], so a failure
+    /// here is an internal desync, never a caller error.
+    fn apply_pending_size(&mut self) -> VrnResult {
+        if let Some((width, height)) = self.pending_size.take()
+            && self.scene.set_viewport_size(width, height).is_err()
+        {
+            return VrnResult::Internal;
+        }
+        VrnResult::Ok
     }
 
     /// Render the current scene state into the owned surface, creating it
@@ -72,7 +93,14 @@ impl VrnContext {
         let Ok(frame) = self.scene.render_frame() else {
             return VrnResult::Internal;
         };
-        if self.surface.is_none() {
+        let extents_drifted = match self.surface.as_ref() {
+            Some(surface) => surface.width() != frame.width() || surface.height() != frame.height(),
+            None => true,
+        };
+        if extents_drifted {
+            // The old surface drops here (`CFRelease` in `FrameSurface::drop`)
+            // and Swift re-adopts the new handle via its address-change path
+            // in `adopt(frame:)` — no Swift change needed beyond the re-wrap.
             match FrameSurface::new(frame.width(), frame.height()) {
                 Ok(surface) => self.surface = Some(surface),
                 Err(_) => return VrnResult::Internal,
@@ -156,6 +184,10 @@ pub unsafe extern "C" fn vrn_tick(context: *mut VrnContextHandle) -> VrnResult {
     };
     match handle.0.lock() {
         Ok(mut ctx) => {
+            let size_result = ctx.apply_pending_size();
+            if size_result != VrnResult::Ok {
+                return size_result;
+            }
             ctx.scene.update();
             ctx.publish_frame()
         }
@@ -256,6 +288,43 @@ pub unsafe extern "C" fn vrn_frame_surface(
             }
             None => VrnResult::InvalidArgument,
         },
+        Err(_) => VrnResult::Internal,
+    }
+}
+
+/// Request a viewport re-target to `width` x `height` backing pixels.
+///
+/// Stores the size intent; the next [`vrn_tick`] applies it before rendering
+/// and recreates the `IOSurface` when the extents change. Swift re-adopts the
+/// new handle via its existing address-change path. Coalescing is natural:
+/// repeated calls before a tick keep only the latest intent.
+///
+/// Returns [`VrnResult::InvalidArgument`] when either extent is zero or the
+/// longest edge exceeds `MAX_VIEWPORT_EDGE` (2048).
+///
+/// # Safety
+///
+/// `context` must be a live pointer from [`vrn_context_create`]. Do not call
+/// concurrently with [`vrn_context_destroy`] on the same context.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vrn_viewport_set_size(
+    context: *mut VrnContextHandle,
+    width: u32,
+    height: u32,
+) -> VrnResult {
+    if context.is_null() {
+        return VrnResult::NullArgument;
+    }
+    if width == 0 || height == 0 || width.max(height) > MAX_VIEWPORT_EDGE {
+        return VrnResult::InvalidArgument;
+    }
+    // SAFETY: non-null pointer from `vrn_context_create`, still alive.
+    let mutex = unsafe { &(*context).0 };
+    match mutex.lock() {
+        Ok(mut ctx) => {
+            ctx.pending_size = Some((width, height));
+            VrnResult::Ok
+        }
         Err(_) => VrnResult::Internal,
     }
 }
@@ -749,6 +818,77 @@ mod frame_tests {
                 ),
                 VrnResult::NullArgument
             );
+            vrn_context_destroy(context);
+        }
+    }
+}
+
+#[cfg(test)]
+mod viewport_tests {
+    use super::*;
+    use std::ptr;
+    use veronica_scene::{FRAME_HEIGHT, FRAME_WIDTH};
+
+    #[test]
+    fn set_size_guards_map_to_result_codes() {
+        let context = vrn_context_create();
+        assert!(!context.is_null());
+        // SAFETY: just created, alive, single-threaded test.
+        unsafe {
+            assert_eq!(
+                vrn_viewport_set_size(ptr::null_mut(), 320, 200),
+                VrnResult::NullArgument
+            );
+            for (width, height) in [(0, 200), (320, 0), (0, 0), (2049, 100), (100, 4096)] {
+                assert_eq!(
+                    vrn_viewport_set_size(context, width, height),
+                    VrnResult::InvalidArgument,
+                    "extents {width}x{height} must be rejected"
+                );
+            }
+            // Long-edge cap: exactly 2048 is accepted, 2049 is not.
+            assert_eq!(vrn_viewport_set_size(context, 2048, 2048), VrnResult::Ok);
+            assert_eq!(
+                vrn_viewport_set_size(context, 2049, 2048),
+                VrnResult::InvalidArgument
+            );
+            vrn_context_destroy(context);
+        }
+    }
+
+    #[test]
+    fn pending_size_applies_on_tick_and_recreates_surface() {
+        let context = vrn_context_create();
+        assert!(!context.is_null());
+        let mut surface: *mut c_void = ptr::null_mut();
+        let mut width = 0u32;
+        let mut height = 0u32;
+        // SAFETY: just created, alive, single-threaded test; slots are live.
+        unsafe {
+            assert_eq!(vrn_tick(context), VrnResult::Ok);
+            assert_eq!(
+                vrn_frame_surface(context, &raw mut surface, &raw mut width, &raw mut height),
+                VrnResult::Ok
+            );
+            let first = surface;
+            assert_eq!((width, height), (FRAME_WIDTH, FRAME_HEIGHT));
+            // Re-target mid-life: the next tick publishes the new extents on
+            // a fresh surface (new address); the tick after reuses it.
+            assert_eq!(vrn_viewport_set_size(context, 320, 200), VrnResult::Ok);
+            assert_eq!(vrn_tick(context), VrnResult::Ok);
+            assert_eq!(
+                vrn_frame_surface(context, &raw mut surface, &raw mut width, &raw mut height),
+                VrnResult::Ok
+            );
+            assert_eq!((width, height), (320, 200));
+            assert_ne!(surface, first);
+            let second = surface;
+            assert_eq!(vrn_tick(context), VrnResult::Ok);
+            assert_eq!(
+                vrn_frame_surface(context, &raw mut surface, &raw mut width, &raw mut height),
+                VrnResult::Ok
+            );
+            assert_eq!(surface, second);
             vrn_context_destroy(context);
         }
     }
