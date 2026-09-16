@@ -4,7 +4,7 @@ import Foundation
 ///
 /// Active only when the app launches with `--vrn-mock-engine` (see
 /// `GraphLaunchOptions`). Validation mirrors ADR-0002 so the double
-/// cross-checks the contract: strict `"container"` kind, known-id
+/// cross-checks the contract: strict `"container"`/`"cube"` kinds, known-id
 /// moves/renames/deletes, non-blank names, existing parents, Rust-issued
 /// ids from 1, `version == 2` restores, cascading deletes.
 ///
@@ -20,13 +20,14 @@ actor MockGraphEngine {
     /// Next Rust-issued id. `0` is never issued (FFI root-parent sentinel).
     private var nextId: UInt64 = 1
 
-    /// Creates an operator, returning its id.
+    /// Creates an operator, returning its id. Only `"container"` and `"cube"`
+    /// are accepted, mirroring `parse_operator_kind` strictness.
     func create(
         kind: String,
         parent: UInt64?,
         position: GraphPosition
     ) throws(GraphEngineError) -> UInt64 {
-        guard kind == "container" else {
+        guard kind == "container" || kind == "cube" else {
             throw .ffiFailed(operation: "vrn_graph_create_operator", code: 2)
         }
         if let parent, operators[parent] == nil {

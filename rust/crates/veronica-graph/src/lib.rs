@@ -147,13 +147,16 @@ pub struct GraphTopology {
 
 /// Kind of operator in the procedural graph.
 ///
-/// Slice 1 ships containers only; operator #2 is a pure extension
-/// (strict kind validation lives at the FFI boundary, not here).
+/// Containers organize; cubes cook (see `veronica-geometry`). Strict kind
+/// validation lives at the FFI boundary, not here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OperatorKind {
     /// Pure organizer: holds a subnetwork, has no ports, does not cook.
     Container,
+    /// First geometry operator: per-axis size plus center, cooks to implicit
+    /// geometry (no inputs; downstream wiring belongs to the editing work).
+    Cube,
 }
 
 /// Canvas position in unbounded `f64` coordinates.
@@ -199,7 +202,7 @@ pub enum ParamValue {
 pub struct Operator {
     /// Storage key identifying this operator.
     pub id: NodeId,
-    /// Which operator this is (slice 1: always [`OperatorKind::Container`]).
+    /// Which operator this is (container or cube).
     pub kind: OperatorKind,
     /// Display name; never empty or blank (enforced by rename).
     pub name: String,
