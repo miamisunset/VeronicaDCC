@@ -92,6 +92,22 @@ The path from a Parameter change through cook → realize → scene to updated
 Viewport Pixels. The loop is closed when editing a Cube's size visibly
 changes the Viewport.
 
+## Viewport Camera
+
+The perspective camera through which the Viewport views the Scene. Owned by
+Rust like all Scene state; Swift sends navigation intents and mirrors
+read-only, never writing camera transforms.
+
+## Pivot
+
+The interest point navigation orbits around. The scene bounds center on load
+and after framing; panning moves the view without moving it.
+
+## Frame All
+
+Fitting the whole Scene bounds into the Viewport in one snap. Triggered by
+the `F` key; no animation, no undo.
+
 ## Primvar
 
 Named data carried by geometry, from standard channels (position, normal,
