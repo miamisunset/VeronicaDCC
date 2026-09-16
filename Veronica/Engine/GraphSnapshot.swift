@@ -143,7 +143,8 @@ nonisolated enum ParameterValue: Codable, Equatable, Sendable {
 nonisolated struct OperatorMirror: Codable, Equatable, Sendable, Identifiable {
     /// Rust-issued id, starting at 1. `0` is never issued.
     var id: UInt64
-    /// Operator kind. Slice 1 accepts only `"container"`.
+    /// Operator kind: `"container"` or `"cube"` (strict set validated at the
+    /// engine boundary, mirrored by `OperatorTypeRegistry` for creation).
     var kind: String
     /// Display name. Defaults to `"Container"` at creation.
     var name: String

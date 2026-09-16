@@ -3,6 +3,7 @@ resolver = "2"
 members = [
   "crates/veronica-core",
   "crates/veronica-graph",
+  "crates/veronica-geometry",
   "crates/veronica-scene",
   "crates/veronica-ffi",
 ]

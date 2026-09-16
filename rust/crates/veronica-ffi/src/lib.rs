@@ -186,9 +186,9 @@ pub unsafe extern "C" fn vrn_entity_count(
 
 /// Parse a strict operator-kind string from the FFI boundary.
 ///
-/// Only `"container"` is accepted (ADR-0002); anything else is
+/// Only `"container"` and `"cube"` are accepted; anything else is
 /// [`VrnResult::InvalidArgument`]. The graph core only ever sees the parsed
-/// [`OperatorKind`], so operator #2 extends here without touching it.
+/// [`OperatorKind`], so operator #3 extends here without touching it.
 fn parse_operator_kind(kind: *const c_char) -> Result<OperatorKind, VrnResult> {
     if kind.is_null() {
         return Err(VrnResult::NullArgument);
@@ -198,11 +198,12 @@ fn parse_operator_kind(kind: *const c_char) -> Result<OperatorKind, VrnResult> {
     let text = unsafe { CStr::from_ptr(kind) };
     match text.to_str() {
         Ok("container") => Ok(OperatorKind::Container),
+        Ok("cube") => Ok(OperatorKind::Cube),
         Ok(_) | Err(_) => Err(VrnResult::InvalidArgument),
     }
 }
 
-/// Create a container operator at `(x, y)`, writing its fresh id to `out_id`.
+/// Create an operator of `kind` at `(x, y)`, writing its fresh id to `out_id`.
 ///
 /// `parent == 0` means the root (the FFI sentinel; [`NodeId`]`(0)` is never
 /// issued); any other value must name an existing operator.
@@ -684,13 +685,21 @@ mod graph_tests {
     }
 
     #[test]
-    fn strict_kind_validation_rejects_anything_but_container() {
+    fn strict_kind_validation_rejects_anything_but_known_kinds() {
         let context = vrn_context_create();
         assert!(!context.is_null());
         let mut id = 0u64;
         // SAFETY: just created, alive, single-threaded test.
         unsafe {
-            for rejected in ["box", "Container", "CONTAINER", "", "container "] {
+            for rejected in [
+                "box",
+                "Container",
+                "CONTAINER",
+                "",
+                "container ",
+                "Cube",
+                "cube ",
+            ] {
                 let kind = cstring(rejected);
                 assert_eq!(
                     vrn_graph_create_operator(
@@ -709,6 +718,35 @@ mod graph_tests {
             assert_eq!(
                 vrn_graph_create_operator(context, ptr::null_mut(), 0, 0.0, 0.0, &raw mut id),
                 VrnResult::NullArgument
+            );
+            vrn_context_destroy(context);
+        }
+    }
+
+    #[test]
+    fn cube_kind_is_accepted_and_visible_in_snapshots() {
+        let context = vrn_context_create();
+        assert!(!context.is_null());
+        let kind = cstring("cube");
+        let mut id = 0u64;
+        // SAFETY: just created, alive, single-threaded test.
+        unsafe {
+            assert_eq!(
+                vrn_graph_create_operator(
+                    context,
+                    kind.as_ptr().cast_mut(),
+                    0,
+                    0.0,
+                    0.0,
+                    &raw mut id
+                ),
+                VrnResult::Ok
+            );
+            assert_eq!(id, 1);
+            let json = snapshot_json(context);
+            assert!(
+                json.contains(r#""kind":"cube""#),
+                "snapshot must carry the cube kind, got: {json}"
             );
             vrn_context_destroy(context);
         }

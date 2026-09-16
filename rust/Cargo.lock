@@ -1339,6 +1339,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "veronica-geometry"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "thiserror",
+ "veronica-core",
+ "veronica-graph",
+]
+
+[[package]]
 name = "veronica-graph"
 version = "0.1.0"
 dependencies = [

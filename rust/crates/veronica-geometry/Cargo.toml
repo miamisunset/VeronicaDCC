@@ -1,0 +1,17 @@
+[package]
+name = "veronica-geometry"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+veronica-core.workspace = true
+veronica-graph.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
