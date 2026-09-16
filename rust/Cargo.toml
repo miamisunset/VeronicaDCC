@@ -21,6 +21,7 @@ bevy_app = "0.19"
 bevy_transform = "0.19"
 bevy_asset = "0.19"
 bevy_mesh = "0.19"
+bevy_math = "0.19"
 petgraph = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -28,6 +29,7 @@ thiserror = "2"
 cbindgen = "0.28"
 veronica-core = { path = "crates/veronica-core" }
 veronica-graph = { path = "crates/veronica-graph" }
+veronica-geometry = { path = "crates/veronica-geometry" }
 veronica-scene = { path = "crates/veronica-scene" }
 
 # Lint enforcement. Single source of truth — crates opt in via

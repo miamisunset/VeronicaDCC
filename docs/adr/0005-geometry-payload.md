@@ -1,6 +1,7 @@
 # ADR 0005: Geometry payload — implicit-first, Bevy-free, primvar map
 
-- Status: accepted (build spec #17, issues #19/#20)
+- Status: accepted (build spec #17, issues #19/#20); realization and
+  handoff implemented in #20 as described below
 - Date: 2026-09-16
 
 ## Context
@@ -38,6 +39,18 @@ custom-attribute producers and shader-side binding are later work.
 exhaustive on purpose: a new kind breaks compilation until its cook path
 exists. Containers are skipped by design (they organize, they produce
 nothing). Coordinates are meters, Y-up right-handed (glossary `Unit`).
+
+Realization (#20) is pure and total over the implicit form: no new error
+type, and the `realize` match is exhaustive for the same reason. The cube
+uses the engine cuboid builder's face decomposition (six split faces, full
+`0..1` uvs per face), cross-checked vertex-for-vertex against
+`Mesh::from(Cuboid)` in `veronica-scene`'s integration tests — the oracle
+lives in scene, not geometry, so the geometry crate stays Bevy-free
+including dev-dependencies. The handoff converts once: pipeline `normal`
+binds to engine `NORMAL`, pipeline `uv` to engine `UV_0`, with missing /
+misshapen / short channels failing loudly by name. Custom namespaced
+channels are preserved upstream but not uploaded: the engine attribute id
+needs a `&'static str`, so shader-side binding for customs is later work.
 
 ## Consequences
 

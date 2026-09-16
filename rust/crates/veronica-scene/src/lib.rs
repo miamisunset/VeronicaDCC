@@ -15,12 +15,40 @@ use std::time::Duration;
 use thiserror::Error;
 use veronica_core::{BoneTransform, MeshId, MorphWeights};
 
+mod mesh;
+
+pub use mesh::render_mesh_from_evaluated;
+
 /// Errors for scene operations.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum SceneError {
     /// Requested entity does not exist.
     #[error("unknown scene entity")]
     UnknownEntity,
+    /// A standard attribute channel is absent from the evaluated mesh.
+    #[error("missing attribute \"{name}\"")]
+    MissingAttribute {
+        /// Channel key that was looked up.
+        name: String,
+    },
+    /// A standard attribute channel has the wrong shape.
+    #[error("attribute \"{name}\" must be {expected}")]
+    AttributeShape {
+        /// Channel key that was looked up.
+        name: String,
+        /// Shape the handoff requires (e.g. "a vec3 channel").
+        expected: &'static str,
+    },
+    /// A standard attribute channel's length differs from the vertex count.
+    #[error("attribute \"{name}\" has {actual} elements for {expected} vertices")]
+    AttributeLength {
+        /// Channel key that was looked up.
+        name: String,
+        /// Vertex count the channel must match.
+        expected: usize,
+        /// Elements the channel actually holds.
+        actual: usize,
+    },
 }
 
 /// Bevy component mirroring [`MorphWeights`] for one mesh entity.
