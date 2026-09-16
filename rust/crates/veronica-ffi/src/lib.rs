@@ -67,9 +67,11 @@ impl VrnContext {
 
     /// Render the current scene state into the owned surface, creating it
     /// on the first call. Returns `Internal` when the framework refuses
-    /// the surface or its lock.
+    /// the surface or its lock, or when the GPU frame readback fails.
     fn publish_frame(&mut self) -> VrnResult {
-        let frame = self.scene.render_frame();
+        let Ok(frame) = self.scene.render_frame() else {
+            return VrnResult::Internal;
+        };
         if self.surface.is_none() {
             match FrameSurface::new(frame.width(), frame.height()) {
                 Ok(surface) => self.surface = Some(surface),

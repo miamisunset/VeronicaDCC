@@ -18,6 +18,15 @@ bevy_transform.workspace = true
 bevy_asset.workspace = true
 bevy_mesh.workspace = true
 bevy_math.workspace = true
+bevy_camera.workspace = true
+bevy_core_pipeline.workspace = true
+bevy_diagnostic.workspace = true
+bevy_image.workspace = true
+bevy_light.workspace = true
+bevy_pbr.workspace = true
+bevy_render.workspace = true
+bevy_time.workspace = true
+bevy_window.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

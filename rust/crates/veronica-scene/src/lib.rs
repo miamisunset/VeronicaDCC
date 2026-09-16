@@ -1,22 +1,34 @@
 //! Headless Bevy scene: ECS world mirroring the procedural DAG output.
 //!
-//! Runs without a window or renderer (`ScheduleRunnerPlugin`-only setup).
-//! Never call `App::run()` on the Swift `MainActor` thread — drive via
+//! Runs headless with an explicit GPU plugin set (see `gpu`): no window, an
+//! offscreen `Rgba8UnormSrgb` target, synchronous CPU readback. Never call
+//! `App::run()` on the Swift `MainActor` thread — drive via
 //! [`SceneWorld::update`] from a background thread or a Swift-driven tick.
 //!
-//! The world owns a small Rust-built demo scene (camera marker, light
-//! marker, spinning cube) so the frame loop has observable ECS state before
-//! the render slice (ADR 0001) attaches visual meaning to it.
+//! The world owns a small Rust-built demo scene (camera, light, spinning
+//! cube with real render components) so the frame loop publishes observable
+//! GPU pixels before the graph cook path binds real content (ADR 0001).
 
-use bevy_app::{App, ScheduleRunnerPlugin, Update};
+use bevy_app::{App, Update};
+use bevy_asset::Assets;
+use bevy_camera::{Camera, Camera3d, RenderTarget, visibility::Visibility};
+use bevy_core_pipeline::CorePipelinePlugin;
+use bevy_diagnostic::FrameCountPlugin;
 use bevy_ecs::prelude::*;
-use bevy_math::prelude::EulerRot;
+use bevy_image::{Image, ImagePlugin};
+use bevy_light::{DirectionalLight, LightPlugin};
+use bevy_math::prelude::{EulerRot, Vec3};
+use bevy_mesh::{Mesh, Mesh3d, MeshPlugin};
+use bevy_pbr::{MeshMaterial3d, PbrPlugin, StandardMaterial};
+use bevy_render::RenderPlugin;
+use bevy_time::TimePlugin;
 use bevy_transform::prelude::Transform;
-use std::time::Duration;
+use bevy_window::{ExitCondition, WindowPlugin};
 use thiserror::Error;
 use veronica_core::{BoneTransform, MeshId, MorphWeights};
 
 mod cook;
+mod gpu;
 mod mesh;
 mod render;
 
@@ -75,6 +87,12 @@ pub enum SceneError {
         /// Requested height in pixels.
         height: u32,
     },
+    /// The GPU rendered but its bytes could not be read back.
+    #[error("gpu frame readback failed: {reason}")]
+    RenderReadback {
+        /// Fixed label naming the readback step that failed.
+        reason: &'static str,
+    },
 }
 
 /// Bevy component mirroring [`MorphWeights`] for one mesh entity.
@@ -104,12 +122,17 @@ pub struct MeshTag(pub MeshId);
 #[derive(Debug, Clone, Copy, Default, Component)]
 pub struct DemoScene;
 
-/// Marker for the demo camera. Render meaning attaches in the render slice
-/// (ADR 0001); until then this only proves ECS ownership of scene content.
+/// Marker for the demo camera. Carries the real render components
+/// ([`Camera3d`](bevy_camera::Camera3d), [`Camera`](bevy_camera::Camera),
+/// [`RenderTarget`](bevy_camera::RenderTarget), [`Transform`]) pointed at the
+/// offscreen target; the marker preserves the
+/// [`SceneWorld::entity_count`] semantics.
 #[derive(Debug, Clone, Copy, Default, Component)]
 pub struct DemoCamera;
 
-/// Marker for the demo light. See [`DemoCamera`].
+/// Marker for the demo light. Carries a real
+/// [`DirectionalLight`](bevy_light::DirectionalLight) plus [`Transform`].
+/// See [`DemoCamera`].
 #[derive(Debug, Clone, Copy, Default, Component)]
 pub struct DemoLight;
 
@@ -138,6 +161,22 @@ struct TickCount(u64);
 /// Deterministic on purpose: tests assert rotation advances without a clock.
 const DEMO_SPIN_STEP: f32 = 0.02;
 
+/// Edge length of the demo cuboid in world units.
+const DEMO_CUBE_SIZE: f32 = 1.0;
+
+/// Demo camera height above the ground plane, looking at the origin.
+const DEMO_CAMERA_HEIGHT: f32 = 1.5;
+
+/// Demo camera distance from the origin along +Z.
+const DEMO_CAMERA_DISTANCE: f32 = 4.5;
+
+/// Demo directional-light position; the light shines toward the origin.
+const DEMO_LIGHT_OFFSET_X: f32 = 2.0;
+/// Demo directional-light position; the light shines toward the origin.
+const DEMO_LIGHT_OFFSET_Y: f32 = 4.0;
+/// Demo directional-light position; the light shines toward the origin.
+const DEMO_LIGHT_OFFSET_Z: f32 = 3.0;
+
 /// Advance [`TickCount`] once per schedule run.
 fn count_ticks(mut count: ResMut<TickCount>) {
     count.0 = count.0.saturating_add(1);
@@ -157,32 +196,118 @@ pub struct SceneWorld {
 }
 
 impl SceneWorld {
-    /// Create a headless app: no window, no renderer, fixed 60 Hz schedule.
+    /// Create a headless GPU app: no window, offscreen target, manual ticks.
+    ///
+    /// Builds the explicit plugin set documented in `gpu` (order matters:
+    /// task pools, frame counter, time, transform, assets, windowless window
+    /// plugin, renderer, image, mesh, camera, light, core pipeline, PBR),
+    /// finalizes it once with `finish` + `cleanup`, then creates the
+    /// offscreen render target. Requires Metal; Bevy panics during plugin
+    /// init when no adapter exists (deliberate, see `gpu`).
     #[must_use]
     pub fn new_headless() -> Self {
         let mut app = App::new();
-        app.add_plugins(bevy_app::ScheduleRunnerPlugin::run_loop(
-            Duration::from_secs_f64(1.0 / 60.0),
+        app.add_plugins((
+            bevy_app::TaskPoolPlugin::default(),
+            FrameCountPlugin,
+            TimePlugin,
+            bevy_transform::TransformPlugin,
+            bevy_asset::AssetPlugin::default(),
+            WindowPlugin {
+                primary_window: None,
+                exit_condition: ExitCondition::DontExit,
+                ..Default::default()
+            },
+            RenderPlugin::default(),
+            ImagePlugin::default(),
+            MeshPlugin,
+            bevy_camera::CameraPlugin,
+            LightPlugin,
+            CorePipelinePlugin,
+            PbrPlugin::default(),
         ));
         app.init_resource::<TickCount>()
             .add_systems(Update, (count_ticks, spin_demo_cubes));
+        app.finish();
+        app.cleanup();
+        let target = {
+            let mut images = app.world_mut().resource_mut::<Assets<Image>>();
+            gpu::create_frame_target(&mut images)
+        };
+        app.world_mut()
+            .insert_resource(gpu::GpuFrameTarget { handle: target });
         Self { app }
     }
 
-    /// Spawn the Rust-owned demo scene: camera marker, light marker, and a
-    /// spinning cube with an identity [`Transform`]. All three carry
-    /// [`DemoScene`] so [`SceneWorld::entity_count`] sees exactly them.
+    /// Spawn the Rust-owned demo scene: camera, light, and a spinning cube,
+    /// all carrying [`DemoScene`] so [`SceneWorld::entity_count`] sees
+    /// exactly them.
+    ///
+    /// Alongside the markers each entity carries real render components: the
+    /// camera gets [`Camera3d`](bevy_camera::Camera3d) plus a
+    /// [`Camera`](bevy_camera::Camera) pointed at the offscreen target, the
+    /// light a [`DirectionalLight`](bevy_light::DirectionalLight), and the
+    /// cube a cuboid [`Mesh`](bevy_mesh::Mesh) with a default
+    /// [`StandardMaterial`](bevy_pbr::StandardMaterial). The cube keeps its
+    /// [`MeshTag`] and identity [`Transform`], which
+    /// [`spin_demo_cubes`] rotates every [`SceneWorld::update`].
     #[must_use]
     pub fn spawn_demo_scene(&mut self) -> DemoSceneIds {
+        let cube_mesh = {
+            let mut meshes = self.app.world_mut().resource_mut::<Assets<Mesh>>();
+            meshes.add(Mesh::from(bevy_math::primitives::Cuboid::new(
+                DEMO_CUBE_SIZE,
+                DEMO_CUBE_SIZE,
+                DEMO_CUBE_SIZE,
+            )))
+        };
+        let cube_material = {
+            let mut materials = self
+                .app
+                .world_mut()
+                .resource_mut::<Assets<StandardMaterial>>();
+            materials.add(StandardMaterial::default())
+        };
+        let target = self
+            .app
+            .world()
+            .resource::<gpu::GpuFrameTarget>()
+            .handle
+            .clone();
         let world = self.app.world_mut();
-        let camera = world.spawn((DemoScene, DemoCamera)).id();
-        let light = world.spawn((DemoScene, DemoLight)).id();
+        let camera = world
+            .spawn((
+                DemoScene,
+                DemoCamera,
+                Camera3d::default(),
+                Camera::default(),
+                RenderTarget::from(target),
+                Transform::from_xyz(0.0, DEMO_CAMERA_HEIGHT, DEMO_CAMERA_DISTANCE)
+                    .looking_at(Vec3::ZERO, Vec3::Y),
+            ))
+            .id();
+        let light = world
+            .spawn((
+                DemoScene,
+                DemoLight,
+                DirectionalLight::default(),
+                Transform::from_xyz(
+                    DEMO_LIGHT_OFFSET_X,
+                    DEMO_LIGHT_OFFSET_Y,
+                    DEMO_LIGHT_OFFSET_Z,
+                )
+                .looking_at(Vec3::ZERO, Vec3::Y),
+            ))
+            .id();
         let cube = world
             .spawn((
                 DemoScene,
                 DemoCube,
                 MeshTag(MeshId(0)),
                 Transform::default(),
+                Mesh3d(cube_mesh),
+                MeshMaterial3d(cube_material),
+                Visibility::default(),
             ))
             .id();
         DemoSceneIds {
@@ -218,13 +343,17 @@ impl SceneWorld {
     /// Render the current demo-scene state into a fixed-size frame.
     ///
     /// The frame-publish seam: Swift presents whatever this returns without
-    /// interpreting scene content. Pixels derive from [`SceneWorld::spin_angle`],
-    /// so consecutive ticks publish observably different frames.
-    #[must_use]
-    pub fn render_frame(&mut self) -> RenderFrame {
-        // Fixed constants are nonzero by construction; the fallible entry
-        // point is `render_demo_frame`, pinned by its own tests.
-        render::rasterize_for_world(self.spin_angle())
+    /// interpreting scene content. Pixels come off the GPU
+    /// (`gpu::readback_frame`): the turntable still drives visible change
+    /// because [`spin_demo_cubes`] rotates the cube's live [`Transform`]
+    /// every tick, so consecutive ticks publish observably different frames.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SceneError::RenderReadback`] when the render target has no
+    /// GPU image yet or the staging copy/map fails.
+    pub fn render_frame(&mut self) -> Result<RenderFrame, SceneError> {
+        gpu::readback_frame(&mut self.app)
     }
 
     /// Number of live demo-scene entities (those tagged [`DemoScene`]).
@@ -278,12 +407,6 @@ impl SceneWorld {
     pub fn update(&mut self) {
         self.app.update();
     }
-}
-
-// Keep `ScheduleRunnerPlugin` import used across Bevy versions.
-#[allow(dead_code, reason = "compile-time assertion shim, not runtime code")]
-fn _assert_runner_plugin_is_linkable(p: ScheduleRunnerPlugin) -> ScheduleRunnerPlugin {
-    p
 }
 
 #[cfg(test)]
