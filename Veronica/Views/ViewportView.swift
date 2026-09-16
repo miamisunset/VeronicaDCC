@@ -165,6 +165,8 @@ struct ViewportMetalHost: NSViewRepresentable {
     /// Invoked on the main thread, once per display refresh, carrying the
     /// host's pacing observations (fps EMA + last present cost).
     var onFrame: (FramePacing) -> Void
+    /// Forwards nav-view gestures (orbit/pan/dolly/frame-all) to the store.
+    var onAction: (ViewportFeature.Action) -> Void
     /// Latest published frame handle from `ViewportFeature.State`.
     var frame: VideoFrame?
 
@@ -387,7 +389,8 @@ struct ViewportMetalHost: NSViewRepresentable {
         Coordinator(onFrame: onFrame)
     }
     func makeNSView(context: Context) -> MTKView {
-        let view = MTKView()
+        let view = ViewportNavView()
+        view.onAction = onAction
         let device = MTLCreateSystemDefaultDevice()
         view.device = device
         // The present path blits into the drawable, and blit writes are
@@ -413,6 +416,9 @@ struct ViewportMetalHost: NSViewRepresentable {
     func updateNSView(_ nsView: MTKView, context: Context) {
         context.coordinator.onFrame = onFrame
         context.coordinator.adopt(frame: frame)
+        // The host struct is rebuilt every tick: re-pin the gesture sink so
+        // a stale `store.send` can never outlive a store replacement.
+        (nsView as? ViewportNavView)?.onAction = onAction
         // Backing-pixel intent from the live layout, sent only on
         // hysteresis-exceeding change: `updateNSView` runs every tick, but
         // the FFI call (a GPU target rebuild) fires only on real resizes.
@@ -454,6 +460,7 @@ struct ViewportView: View {
         ZStack(alignment: .bottomLeading) {
             ViewportMetalHost(
                 onFrame: { pacing in store.send(.frame(pacing: pacing)) },
+                onAction: { action in store.send(action) },
                 frame: store.frame
             )
             VStack(alignment: .leading, spacing: 2) {

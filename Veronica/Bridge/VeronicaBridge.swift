@@ -155,6 +155,52 @@ nonisolated enum EngineBridge {
         }
     }
 
+    /// Orbit the viewport camera by a drag delta in pixels (issue #41).
+    ///
+    /// Fire-and-forget on `engineQueue`, mirroring `setViewportSize`: Swift
+    /// maps the gesture (LMB-drag) to pixels; turntable semantics live in
+    /// `veronica-scene`.
+    static func viewportOrbit(dxPixels: Double, dyPixels: Double) {
+        engineQueue.async {
+            guard let context = graphContext.pointer else { return }
+            _ = vrnViewportOrbit(context, Float(dxPixels), Float(dyPixels))
+        }
+    }
+
+    /// Pan the viewport camera and pivot rigidly by a drag delta in pixels.
+    ///
+    /// Fire-and-forget on `engineQueue` (see `viewportOrbit`). Swift maps
+    /// the gesture (MMB-drag, Command+LMB) to pixels.
+    static func viewportPan(dxPixels: Double, dyPixels: Double) {
+        engineQueue.async {
+            guard let context = graphContext.pointer else { return }
+            _ = vrnViewportPan(context, Float(dxPixels), Float(dyPixels))
+        }
+    }
+
+    /// Dolly toward `cursor` (NDC, x/y in [-1, 1]) by `logFactor`.
+    ///
+    /// Fire-and-forget on `engineQueue` (see `viewportOrbit`). Swift maps
+    /// the gesture (wheel, RMB-drag, Option+LMB) to the factor; distance
+    /// scaling, clamping, and the pivot pull live in `veronica-scene`.
+    static func viewportDolly(logFactor: Double, cursorXNDC: Double, cursorYNDC: Double) {
+        engineQueue.async {
+            guard let context = graphContext.pointer else { return }
+            _ = vrnViewportDolly(context, Float(logFactor), Float(cursorXNDC), Float(cursorYNDC))
+        }
+    }
+
+    /// Frame the whole scene: pivot to bounds center, distance to fit.
+    ///
+    /// Fire-and-forget on `engineQueue` (see `viewportOrbit`). Snap, not
+    /// animated; preserves view direction; no meshed entities is a no-op.
+    static func viewportFrameAll() {
+        engineQueue.async {
+            guard let context = graphContext.pointer else { return }
+            _ = vrnViewportFrameAll(context)
+        }
+    }
+
     // MARK: - Operator graph (ADR-0002)
     /// `VrnResult` codes mirrored from `veronica-ffi`.
     ///
@@ -215,6 +261,29 @@ nonisolated enum EngineBridge {
         _ context: UnsafeMutableRawPointer?,
         _ width: UInt32,
         _ height: UInt32
+    ) -> Int32
+    @_silgen_name("vrn_viewport_orbit")
+    nonisolated private static func vrnViewportOrbit(
+        _ context: UnsafeMutableRawPointer?,
+        _ horizontalPx: Float,
+        _ verticalPx: Float
+    ) -> Int32
+    @_silgen_name("vrn_viewport_pan")
+    nonisolated private static func vrnViewportPan(
+        _ context: UnsafeMutableRawPointer?,
+        _ horizontalPx: Float,
+        _ verticalPx: Float
+    ) -> Int32
+    @_silgen_name("vrn_viewport_dolly")
+    nonisolated private static func vrnViewportDolly(
+        _ context: UnsafeMutableRawPointer?,
+        _ logFactor: Float,
+        _ cursorXNDC: Float,
+        _ cursorYNDC: Float
+    ) -> Int32
+    @_silgen_name("vrn_viewport_frame_all")
+    nonisolated private static func vrnViewportFrameAll(
+        _ context: UnsafeMutableRawPointer?
     ) -> Int32
     @_silgen_name("vrn_graph_create_operator")
     nonisolated private static func vrnGraphCreateOperator(
