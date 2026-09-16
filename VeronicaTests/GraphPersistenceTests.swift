@@ -87,7 +87,8 @@ struct MockGraphEngineTests {
         #expect(snapshot.operators.map(\.kind) == ["cube"])
     }
 
-    @Test func createRejectsUnknownKindAndParent() async {        let engine = MockGraphEngine()
+    @Test func createRejectsUnknownKindAndParent() async {
+        let engine = MockGraphEngine()
         await #expect(throws: GraphEngineError.self) {
             try await engine.create(
                 kind: "blur",

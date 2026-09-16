@@ -251,7 +251,8 @@ nonisolated struct OperatorTypeDef: Equatable, Sendable {
 
 /// Static registry backing the canvas add menu (ADR-0002: Swift-static).
 ///
-/// Single entry in slice 1; operator #2 is a pure extension.
+/// Container-only for now: the engine accepts `"cube"` but cube creation UX
+/// belongs to the editing work, so the menu stays a single entry until then.
 ///
 /// Explicitly `nonisolated`: read from background engine effects and views.
 nonisolated enum OperatorTypeRegistry {
