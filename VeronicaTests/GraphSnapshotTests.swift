@@ -93,13 +93,70 @@ struct GraphSnapshotTests {
         let mirrored = OperatorMirror(
             id: 1, kind: "container", name: "P", parent: nil,
             position: GraphPosition(x: 1, y: 2),
-            parameters: ["seed": "7"]
+            parameters: ["seed": .text("7")]
         )
         let snapshot = GraphSnapshot(operators: [mirrored])
         let data = try JSONEncoder().encode(snapshot)
         let roundTripped = try JSONDecoder().decode(GraphSnapshot.self, from: data)
         #expect(roundTripped == snapshot)
-        #expect(roundTripped.operators.first?.parameters == ["seed": "7"])
+        #expect(roundTripped.operators.first?.parameters == ["seed": .text("7")])
+    }
+
+    @Test func typedParametersDecodeAllFiveVariantsWithF64Parity() throws {
+        let json = """
+        {"version": 2, "operators": [
+            {"id": 1, "kind": "container", "name": "P",
+             "parent": null, "position": {"x": 1.0, "y": 2.0},
+             "parameters": {
+                 "label": {"text": "hello"},
+                 "gain": {"float": 0.12345678901234568},
+                 "seed": {"integer": 7},
+                 "enabled": {"flag": true},
+                 "offset": {"vec3": [0.1, 0.2, 0.30000000000000004]}
+             }}
+        ], "edges": []}
+        """
+        let decoded = try JSONDecoder().decode(GraphSnapshot.self, from: Data(json.utf8))
+        #expect(decoded.version == GraphSnapshot.currentVersion)
+        #expect(GraphSnapshot.currentVersion == 2)
+        let parameters = try #require(decoded.operators.first?.parameters)
+        #expect(parameters["label"] == .text("hello"))
+        #expect(parameters["gain"] == .float(0.12345678901234568))
+        #expect(parameters["seed"] == .integer(7))
+        #expect(parameters["enabled"] == .flag(true))
+        #expect(parameters["offset"] == .vec3(0.1, 0.2, 0.30000000000000004))
+        // f64 triple parity: the wire triple survives bit-identical.
+        if case let .vec3(x, y, z) = parameters["offset"] {
+            #expect(x.bitPattern == (0.1).bitPattern)
+            #expect(y.bitPattern == (0.2).bitPattern)
+            #expect(z.bitPattern == (0.30000000000000004).bitPattern)
+        } else {
+            Issue.record("expected a vec3 for offset")
+        }
+        // Round-trip preserves the typed map.
+        let recoded = try JSONEncoder().encode(decoded)
+        let roundTripped = try JSONDecoder().decode(GraphSnapshot.self, from: recoded)
+        #expect(roundTripped == decoded)
+    }
+
+    @Test func malformedParameterValuesAreRejected() throws {
+        let payloads = [
+            "{}",
+            #"{"text": "a", "flag": true}"#,
+            #"{"vec3": [1.0, 2.0]}"#
+        ]
+        for payload in payloads {
+            let json = """
+            {"version": 2, "operators": [
+                {"id": 1, "kind": "container", "name": "P",
+                 "parent": null, "position": {"x": 0.0, "y": 0.0},
+                 "parameters": {"bad": \(payload)}}
+            ], "edges": []}
+            """
+            #expect(throws: DecodingError.self) {
+                try JSONDecoder().decode(GraphSnapshot.self, from: Data(json.utf8))
+            }
+        }
     }
 
     @Test func codableUsesDoubleNeverFloat() throws {

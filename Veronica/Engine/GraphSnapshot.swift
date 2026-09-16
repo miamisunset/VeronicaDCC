@@ -16,7 +16,124 @@ nonisolated struct GraphPosition: Codable, Equatable, Sendable {
     var y: Double
 }
 
-/// Read-only mirror of one Rust-owned operator (ADR-0002 snapshot JSON v1).
+/// Typed value of one operator parameter (wire v2, ADR-0002 snapshot JSON v2).
+///
+/// Closed set mirroring Rust's `ParamValue`: exactly one lowercase-tagged
+/// payload travels on the wire (`{"text": "…"}`, `{"float": 1.5}`,
+/// `{"integer": 7}`, `{"flag": true}`, `{"vec3": [x, y, z]}`). `vec3`
+/// triples stay `Double`/`f64` end to end (ADR-0002); engine math converts
+/// only at its own boundaries.
+///
+/// Explicitly `nonisolated`: values cross from background engine effects
+/// to the main actor (see `GraphPosition`).
+nonisolated enum ParameterValue: Codable, Equatable, Sendable {
+    /// UTF-8 text. The only variant the editor writes (see `MockGraphEngine`).
+    case text(String)
+    /// Double-precision scalar.
+    case float(Double)
+    /// Signed integer.
+    case integer(Int)
+    /// Boolean flag.
+    case flag(Bool)
+    /// Triple of doubles, traveling as a 3-element array on the wire.
+    case vec3(Double, Double, Double)
+
+    /// Wire tags: exactly the lowercase Rust variant names.
+    private enum Tag: String, CodingKey {
+        case text
+        case float
+        case integer
+        case flag
+        case vec3
+    }
+
+    /// Decodes exactly one tagged payload; zero or multiple tags fail.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: Tag.self)
+        var candidates: [ParameterValue] = []
+        if let value = try container.decodeIfPresent(String.self, forKey: .text) {
+            candidates.append(.text(value))
+        }
+        if let value = try container.decodeIfPresent(Double.self, forKey: .float) {
+            candidates.append(.float(value))
+        }
+        if let value = try container.decodeIfPresent(Int.self, forKey: .integer) {
+            candidates.append(.integer(value))
+        }
+        if let value = try container.decodeIfPresent(Bool.self, forKey: .flag) {
+            candidates.append(.flag(value))
+        }
+        if let triple = try container.decodeIfPresent([Double].self, forKey: .vec3) {
+            guard triple.count == 3 else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .vec3,
+                    in: container,
+                    debugDescription: "vec3 expects exactly 3 numbers, found \(triple.count)."
+                )
+            }
+            candidates.append(.vec3(triple[0], triple[1], triple[2]))
+        }
+        guard candidates.count == 1, let value = candidates.first else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .text,
+                in: container,
+                debugDescription: "Parameter value must carry exactly one of text/float/integer/flag/vec3."
+            )
+        }
+        self = value
+    }
+
+    /// Encodes this value as its single tagged payload.
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: Tag.self)
+        switch self {
+        case let .text(value):
+            try container.encode(value, forKey: .text)
+        case let .float(value):
+            try container.encode(value, forKey: .float)
+        case let .integer(value):
+            try container.encode(value, forKey: .integer)
+        case let .flag(value):
+            try container.encode(value, forKey: .flag)
+        case let .vec3(x, y, z):
+            try container.encode([x, y, z], forKey: .vec3)
+        }
+    }
+
+    /// Lowercase wire tag, reused as the read-only type label in the editor.
+    var typeLabel: String {
+        switch self {
+        case .text:
+            "text"
+        case .float:
+            "float"
+        case .integer:
+            "integer"
+        case .flag:
+            "flag"
+        case .vec3:
+            "vec3"
+        }
+    }
+
+    /// Read-only rendering of the payload for the parameter editor.
+    var displayText: String {
+        switch self {
+        case let .text(value):
+            value
+        case let .float(value):
+            String(value)
+        case let .integer(value):
+            String(value)
+        case let .flag(value):
+            String(value)
+        case let .vec3(x, y, z):
+            "(\(x), \(y), \(z))"
+        }
+    }
+}
+
+/// Read-only mirror of one Rust-owned operator (ADR-0002 snapshot JSON v2).
 ///
 /// Swift never constructs graph content; it mirrors what `vrn_graph_snapshot`
 /// reports and sends mutation intents back across the FFI boundary.
@@ -34,18 +151,19 @@ nonisolated struct OperatorMirror: Codable, Equatable, Sendable, Identifiable {
     var parent: UInt64?
     /// Canvas position owned by Rust.
     var position: GraphPosition
-    /// Per-operator parameter map (slice-1 parameter editor; string map).
+    /// Per-operator parameter map (typed values, wire v2; keys sorted).
     /// Additive: absent on the wire decodes to empty.
-    var parameters: [String: String] = [:]
+    var parameters: [String: ParameterValue] = [:]
 
-    /// Creates a mirror. `parameters` defaults to empty for slice-1 call sites.
+    /// Creates a mirror. `parameters` defaults to empty for call sites
+    /// without parameters.
     init(
         id: UInt64,
         kind: String,
         name: String,
         parent: UInt64?,
         position: GraphPosition,
-        parameters: [String: String] = [:]
+        parameters: [String: ParameterValue] = [:]
     ) {
         self.id = id
         self.kind = kind
@@ -63,11 +181,11 @@ nonisolated struct OperatorMirror: Codable, Equatable, Sendable, Identifiable {
         name = try container.decode(String.self, forKey: .name)
         parent = try container.decodeIfPresent(UInt64.self, forKey: .parent)
         position = try container.decode(GraphPosition.self, forKey: .position)
-        parameters = try container.decodeIfPresent([String: String].self, forKey: .parameters) ?? [:]
+        parameters = try container.decodeIfPresent([String: ParameterValue].self, forKey: .parameters) ?? [:]
     }
 }
 
-/// Whole-graph mirror decoded from `vrn_graph_snapshot` JSON (schema v1).
+/// Whole-graph mirror decoded from `vrn_graph_snapshot` JSON (schema v2).
 ///
 /// One format serves persistence and (future) undo: `GraphSnapshot` is what
 /// autosave writes and what launch-time `restore` reads back.
@@ -75,8 +193,8 @@ nonisolated struct OperatorMirror: Codable, Equatable, Sendable, Identifiable {
 /// Explicitly `nonisolated`: snapshots cross from background engine effects
 /// to the main actor (see `GraphPosition`).
 nonisolated struct GraphSnapshot: Codable, Equatable, Sendable {
-    /// Snapshot schema version. Always `1`; restore rejects anything else.
-    static let currentVersion = 1
+    /// Snapshot schema version. Always `2`; restore rejects anything else.
+    static let currentVersion = 2
 
     /// Schema version of this snapshot.
     var version: Int

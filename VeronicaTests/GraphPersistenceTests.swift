@@ -204,7 +204,8 @@ struct MockGraphEngineTests {
     @Test func restoreRejectsWrongVersionAndContinuesIds() async throws {
         let engine = MockGraphEngine()
         await #expect(throws: GraphEngineError.self) {
-            try await engine.restore(GraphSnapshot(version: 2, operators: []))
+            // The pre-retype v1 schema is rejected loudly, never misread.
+            try await engine.restore(GraphSnapshot(version: 1, operators: []))
         }
         try await engine.restore(GraphSnapshot(operators: [
             OperatorMirror(

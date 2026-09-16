@@ -1,13 +1,17 @@
 import ComposableArchitecture
 import SwiftUI
 
-/// Third pane: the selection-driven parameter editor (slice 1: name only).
+/// Third pane: the selection-driven parameter editor.
 ///
 /// Reads the shared `NodeGraphFeature` store. Empty state when nothing (or a
-/// dead id) is selected; otherwise the selected operator's kind header plus
-/// a Name field bound to the editor draft. Commits travel as
-/// `setParameter(id, "name", draft)`; failures surface in-pane via
-/// `lastError` so a failed commit is never silent.
+/// dead id) is selected; otherwise the selected operator's kind header, a
+/// Name field bound to the editor draft, and the stored typed parameters.
+/// Commits travel as `setParameter(id, "name", draft)`; failures surface
+/// in-pane via `lastError` so a failed commit is never silent.
+///
+/// Only the virtual `name` key (the Name field, always text) is editable.
+/// Every stored value renders read-only with its lowercase type tag, so the
+/// UI cannot corrupt non-text types it has no commit path for.
 struct ParameterEditorView: View {
     /// Shared feature store.
     @Bindable var store: StoreOf<NodeGraphFeature>
@@ -41,6 +45,14 @@ struct ParameterEditorView: View {
                 }
                 .accessibilityIdentifier("parameterNameField")
                 .accessibilityLabel("Operator name")
+                if !mirrored.parameters.isEmpty {
+                    Divider()
+                    ForEach(mirrored.parameters.keys.sorted(), id: \.self) { key in
+                        if let value = mirrored.parameters[key] {
+                            parameterRow(key: key, value: value)
+                        }
+                    }
+                }
                 if let message = store.lastError {
                     Text(message)
                         .font(.caption)
@@ -69,6 +81,22 @@ struct ParameterEditorView: View {
     private func kindLabel(for mirrored: OperatorMirror) -> String {
         OperatorTypeRegistry.all.first { $0.kind == mirrored.kind }?.displayName
             ?? mirrored.kind
+    }
+
+    /// One read-only parameter row: `key`, payload, and lowercase type tag.
+    private func parameterRow(key: String, value: ParameterValue) -> some View {
+        HStack {
+            Text(key)
+                .font(.callout)
+            Spacer()
+            Text(value.displayText)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            Text(value.typeLabel)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .accessibilityIdentifier("parameterRow-\(key)")
     }
 }
 

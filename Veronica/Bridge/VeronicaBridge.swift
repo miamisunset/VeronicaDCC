@@ -356,7 +356,7 @@ nonisolated enum EngineBridge {
         }
     }
 
-    /// Replaces the whole DAG from a snapshot. Rejects `version != 1` in Rust.
+    /// Replaces the whole DAG from a snapshot. Rejects `version != 2` in Rust.
     ///
     /// Explicitly `nonisolated` (see `createOperator`).
     nonisolated static func restoreGraphSnapshot(_ snapshot: GraphSnapshot) async throws(GraphEngineError) {
