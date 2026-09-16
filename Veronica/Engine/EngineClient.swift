@@ -92,6 +92,17 @@ nonisolated struct EngineClient: Sendable {
     var requestSnapshot: @Sendable () async throws(GraphEngineError) -> GraphSnapshot
     /// Replace the whole DAG from a snapshot. Rejects `version != 2`.
     var restoreSnapshot: @Sendable (GraphSnapshot) async throws(GraphEngineError) -> Void
+    /// Orbit the viewport camera by a drag delta in pixels. Fire-and-forget
+    /// (issue #41): hops to the engine queue inside `EngineBridge`.
+    var viewportOrbit: @Sendable (Double, Double) -> Void
+    /// Pan the viewport camera and pivot rigidly by a drag delta in pixels.
+    /// Fire-and-forget (see `viewportOrbit`).
+    var viewportPan: @Sendable (Double, Double) -> Void
+    /// Dolly toward `cursor` (NDC) by `logFactor` (positive zooms in).
+    /// Fire-and-forget (see `viewportOrbit`).
+    var viewportDolly: @Sendable (Double, CursorNDC) -> Void
+    /// Frame the whole scene (snap to fit). Fire-and-forget.
+    var viewportFrameAll: @Sendable () -> Void
 }
 
 extension EngineClient: DependencyKey {
@@ -144,7 +155,21 @@ extension EngineClient: DependencyKey {
                     return try await mock.restore(snapshot)
                 }
                 return try await EngineBridge.restoreGraphSnapshot(snapshot)
-            }
+            },
+            viewportOrbit: { (dx: Double, dy: Double) in
+                EngineBridge.viewportOrbit(dxPixels: dx, dyPixels: dy)
+            },
+            viewportPan: { (dx: Double, dy: Double) in
+                EngineBridge.viewportPan(dxPixels: dx, dyPixels: dy)
+            },
+            viewportDolly: { (logFactor: Double, cursor: CursorNDC) in
+                EngineBridge.viewportDolly(
+                    logFactor: logFactor,
+                    cursorXNDC: cursor.x,
+                    cursorYNDC: cursor.y
+                )
+            },
+            viewportFrameAll: { EngineBridge.viewportFrameAll() }
         )
     }()
 
@@ -156,7 +181,11 @@ extension EngineClient: DependencyKey {
         setParameter: { _, _, _ in },
         deleteOperator: { _ in },
         requestSnapshot: { GraphSnapshot(operators: []) },
-        restoreSnapshot: { _ in }
+        restoreSnapshot: { _ in },
+        viewportOrbit: { _, _ in },
+        viewportPan: { _, _ in },
+        viewportDolly: { _, _ in },
+        viewportFrameAll: {}
     )
 }
 

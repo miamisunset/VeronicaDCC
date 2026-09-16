@@ -35,6 +35,16 @@ struct ViewportFeature {
         case frame(pacing: FramePacing)
         /// Engine answered with fresh stats.
         case statsResponse(SceneStats)
+        /// Orbit the camera by a drag delta in pixels (LMB-drag).
+        case orbitDelta(dx: Double, dy: Double)
+        /// Pan camera and pivot rigidly by a drag delta in pixels
+        /// (MMB-drag, Command+LMB).
+        case panDelta(dx: Double, dy: Double)
+        /// Dolly toward `cursor` (NDC) by `logFactor` (wheel, RMB-drag,
+        /// Option+LMB).
+        case dolly(logFactor: Double, cursor: CursorNDC)
+        /// Frame the whole scene (snap to fit, `F` key).
+        case frameAll
     }
 
     @Dependency(\.engineClient) var engine
@@ -60,6 +70,22 @@ struct ViewportFeature {
                 state.timings = stats.timings
                 state.frameCount += 1
                 return .none
+            case let .orbitDelta(dx, dy):
+                // Fire-and-forget nav intents: no state change, no answer.
+                // The closure is snapshotted here (MainActor) because the
+                // `.run` body is nonisolated; the client hops to the engine
+                // queue itself.
+                let orbit = engine.viewportOrbit
+                return .run { _ in orbit(dx, dy) }
+            case let .panDelta(dx, dy):
+                let pan = engine.viewportPan
+                return .run { _ in pan(dx, dy) }
+            case let .dolly(logFactor, cursor):
+                let dolly = engine.viewportDolly
+                return .run { _ in dolly(logFactor, cursor) }
+            case .frameAll:
+                let frameAll = engine.viewportFrameAll
+                return .run { _ in frameAll() }
             }
         }
     }
