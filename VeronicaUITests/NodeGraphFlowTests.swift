@@ -98,6 +98,93 @@ final class NodeGraphFlowTests: XCTestCase {
         app.descendants(matching: .any)[identifier]
     }
 
+    /// Spins until `condition` holds: toolbar-driven relayouts apply on the
+    /// next runloop turn, so a bare click-then-assert races the render.
+    /// Elements re-resolve on every access, so the condition always sees
+    /// fresh frames.
+    private func waitForLayout(
+        _ app: XCUIApplication,
+        _ condition: @escaping () -> Bool
+    ) {
+        let settled = expectation(
+            for: NSPredicate(block: { _, _ in condition() }),
+            evaluatedWith: app,
+            handler: nil
+        )
+        wait(for: [settled], timeout: 5)
+    }
+
+    /// Frame of a pane element, re-resolved fresh on every call. Static so
+    /// layout-poll closures capture no test-case state.
+    private static func paneFrame(_ app: XCUIApplication, _ identifier: String) -> CGRect {
+        app.descendants(matching: .any)[identifier].frame
+    }
+
+    /// Clicks a Panes menu item: the menu-bar path to the same explicit
+    /// layout actions the toolbar buttons send.
+    private func panesMenuItem(_ app: XCUIApplication, _ title: String) -> XCUIElement {
+        app.menuBars.menuBarItems["Panes"].click()
+        let item = app.menuItems[title]
+        XCTAssertTrue(item.waitForExistence(timeout: 5))
+        return item
+    }
+
+    /// Slice-2 rearrangement: swap Graph/Parameters order via the toolbar,
+    /// stack them via the Panes menu, then restore the slice-1 default
+    /// (mock engine).
+    ///
+    /// Order is read off pane frames (`nodeGraphPane` is the canvas leaf,
+    /// `parameterEditorPane` the editor header — both move with their pane).
+    @MainActor
+    func testPaneRearrangementSwapsOrderAndStacks() throws {
+        let app = XCUIApplication()
+        app.launchArguments = launchArguments(mocked: true, reset: true)
+        app.launch()
+
+        XCTAssertTrue(element(app, "nodeGraphPane").waitForExistence(timeout: 10))
+        XCTAssertTrue(element(app, "parameterEditorPane").waitForExistence(timeout: 5))
+
+        // Slice-1 default: row with the graph left of the editor.
+        XCTAssertLessThan(Self.paneFrame(app, "nodeGraphPane").minX, Self.paneFrame(app, "parameterEditorPane").minX)
+
+        // Toolbar swap: the editor moves left of the graph; the empty state
+        // survives (nothing is selected). Swap back restores the default.
+        element(app, "swapPanesButton").click()
+        waitForLayout(app) {
+            Self.paneFrame(app, "parameterEditorPane").minX < Self.paneFrame(app, "nodeGraphPane").minX
+        }
+        XCTAssertTrue(element(app, "parameterEmptyState").exists)
+        element(app, "swapPanesButton").click()
+        waitForLayout(app) {
+            Self.paneFrame(app, "nodeGraphPane").minX < Self.paneFrame(app, "parameterEditorPane").minX
+        }
+
+        // Panes menu stacks: a column with the graph above the editor, then
+        // back to the side-by-side default.
+        panesMenuItem(app, "Stack Graph and Parameters Vertically").click()
+        waitForLayout(app) {
+            Self.paneFrame(app, "nodeGraphPane").maxY < Self.paneFrame(app, "parameterEditorPane").minY
+        }
+        XCTAssertTrue(element(app, "parameterEmptyState").exists)
+        panesMenuItem(app, "Place Graph and Parameters Side by Side").click()
+        waitForLayout(app) {
+            Self.paneFrame(app, "nodeGraphPane").minX < Self.paneFrame(app, "parameterEditorPane").minX
+        }
+        XCTAssertTrue(element(app, "parameterEmptyState").exists)
+
+        // The toolbar orientation button drives the same switch: round-trip
+        // it so both controls' wiring is pinned, ending on the default.
+        element(app, "paneOrientationButton").click()
+        waitForLayout(app) {
+            Self.paneFrame(app, "nodeGraphPane").maxY < Self.paneFrame(app, "parameterEditorPane").minY
+        }
+        element(app, "paneOrientationButton").click()
+        waitForLayout(app) {
+            Self.paneFrame(app, "nodeGraphPane").minX < Self.paneFrame(app, "parameterEditorPane").minX
+        }
+        XCTAssertTrue(element(app, "parameterEmptyState").exists)
+    }
+
     /// Canvas-absolute coordinate for a canvas-space point.
     ///
     /// The canvas carries the pane identifier (identifiers on SwiftUI

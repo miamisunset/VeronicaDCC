@@ -839,4 +839,92 @@ struct NodeGraphFeatureTests {
             $0.editorDirty = false
         }
     }
+
+    @Test func paneOrderChangePreservesSelectionDraftAndDive() async {
+        var state = NodeGraphFeature.State()
+        state.operators = [container(id: 1, name: "Root")]
+        state.path = [1]
+        state.selected = 1
+        state.editorNameDraft = "Typed"
+        state.editorDirty = true
+        let store = TestStore(initialState: state) {
+            NodeGraphFeature()
+        }
+        // Layout is orthogonal to editing: only the order flips while the
+        // selection, dirty draft, and dive stack survive untouched (the
+        // trailing closures assert the full state, so any clobbering fails).
+        // The flip itself goes through the toggle action, so the shared
+        // transition the toolbar and menu use is the tested one.
+        await store.send(.paneOrderToggled) {
+            $0.paneOrder = .parametersFirst
+        }
+        await store.send(.paneOrderChanged(.graphFirst)) {
+            $0.paneOrder = .graphFirst
+        }
+    }
+    @Test func paneOrientationChangePreservesSelectionDraftAndDive() async {
+        var state = NodeGraphFeature.State()
+        state.operators = [container(id: 1, name: "Root")]
+        state.path = [1]
+        state.selected = 1
+        state.editorNameDraft = "Typed"
+        state.editorDirty = true
+        let store = TestStore(initialState: state) {
+            NodeGraphFeature()
+        }
+        // Same orthogonality for the row/column switch, via the toggle.
+        await store.send(.paneOrientationToggled) {
+            $0.paneOrientation = .column
+        }
+        await store.send(.paneOrientationChanged(.row)) {
+            $0.paneOrientation = .row
+        }
+    }
+
+    @Test func nonLayoutActionsLeaveArrangementUntouched() async {
+        // The anti-Houdini promise, structurally: no border or divider
+        // gesture exists, so only the two explicit layout actions may
+        // rearrange. Canvas traffic below never mentions the layout fields,
+        // and the trailing closures assert the full state — any clobbering
+        // of the non-default arrangement fails.
+        var state = NodeGraphFeature.State()
+        state.operators = [container(id: 1, name: "Root")]
+        state.paneOrder = .parametersFirst
+        state.paneOrientation = .column
+        let store = TestStore(initialState: state) {
+            NodeGraphFeature()
+        }
+        await store.send(.panChanged(delta: CGSize(width: 5, height: 5))) {
+            $0.panOffset = CGSize(width: 5, height: 5)
+        }
+        await store.send(.dragPreviewChanged(id: 1, position: GraphPosition(x: 9, y: 9))) {
+            $0.dragPreview = NodeGraphFeature.DragPreview(id: 1, position: GraphPosition(x: 9, y: 9))
+        }
+        await store.send(.dragCancelled) {
+            $0.dragPreview = nil
+        }
+        await store.send(.operatorSelected(1)) {
+            $0.selected = 1
+            $0.editorNameDraft = "Root"
+        }
+        await store.send(.diveRequested(1)) {
+            $0.path = [1]
+        }
+        await store.send(.backToParent) {
+            $0.path = []
+        }
+        // Mirror refreshes preserve the arrangement too: success advances
+        // the mirror (and re-seeds the clean editor draft), save-failure
+        // surfaces the error, and neither touches layout. (Epoch is still
+        // 0 — no intent has run in this test.)
+        let refreshed = GraphSnapshot(operators: [container(id: 1, name: "Refreshed")])
+        await store.send(.snapshotResponse(.success(refreshed), epoch: 0)) {
+            $0.operators = refreshed.operators
+            $0.editorNameDraft = "Refreshed"
+        }
+        let failure = GraphEngineError.ffiFailed(operation: "save", code: 9)
+        await store.send(.snapshotSaveFailed(refreshed, failure, epoch: 0)) {
+            $0.lastError = failure.message
+        }
+    }
 }

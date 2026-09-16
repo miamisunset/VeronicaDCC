@@ -20,6 +20,33 @@ struct NodeGraphFeature {
         var position: GraphPosition
     }
 
+    /// Which of the Graph/Parameters panes comes first in the arrangement.
+    enum PaneOrder: Equatable, Sendable {
+        /// Graph left (row) or above (column): the slice-1 default.
+        case graphFirst
+        /// Parameters left (row) or above (column).
+        case parametersFirst
+
+        /// The order the swap controls switch to.
+        var toggled: PaneOrder {
+            self == .graphFirst ? .parametersFirst : .graphFirst
+        }
+    }
+
+    /// Row (side by side) or column (stacked) arrangement of the
+    /// Graph/Parameters panes. The viewport stays put either way.
+    enum PaneOrientation: Equatable, Sendable {
+        /// Side by side: the slice-1 default.
+        case row
+        /// Stacked vertically.
+        case column
+
+        /// The orientation the switch controls switch to.
+        var toggled: PaneOrientation {
+            self == .row ? .column : .row
+        }
+    }
+
     @ObservableState
     struct State: Equatable, Sendable {
         /// Mirrored operators, in engine order.
@@ -56,6 +83,12 @@ struct NodeGraphFeature {
         var snapshotEpoch: UInt64 = 0
         /// Last intent or persistence failure, shown in the status line.
         var lastError: String?
+        /// Which of the Graph/Parameters panes comes first. Session-local:
+        /// reset on every launch, never persisted or sent to Rust.
+        var paneOrder = PaneOrder.graphFirst
+        /// Row or column arrangement of Graph/Parameters. Same
+        /// session-local lifetime as `paneOrder`.
+        var paneOrientation = PaneOrientation.row
 
         /// Operators directly inside the shown network.
         var visibleOperators: [OperatorMirror] {
@@ -109,6 +142,19 @@ struct NodeGraphFeature {
         case editorNameReverted
         /// Delete key or menu requested deletion (cascades in Rust).
         case deleteRequested(UInt64)
+        /// Explicit order swap of the Graph/Parameters panes (menu or
+        /// toolbar). Pure layout: never touches FFI, selection, drafts, or
+        /// dive state.
+        case paneOrderChanged(PaneOrder)
+        /// Order flip for the swap controls: the toggle lives here (not in
+        /// the views) so both call sites share one tested transition.
+        case paneOrderToggled
+        /// Explicit row/column switch of the Graph/Parameters panes (menu
+        /// or toolbar). Same pure-layout lifetime as `paneOrderChanged`.
+        case paneOrientationChanged(PaneOrientation)
+        /// Orientation flip for the switch controls. Same rationale as
+        /// `paneOrderToggled`.
+        case paneOrientationToggled
     }
 
     @Dependency(\.engineClient) var engine
@@ -347,6 +393,22 @@ struct NodeGraphFeature {
 
             case .editorNameReverted:
                 seedEditor(&state)
+                return .none
+
+            case let .paneOrderChanged(order):
+                state.paneOrder = order
+                return .none
+
+            case .paneOrderToggled:
+                state.paneOrder = state.paneOrder.toggled
+                return .none
+
+            case let .paneOrientationChanged(orientation):
+                state.paneOrientation = orientation
+                return .none
+
+            case .paneOrientationToggled:
+                state.paneOrientation = state.paneOrientation.toggled
                 return .none
             }
         }
