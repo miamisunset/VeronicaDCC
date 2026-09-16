@@ -36,6 +36,27 @@ final class ViewportPixelsTests: XCTestCase {
         XCTAssertEqual(entities.value as? String, "entities 3")
     }
 
+    /// Issue-#32 oracle: the timing line exists and carries the fps meter
+    /// plus the tick/stage splits. No warm-up wait: the line renders from
+    /// initial state ("0 fps · ...") before the first tick lands.
+    @MainActor
+    func testTimingLabelShowsFps() throws {
+        let app = XCUIApplication()
+        app.launch()
+
+        let timing = element(app, "viewportTimingLabel")
+        XCTAssertTrue(timing.waitForExistence(timeout: 10))
+        let value = timing.value as? String
+        XCTAssertNotNil(value)
+        XCTAssertTrue(value?.contains("fps") ?? false)
+        XCTAssertTrue(value?.contains("ms tick") ?? false)
+
+        // The frame-extents line rides alongside for the #32 matrix.
+        let frame = element(app, "viewportFrameLabel")
+        XCTAssertTrue(frame.waitForExistence(timeout: 5))
+        XCTAssertTrue((frame.value as? String)?.hasPrefix("frame ") ?? false)
+    }
+
     /// Slice-3 oracle (#30): the tick label keeps advancing across pane
     /// rearrangements — Stack/Side-by-Side plus Swap must not freeze the
     /// viewport (the slice-2 drawable fight) or black it.

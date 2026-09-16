@@ -4,7 +4,8 @@ import Testing
 @testable import Veronica
 
 /// Reducer contract: each `.frame` ticks the engine off-MainActor and the
-/// answered stats land in state with an incremented frame count.
+/// answered stats land in state with an incremented frame count. Pacing
+/// observations land immediately; tick timings ride the stats response.
 @MainActor
 struct ViewportFeatureTests {
     @Test func framePublishesEngineStats() async {
@@ -12,13 +13,28 @@ struct ViewportFeatureTests {
             ViewportFeature()
         } withDependencies: {
             $0.engineClient.tick = {
-                SceneStats(tickCount: 7, entityCount: 3)
+                SceneStats(
+                    tickCount: 7,
+                    entityCount: 3,
+                    tickMicroseconds: 8_300,
+                    timings: TickTimings(update: 5_100, readback: 2_900, upload: 300)
+                )
             }
         }
-        await store.send(.frame)
-        await store.receive(.statsResponse(SceneStats(tickCount: 7, entityCount: 3))) {
+        await store.send(.frame(pacing: FramePacing(fps: 120, presentMicroseconds: 400))) {
+            $0.frameRate = 120
+            $0.presentMicroseconds = 400
+        }
+        await store.receive(.statsResponse(SceneStats(
+            tickCount: 7,
+            entityCount: 3,
+            tickMicroseconds: 8_300,
+            timings: TickTimings(update: 5_100, readback: 2_900, upload: 300)
+        ))) {
             $0.tickCount = 7
             $0.entityCount = 3
+            $0.tickMicroseconds = 8_300
+            $0.timings = TickTimings(update: 5_100, readback: 2_900, upload: 300)
             $0.frameCount = 1
         }
     }
@@ -33,7 +49,10 @@ struct ViewportFeatureTests {
                 SceneStats(tickCount: 7, entityCount: 3)
             }
         }
-        await store.send(.frame)
+        await store.send(.frame(pacing: FramePacing(fps: 120, presentMicroseconds: 400))) {
+            $0.frameRate = 120
+            $0.presentMicroseconds = 400
+        }
         await store.receive(.statsResponse(SceneStats(tickCount: 7, entityCount: 3))) {
             $0.tickCount = 7
             $0.entityCount = 3
@@ -42,7 +61,7 @@ struct ViewportFeatureTests {
         store.dependencies.engineClient.tick = {
             SceneStats(tickCount: 2, entityCount: 3)
         }
-        await store.send(.frame)
+        await store.send(.frame(pacing: FramePacing(fps: 120, presentMicroseconds: 400)))
         await store.receive(.statsResponse(SceneStats(tickCount: 2, entityCount: 3)))
     }
 
@@ -57,7 +76,8 @@ struct ViewportFeatureTests {
                 SceneStats(tickCount: 7, entityCount: 3, frame: frame)
             }
         }
-        await store.send(.frame)
+        // Default pacing lands zeros over zeros: no state change to assert.
+        await store.send(.frame(pacing: FramePacing()))
         await store.receive(
             .statsResponse(SceneStats(tickCount: 7, entityCount: 3, frame: frame))
         ) {

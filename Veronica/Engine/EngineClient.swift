@@ -16,6 +16,40 @@ nonisolated struct SceneStats: Equatable, Sendable {
     var entityCount: UInt64
     /// Latest published frame, if a tick has published one yet.
     var frame: VideoFrame?
+    /// Wall-clock cost of the tick that produced these stats
+    /// (Bevy schedule + readback + upload), in whole microseconds.
+    /// Measured on the engine queue around `vrn_tick`.
+    var tickMicroseconds: UInt64 = 0
+    /// Per-stage splits of that tick (see `vrn_tick_timings`).
+    var timings = TickTimings()
+}
+
+/// Per-stage splits of one Rust tick, in whole microseconds.
+///
+/// Mirrors `vrn_tick_timings`: `update` is the Bevy schedule (ECS + GPU
+/// render submission), `readback` the texture-to-buffer copy plus the
+/// synchronous map, `upload` the swizzle copy into the back `IOSurface`.
+/// Debug/attribution only (issue #32) — never drives behavior.
+nonisolated struct TickTimings: Equatable, Sendable {
+    /// Bevy-schedule microseconds.
+    var update: UInt64 = 0
+    /// GPU-readback microseconds.
+    var readback: UInt64 = 0
+    /// Surface-upload microseconds.
+    var upload: UInt64 = 0
+}
+
+/// Display-pacing observations from the Metal host, carried on `.frame`.
+///
+/// `fps` is the display-link EMA (achieved presentation rate — drops below
+/// the display rate only when the main thread, i.e. the present path, is
+/// the bottleneck); `presentMicroseconds` is the last completed `draw`
+/// body. Stale by one frame by construction; a meter, not a signal.
+nonisolated struct FramePacing: Equatable, Sendable {
+    /// Smoothed frames per second.
+    var fps: Double = 0
+    /// Last completed present cost in whole microseconds.
+    var presentMicroseconds: UInt64 = 0
 }
 
 /// Borrowed handle to the Rust-owned `IOSurface` for one published frame.

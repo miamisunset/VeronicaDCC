@@ -7,6 +7,7 @@
 use std::ffi::{CStr, CString, c_void};
 use std::os::raw::c_char;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use veronica_core::{
     MeshId, MeshTopology, MorphWeights, NodeId, UndoHistory, validate_mesh_topology,
 };
@@ -60,6 +61,56 @@ pub struct VrnContext {
     /// the next [`vrn_tick`]'s scene update (before the render, so the tick's
     /// own frame already matches the new surface).
     pending_size: Option<(u32, u32)>,
+    /// Stage splits of the most recent fully published tick
+    /// (see [`TickTimings`]). Zeros until the first tick publishes; a
+    /// failed tick leaves the previous values, never partial ones.
+    last_timings: TickTimings,
+}
+
+/// Per-tick stage splits for the frame-publish pipeline (issue #32).
+///
+/// Attribution for the display-scaling slowdown: `update` is the Bevy
+/// schedule (ECS + GPU render submission), `readback` is the
+/// texture-to-buffer copy plus the synchronous map (`poll`
+/// stall included), and `upload` is the swizzle copy into the back
+/// `IOSurface`. Surface recreation on extent drift is excluded — it fires
+/// only on re-target ticks, so steady-state cells of the repro matrix are
+/// unaffected. Read via [`vrn_tick_timings`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TickTimings {
+    /// Whole microseconds. The unit lives here, once, instead of on
+    /// every field name (`clippy::struct_field_names`).
+    update: u64,
+    /// Whole microseconds.
+    readback: u64,
+    /// Whole microseconds.
+    upload: u64,
+}
+
+impl TickTimings {
+    /// Bevy schedule time (`SceneWorld::update`) in whole microseconds.
+    #[must_use]
+    pub fn update_us(&self) -> u64 {
+        self.update
+    }
+
+    /// GPU readback time (`SceneWorld::render_frame`) in whole microseconds.
+    #[must_use]
+    pub fn readback_us(&self) -> u64 {
+        self.readback
+    }
+
+    /// `IOSurface` upload time (`FrameSurface::upload`) in whole microseconds.
+    #[must_use]
+    pub fn upload_us(&self) -> u64 {
+        self.upload
+    }
+}
+
+/// Whole microseconds in `elapsed`, saturating on absurd magnitudes
+/// (a tick stage can never realistically approach `u64::MAX` µs).
+fn micros_saturating(elapsed: Duration) -> u64 {
+    u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX)
 }
 
 impl VrnContext {
@@ -76,6 +127,7 @@ impl VrnContext {
             surfaces: [None, None],
             front: 0,
             pending_size: None,
+            last_timings: TickTimings::default(),
         }
     }
 
@@ -103,7 +155,10 @@ impl VrnContext {
     /// Returns `Internal` when the framework refuses a surface or its
     /// lock, or when the GPU frame readback fails.
     fn publish_frame(&mut self) -> VrnResult {
-        let Ok(frame) = self.scene.render_frame() else {
+        let readback_start = Instant::now();
+        let frame_result = self.scene.render_frame();
+        let readback_us = micros_saturating(readback_start.elapsed());
+        let Ok(frame) = frame_result else {
             return VrnResult::Internal;
         };
         let extents_drifted = match self.surfaces.iter().flatten().next() {
@@ -124,15 +179,21 @@ impl VrnContext {
             }
         }
         let back = 1 - self.front;
-        match self.surfaces[back].as_ref() {
-            Some(surface) => match surface.upload(frame.pixels()) {
-                Ok(()) => {
-                    self.front = back;
-                    VrnResult::Ok
-                }
-                Err(_) => VrnResult::Internal,
-            },
-            None => VrnResult::Internal,
+        let upload_start = Instant::now();
+        let uploaded = match self.surfaces[back].as_ref() {
+            Some(surface) => surface.upload(frame.pixels()).is_ok(),
+            None => false,
+        };
+        let upload_us = micros_saturating(upload_start.elapsed());
+        if uploaded {
+            self.front = back;
+            // Only fully published ticks update the splits: a failed tick
+            // leaves the previous values rather than partial ones.
+            self.last_timings.readback = readback_us;
+            self.last_timings.upload = upload_us;
+            VrnResult::Ok
+        } else {
+            VrnResult::Internal
         }
     }
 
@@ -144,6 +205,14 @@ impl VrnContext {
         self.surfaces[self.front]
             .as_ref()
             .map(|surface| (surface.handle(), surface.width(), surface.height()))
+    }
+
+    /// Stage splits of the most recent fully published tick.
+    ///
+    /// Zeros until the first tick publishes; see [`TickTimings`].
+    #[must_use]
+    fn last_tick_timings(&self) -> TickTimings {
+        self.last_timings
     }
 }
 
@@ -219,8 +288,14 @@ pub unsafe extern "C" fn vrn_tick(context: *mut VrnContextHandle) -> VrnResult {
             if size_result != VrnResult::Ok {
                 return size_result;
             }
+            let update_start = Instant::now();
             ctx.scene.update();
-            ctx.publish_frame()
+            let update_us = micros_saturating(update_start.elapsed());
+            let publish_result = ctx.publish_frame();
+            if publish_result == VrnResult::Ok {
+                ctx.last_timings.update = update_us;
+            }
+            publish_result
         }
         Err(_) => VrnResult::Internal,
     }
@@ -322,6 +397,54 @@ pub unsafe extern "C" fn vrn_frame_surface(
             }
             None => VrnResult::InvalidArgument,
         },
+        Err(_) => VrnResult::Internal,
+    }
+}
+
+/// Read the stage splits of the most recent fully published tick
+/// (see [`TickTimings`]): Bevy-schedule, GPU-readback, and surface-upload
+/// microseconds since context creation's tick loop began.
+///
+/// Debug/attribution getter for issue #32 (which stage owns the tick under
+/// display scaling). All three slots read zero until the first tick
+/// publishes; a failed tick leaves the previous values.
+///
+/// # Safety
+///
+/// `context` must be a live pointer from [`vrn_context_create`];
+/// `out_update_us`, `out_readback_us`, and `out_upload_us` must be non-null
+/// writable slots for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vrn_tick_timings(
+    context: *mut VrnContextHandle,
+    out_update_us: *mut u64,
+    out_readback_us: *mut u64,
+    out_upload_us: *mut u64,
+) -> VrnResult {
+    if context.is_null()
+        || out_update_us.is_null()
+        || out_readback_us.is_null()
+        || out_upload_us.is_null()
+    {
+        return VrnResult::NullArgument;
+    }
+    // SAFETY: all pointers checked non-null; context is alive per contract.
+    let (mutex, update_slot, readback_slot, upload_slot) = unsafe {
+        (
+            &(*context).0,
+            &mut *out_update_us,
+            &mut *out_readback_us,
+            &mut *out_upload_us,
+        )
+    };
+    match mutex.lock() {
+        Ok(ctx) => {
+            let timings = ctx.last_tick_timings();
+            *update_slot = timings.update_us();
+            *readback_slot = timings.readback_us();
+            *upload_slot = timings.upload_us();
+            VrnResult::Ok
+        }
         Err(_) => VrnResult::Internal,
     }
 }
@@ -1033,6 +1156,66 @@ mod viewport_tests {
             assert_eq!((width, height), (320, 200));
             assert_eq!(surface, second);
             assert_ne!(third, second);
+            vrn_context_destroy(context);
+        }
+    }
+}
+
+#[cfg(test)]
+mod timings_tests {
+    use super::*;
+    use std::ptr;
+
+    #[test]
+    fn null_slots_are_null_argument() {
+        let context = vrn_context_create();
+        assert!(!context.is_null());
+        let mut slot = 0u64;
+        // SAFETY: just created, alive, single-threaded test; slot is live.
+        unsafe {
+            assert_eq!(
+                vrn_tick_timings(ptr::null_mut(), &raw mut slot, &raw mut slot, &raw mut slot),
+                VrnResult::NullArgument
+            );
+            assert_eq!(
+                vrn_tick_timings(context, ptr::null_mut(), &raw mut slot, &raw mut slot),
+                VrnResult::NullArgument
+            );
+            assert_eq!(
+                vrn_tick_timings(context, &raw mut slot, ptr::null_mut(), &raw mut slot),
+                VrnResult::NullArgument
+            );
+            assert_eq!(
+                vrn_tick_timings(context, &raw mut slot, &raw mut slot, ptr::null_mut()),
+                VrnResult::NullArgument
+            );
+            vrn_context_destroy(context);
+        }
+    }
+
+    #[test]
+    fn splits_start_at_zero_and_capture_after_tick() {
+        let context = vrn_context_create();
+        assert!(!context.is_null());
+        let mut update = 0u64;
+        let mut readback = 0u64;
+        let mut upload = 0u64;
+        // SAFETY: just created, alive, single-threaded test; slots are live.
+        unsafe {
+            assert_eq!(
+                vrn_tick_timings(context, &raw mut update, &raw mut readback, &raw mut upload),
+                VrnResult::Ok
+            );
+            assert_eq!((update, readback, upload), (0, 0, 0));
+            assert_eq!(vrn_tick(context), VrnResult::Ok);
+            assert_eq!(
+                vrn_tick_timings(context, &raw mut update, &raw mut readback, &raw mut upload),
+                VrnResult::Ok
+            );
+            // No wall-time threshold: any real Bevy render plus readback
+            // plus upload takes far longer than 1µs, so a nonzero sum
+            // proves every stage captured without a flaky bound.
+            assert!(update + readback + upload > 0);
             vrn_context_destroy(context);
         }
     }

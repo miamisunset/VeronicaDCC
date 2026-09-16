@@ -52,3 +52,5 @@ rust/crates/veronica-ffi/include/veronica.h
 .env
 .env.*
 !.env.example
+
+.tmp/
