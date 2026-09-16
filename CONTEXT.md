@@ -61,3 +61,25 @@ parameter binding is future work, not part of the term.
 
 The pane showing the selected Operator's Parameters. Selection-driven with
 an explicit empty state; a fixed third pane until rearrangement lands.
+
+## Unit
+
+One unit of distance is one meter. Coordinates are Y-up, right-handed.
+
+## Implicit Geometry
+
+Geometry described by parameters instead of stored vertices. A Cube is
+implicit until Realization turns it into vertices. _Avoid_: procedural,
+parametric (both describe the graph, not the data).
+
+## Realization
+
+The step turning Implicit Geometry into vertices, run only when a
+downstream consumer needs topology.
+
+## Primvar
+
+Named data carried by geometry, from standard channels (position, normal,
+uv) to custom ones (tension, wetness). Bound to render attributes where
+geometry leaves the graph. _Avoid_: attribute (the Houdini SOP name for
+the same idea).
