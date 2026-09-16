@@ -47,6 +47,16 @@ fn v2_fixture_decodes_typed_parameters() {
     assert_eq!(hero.parameters["count"], ParamValue::Integer(3));
     assert_eq!(hero.parameters["visible"], ParamValue::Flag(true));
     assert_eq!(hero.parameters["size"], ParamValue::Vec3([1.0, 2.0, 3.0]));
+    // The file triple survives bit-identical, not just `==`.
+    assert!(
+        matches!(hero.parameters["size"], ParamValue::Vec3(_)),
+        "size must decode as a triple"
+    );
+    if let ParamValue::Vec3(triple) = &hero.parameters["size"] {
+        assert_eq!(triple[0].to_bits(), 1.0_f64.to_bits());
+        assert_eq!(triple[1].to_bits(), 2.0_f64.to_bits());
+        assert_eq!(triple[2].to_bits(), 3.0_f64.to_bits());
+    }
 
     let sidekick = &snapshot.operators[1];
     assert_eq!(sidekick.id, NodeId(8));

@@ -48,7 +48,7 @@ struct GraphPersistenceTests {
     }
 
     @Test func fileNameAndBundleFallbackAreContract() {
-        #expect(GraphPersistence.fileName == "graph-v1.json")
+        #expect(GraphPersistence.fileName == "graph-v2.json")
         #expect(GraphPersistence.bundleIdFallback == "com.github.miamisunset.Veronica")
     }
 }

@@ -24,11 +24,11 @@ nonisolated enum GraphLaunchOptions {
 /// TCA dependency for graph autosave (ADR-0002).
 ///
 /// Every committed mutation writes the fresh snapshot JSON to
-/// `Application Support/<bundle-id>/graph-v1.json`; launch loads it back via
+/// `Application Support/<bundle-id>/graph-v2.json`; launch loads it back via
 /// `restore`. A missing or corrupt file starts empty — never a crash.
 nonisolated struct GraphPersistence: Sendable {
     /// Snapshot filename inside the bundle's Application Support directory.
-    static let fileName = "graph-v1.json"
+    static let fileName = "graph-v2.json"
     /// Bundle id fallback when `Bundle.main` reports none (never in the app).
     static let bundleIdFallback = "com.github.miamisunset.Veronica"
 
