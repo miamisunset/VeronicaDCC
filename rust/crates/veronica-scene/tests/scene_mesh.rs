@@ -166,7 +166,8 @@ fn realized_cube_matches_engine_cuboid_oracle() {
 
     // Assert: same topology counts, close positions, identical channels.
     // Normals and uvs are exactly representable in both precisions, so
-    // widened bit identity is the requirement; positions cross the
+    // widened bit identity in vertex order is the requirement (no sorting:
+    // a uv rotation within one face must fail); positions cross the
     // precision boundary, so closeness is the requirement there.
     assert_eq!(mesh.positions.len(), 24);
     assert_eq!(mesh.indices.len(), 36);
@@ -174,20 +175,11 @@ fn realized_cube_matches_engine_cuboid_oracle() {
     let Some(AttributeData::Vec3(normals)) = mesh.attributes.get(PRIMVAR_NORMAL) else {
         panic!("normals must travel as a vec3 channel");
     };
-    let mut mine_normals = pipeline_bits3(normals);
-    let mut expected_normals = widened_bits3(&oracle_normals);
-    mine_normals.sort_unstable();
-    expected_normals.sort_unstable();
-    assert_eq!(mine_normals, expected_normals);
+    assert_eq!(pipeline_bits3(normals), widened_bits3(&oracle_normals));
     let Some(AttributeData::Vec2(uvs)) = mesh.attributes.get(PRIMVAR_UV) else {
         panic!("uvs must travel as a vec2 channel");
     };
-    let mut mine_uvs = pipeline_bits2(uvs);
-    let mut expected_uvs = widened_bits2(&oracle_uvs);
-    mine_uvs.sort_unstable();
-    expected_uvs.sort_unstable();
-    assert_eq!(mine_uvs.len(), 24);
-    assert_eq!(mine_uvs, expected_uvs);
+    assert_eq!(pipeline_bits2(uvs), widened_bits2(&oracle_uvs));
     assert_eq!(mesh.indices, oracle_indices);
 }
 
@@ -286,6 +278,34 @@ fn wrong_channel_shape_names_expected() {
         Err(SceneError::AttributeShape {
             name: "normal".to_owned(),
             expected: "a vec3 channel",
+        })
+    );
+}
+
+#[test]
+fn dangling_index_names_vertex_count() {
+    // Arrange: hand-built mesh (EvaluatedMesh::new is public) whose index
+    // names no vertex.
+    let mesh = EvaluatedMesh::new(
+        vec![[0.0, 0.0, 0.0]],
+        vec![999],
+        [
+            (
+                PRIMVAR_NORMAL.to_owned(),
+                AttributeData::Vec3(vec![[0.0, 0.0, 1.0]]),
+            ),
+            (PRIMVAR_UV.to_owned(), AttributeData::Vec2(vec![[0.0, 0.0]])),
+        ]
+        .into_iter()
+        .collect(),
+    );
+
+    // Act + assert.
+    assert_eq!(
+        render_mesh_from_evaluated(&mesh),
+        Err(SceneError::IndexOutOfBounds {
+            index: 999,
+            vertex_count: 1,
         })
     );
 }

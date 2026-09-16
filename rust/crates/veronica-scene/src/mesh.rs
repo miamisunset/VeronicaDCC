@@ -17,18 +17,31 @@ use crate::SceneError;
 /// Convert an evaluated pipeline mesh into a render-ready engine mesh.
 ///
 /// Standard channels are bound by name and validated against the vertex
-/// count; custom channels are preserved upstream, not uploaded.
+/// count; indices are bounds-checked because [`EvaluatedMesh::new`] is
+/// public and hand-built meshes can dangle. Custom channels are preserved
+/// upstream, not uploaded.
 ///
 /// # Errors
 ///
 /// Returns [`SceneError::MissingAttribute`] when a standard channel is
-/// absent, [`SceneError::AttributeShape`] when it has the wrong shape, and
+/// absent, [`SceneError::AttributeShape`] when it has the wrong shape,
 /// [`SceneError::AttributeLength`] when its length differs from the vertex
-/// count.
+/// count, and [`SceneError::IndexOutOfBounds`] when an index names no
+/// vertex.
 pub fn render_mesh_from_evaluated(evaluated: &EvaluatedMesh) -> Result<Mesh, SceneError> {
     let vertex_count = evaluated.positions.len();
     let normals = take_vec3_channel(evaluated, PRIMVAR_NORMAL, vertex_count)?;
     let uvs = take_vec2_channel(evaluated, PRIMVAR_UV, vertex_count)?;
+    let bad_index = evaluated
+        .indices
+        .iter()
+        .find(|index| (**index as usize) >= vertex_count);
+    if let Some(index) = bad_index {
+        return Err(SceneError::IndexOutOfBounds {
+            index: *index,
+            vertex_count,
+        });
+    }
 
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,

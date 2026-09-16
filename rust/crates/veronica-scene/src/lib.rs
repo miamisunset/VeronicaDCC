@@ -49,6 +49,14 @@ pub enum SceneError {
         /// Elements the channel actually holds.
         actual: usize,
     },
+    /// A triangle index names no vertex.
+    #[error("index {index} is out of bounds for {vertex_count} vertices")]
+    IndexOutOfBounds {
+        /// Offending index value.
+        index: u32,
+        /// Vertices the mesh actually holds.
+        vertex_count: usize,
+    },
 }
 
 /// Bevy component mirroring [`MorphWeights`] for one mesh entity.
