@@ -14,14 +14,28 @@ rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
-# Granular Bevy sub-crates only — never the `bevy` facade with DefaultPlugins.
-# Headless: no bevy_render / bevy_winit / bevy_window / bevy_pbr.
+# Granular Bevy sub-crates only — never the `bevy` facade with DefaultPlugins
+# (PipelinedRenderingPlugin breaks synchronous readback). No bevy_winit.
 bevy_ecs = "0.19"
 bevy_app = "0.19"
 bevy_transform = "0.19"
 bevy_asset = "0.19"
 bevy_mesh = "0.19"
 bevy_math = "0.19"
+bevy_camera = "0.19"
+# `tonemapping_luts` ships the real AgX/TonyMcMapface LUTs. Without it the
+# tonemapper samples a 1x1 magenta placeholder (`lut_placeholder`), so the
+# default AgX method paints every lit pixel magenta (issue #27 diagnosis).
+bevy_core_pipeline = { version = "0.19", features = ["tonemapping_luts"] }
+bevy_diagnostic = "0.19"
+# `zstd_rust` (pure Rust, no C toolchain) backs the KTX2 LUT decode pulled in
+# by `tonemapping_luts` above; `bevy_image/zstd` alone is a compile error.
+bevy_image = { version = "0.19", features = ["zstd_rust"] }
+bevy_light = "0.19"
+bevy_pbr = "0.19"
+bevy_render = "0.19"
+bevy_time = "0.19"
+bevy_window = "0.19"
 petgraph = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -1,11 +1,14 @@
-//! Software frame publisher for the demo scene (ADR-0001 slice 2).
+//! Deterministic CPU rasterizer: the test oracle for the demo scene (ADR-0001).
 //!
 //! Pixels are derived from live Bevy ECS state — the per-tick turntable
 //! angle — so consecutive frames provably differ because Scene state
-//! advanced, not because Swift re-rendered. The pixel source is a small
-//! deterministic CPU rasterizer behind the frame-publish seam
-//! ([`SceneWorld::render_frame`]); attaching the GPU renderer later swaps
-//! this source without touching the `IOSurface` handoff or Swift.
+//! advanced, not because Swift re-rendered. Since the GPU slice (issue #27)
+//! this rasterizer is kept only as the deterministic test oracle behind the
+//! frame-publish seam ([`SceneWorld::render_frame`]): integration tests assert
+//! GPU frames are visibly beyond flat rasterization by comparing against
+//! these bytes. The published pixels themselves now come from
+//! `crate::gpu::readback_frame`; the `IOSurface` handoff and Swift are
+//! untouched by either source.
 //!
 //! Format is fixed RGBA8, row-major, non-premultiplied.
 
@@ -44,6 +47,35 @@ impl RenderFrame {
     pub fn pixels(&self) -> &[u8] {
         &self.pixels
     }
+
+    /// Assemble a published frame from externally rendered RGBA8 bytes.
+    ///
+    /// Crate-visible constructor for the GPU readback path
+    /// (`crate::gpu::readback_frame`), which produces tight row-major bytes
+    /// that never pass through the CPU rasterizer below.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SceneError::FrameLengthMismatch`] when `pixels` is not exactly
+    /// `width * height * 4` bytes long.
+    pub(crate) fn from_raw_parts(
+        width: u32,
+        height: u32,
+        pixels: Vec<u8>,
+    ) -> Result<RenderFrame, SceneError> {
+        let expected = width as usize * height as usize * FRAME_BYTES_PER_PIXEL;
+        if pixels.len() != expected {
+            return Err(SceneError::FrameLengthMismatch {
+                expected,
+                actual: pixels.len(),
+            });
+        }
+        Ok(RenderFrame {
+            width,
+            height,
+            pixels,
+        })
+    }
 }
 
 /// Render the demo scene at `angle_radians` into a fixed-format frame.
@@ -66,17 +98,8 @@ pub fn render_demo_frame(
     Ok(rasterize_cube(angle_radians, width, height))
 }
 
-/// Rasterize the fixed-size published frame for a world tick angle.
-///
-/// Crate-visible seam for the world frame accessor; the extents are the
-/// fixed nonzero constants, so this cannot fail.
-pub(crate) fn rasterize_for_world(angle_radians: f32) -> RenderFrame {
-    rasterize_cube(angle_radians, FRAME_WIDTH, FRAME_HEIGHT)
-}
-
 /// Infallible core: `width` and `height` are nonzero by construction
-/// (checked by [`render_demo_frame`]; [`SceneWorld::render_frame`] passes
-/// the fixed constants).
+/// (checked by [`render_demo_frame`]).
 fn rasterize_cube(angle: f32, width: u32, height: u32) -> RenderFrame {
     let w = width as usize;
     let h = height as usize;
