@@ -51,6 +51,48 @@ nonisolated func viewportSizeIntent(
     return snapped
 }
 
+/// Backing-pixel size of the drawable for the current layout, UNCAPPED.
+///
+/// The drawable is just an allocation: it follows the live layout
+/// (`bounds * scale`, rounded) with no 2048 cap and no hysteresis. The cap
+/// and hysteresis live on the Rust frame intent (`viewportSizeIntent`) only.
+/// Empty or hidden views yield `.zero` (callers must not assign that).
+/// Pure for testing.
+nonisolated func viewportDrawableSize(bounds: CGSize, scale: CGFloat) -> CGSize {
+    guard bounds.width > 0, bounds.height > 0, scale > 0 else { return .zero }
+    return CGSize(
+        width: (bounds.width * scale).rounded(),
+        height: (bounds.height * scale).rounded()
+    )
+}
+
+/// Aspect-fit destination rect (contain semantics) of a frame inside a
+/// drawable, in drawable pixels.
+///
+/// The rect fills the drawable on the constraining axis and centers on the
+/// other, so the present scales without distortion and letterboxes (or
+/// pillarboxes) the remainder. Zero/negative inputs yield `.zero`.
+/// Pure for testing.
+nonisolated func aspectFitRect(
+    frameWidth: Int,
+    frameHeight: Int,
+    drawableWidth: Int,
+    drawableHeight: Int
+) -> CGRect {
+    guard frameWidth > 0, frameHeight > 0, drawableWidth > 0, drawableHeight > 0 else {
+        return .zero
+    }
+    let fitScale = min(
+        CGFloat(drawableWidth) / CGFloat(frameWidth),
+        CGFloat(drawableHeight) / CGFloat(frameHeight)
+    )
+    let width = (CGFloat(frameWidth) * fitScale).rounded()
+    let height = (CGFloat(frameHeight) * fitScale).rounded()
+    let originX = ((CGFloat(drawableWidth) - width) / 2).rounded()
+    let originY = ((CGFloat(drawableHeight) - height) / 2).rounded()
+    return CGRect(x: originX, y: originY, width: width, height: height)
+}
+
 /// Hosts the Metal view presenting Rust-published `IOSurface` frames, and
 /// owns the display link pacing the loop.
 ///
@@ -60,12 +102,12 @@ nonisolated func viewportSizeIntent(
 /// off-MainActor to tick Rust and publish stats plus the frame handle.
 /// `adopt(frame:)` wraps a new handle in an `MTLTexture` once and re-wraps
 /// on address change (viewport re-targets recreate the surface); `draw(in:)`
-/// centers the blit over the letterbox clear, so consecutive frames differ
-/// because Scene state advanced. `updateNSView` drives `drawableSize` from
-/// the published frame with `autoResizeDrawable = false` and sends backing-
-/// pixel size intents to Rust only on hysteresis-exceeding change.
-/// `dismantleNSView` invalidates the link, breaking the link → coordinator
-/// retain cycle.
+/// aspect-fit scales the frame into the live-layout drawable over the
+/// letterbox clear, so consecutive frames differ because Scene state
+/// advanced. `updateNSView` drives `drawableSize` from the live backing
+/// size (uncapped allocation) and sends capped, hysteresis-gated size
+/// intents to Rust. `dismantleNSView` invalidates the link, breaking the
+/// link → coordinator retain cycle.
 struct ViewportMetalHost: NSViewRepresentable {
     /// Invoked on the main thread, once per display refresh.
     var onFrame: () -> Void
@@ -83,6 +125,9 @@ struct ViewportMetalHost: NSViewRepresentable {
         /// `updateNSView`; the FFI call fires only on hysteresis-exceeding
         /// change, so steady-state ticks cost just the compare.
         var lastSentSize: (width: UInt32, height: UInt32)?
+        private var presentPipeline: MTLRenderPipelineState?
+        private var presentSampler: MTLSamplerState?
+        private var presentPixelFormat: MTLPixelFormat = .invalid
 
         init(onFrame: @escaping () -> Void) {
             self.onFrame = onFrame
@@ -95,6 +140,43 @@ struct ViewportMetalHost: NSViewRepresentable {
         func attach(device: MTLDevice?, queue: MTLCommandQueue?) {
             self.device = device
             commandQueue = queue
+        }
+
+        /// Build the aspect-fit present pipeline once per pixel format.
+        ///
+        /// Called lazily from `draw(in:)` where the view's live
+        /// `colorPixelFormat` is known; `attach` only caches the device
+        /// because the format is not settled yet at `makeNSView` time.
+        private func ensurePresentPipeline(for view: MTKView) {
+            guard let device else { return }
+            if presentPipeline != nil, presentSampler != nil,
+                presentPixelFormat == view.colorPixelFormat {
+                return
+            }
+            guard let library = device.makeDefaultLibrary(),
+                let vertex = library.makeFunction(name: "viewportPresentVertex"),
+                let fragment = library.makeFunction(name: "viewportPresentFragment")
+            else {
+                return
+            }
+            let descriptor = MTLRenderPipelineDescriptor()
+            descriptor.vertexFunction = vertex
+            descriptor.fragmentFunction = fragment
+            descriptor.colorAttachments[0].pixelFormat = view.colorPixelFormat
+            guard let pipeline = try? device.makeRenderPipelineState(descriptor: descriptor) else {
+                return
+            }
+            let samplerDescriptor = MTLSamplerDescriptor()
+            samplerDescriptor.minFilter = .linear
+            samplerDescriptor.magFilter = .linear
+            samplerDescriptor.sAddressMode = .clampToEdge
+            samplerDescriptor.tAddressMode = .clampToEdge
+            guard let sampler = device.makeSamplerState(descriptor: samplerDescriptor) else {
+                return
+            }
+            presentPipeline = pipeline
+            presentSampler = sampler
+            presentPixelFormat = view.colorPixelFormat
         }
 
         /// Wrap a newly published handle, skipping re-wraps of the live one.
@@ -128,8 +210,8 @@ struct ViewportMetalHost: NSViewRepresentable {
         }
 
         func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
-            // Deliberately empty: `drawableSize` is driven from the published
-            // frame in `updateNSView` with `autoResizeDrawable = false`, so
+            // Deliberately empty: `drawableSize` is driven from the live
+            // layout in `updateNSView` with `autoResizeDrawable = false`, so
             // restoring it here would re-trigger this callback and deadlock
             // layout during pane swaps (see slice-2 diagnosis).
         }
@@ -142,43 +224,42 @@ struct ViewportMetalHost: NSViewRepresentable {
             else {
                 return
             }
-            guard drawable.texture.width >= texture.width,
-                drawable.texture.height >= texture.height
+            ensurePresentPipeline(for: view)
+            guard let pipeline = presentPipeline,
+                let sampler = presentSampler,
+                let pass = view.currentRenderPassDescriptor,
+                let encoder = buffer.makeRenderCommandEncoder(descriptor: pass)
             else {
-                // Resize racing the drawable: the published frame is newer
-                // than `drawableSize`. Skip loudly rather than presenting a
-                // black view with no trace; the next `updateNSView` adopts
-                // the new frame size.
-                NSLog(
-                    "Viewport: drawable %dx%d < frame %dx%d, skipping blit",
-                    drawable.texture.width,
-                    drawable.texture.height,
-                    texture.width,
-                    texture.height
-                )
                 return
             }
-            // The encoder is created only after the size check: an early
-            // return with a live un-ended encoder aborts under Metal
-            // validation when the autorelease pool drains.
-            guard let blit = buffer.makeBlitCommandEncoder() else { return }
-            // Aspect-fit: the drawable matches the frame in steady state
-            // (offset zero); mid-resize the smaller frame centers over the
-            // letterbox clear instead of stretching.
-            let originX = (drawable.texture.width - texture.width) / 2
-            let originY = (drawable.texture.height - texture.height) / 2
-            blit.copy(
-                from: texture,
-                sourceSlice: 0,
-                sourceLevel: 0,
-                sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
-                sourceSize: MTLSize(width: texture.width, height: texture.height, depth: 1),
-                to: drawable.texture,
-                destinationSlice: 0,
-                destinationLevel: 0,
-                destinationOrigin: MTLOrigin(x: originX, y: originY, z: 0)
+            // Aspect-fit scale present: the drawable follows the live layout
+            // (see `updateNSView`) while the frame lags by the FFI round
+            // trip, so pane aspect != frame aspect mid-resize. Scaling the
+            // frame into the fitted region preserves aspect and letterboxes
+            // the remainder via the clear color instead of stretching.
+            // UVs in `ViewportPresent.metal` are Y-flipped so texture row 0
+            // (top) lands on the region's top-left, matching the old blit.
+            let fit = aspectFitRect(
+                frameWidth: texture.width,
+                frameHeight: texture.height,
+                drawableWidth: drawable.texture.width,
+                drawableHeight: drawable.texture.height
             )
-            blit.endEncoding()
+            if fit != .zero {
+                encoder.setViewport(MTLViewport(
+                    originX: fit.origin.x,
+                    originY: fit.origin.y,
+                    width: fit.size.width,
+                    height: fit.size.height,
+                    znear: 0,
+                    zfar: 1
+                ))
+                encoder.setRenderPipelineState(pipeline)
+                encoder.setFragmentTexture(texture, index: 0)
+                encoder.setFragmentSamplerState(sampler, index: 0)
+                encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+            }
+            encoder.endEncoding()
             buffer.present(drawable)
             buffer.commit()
         }
@@ -192,14 +273,13 @@ struct ViewportMetalHost: NSViewRepresentable {
         let view = MTKView()
         let device = MTLCreateSystemDefaultDevice()
         view.device = device
-        // The present path blits into the drawable, and blit writes are
-        // illegal on framebuffer-only textures (Metal validation aborts:
-        // "destinationTexture must not be a framebufferOnly texture").
+        // The drawable is a render target for the aspect-fit present shader;
+        // keep framebuffer-only off (matches the old blit path requirement).
         view.framebufferOnly = false
-        // The drawable is driven from the published frame size (see
-        // `updateNSView`). Auto-resize would fight that every layout pass:
-        // the view resets `drawableSize` behind our back and the size-guard
-        // in `draw(in:)` skips frames forever (the slice-2 resize freeze).
+        // The drawable follows the live layout size (see `updateNSView`).
+        // Auto-resize would fight that every layout pass: the view resets
+        // `drawableSize` behind our back and the present stretches a stale
+        // frame during resize (the slice-2 freeze lineage).
         view.autoResizeDrawable = false
         view.clearColor = MTLClearColor(red: 0.05, green: 0.06, blue: 0.09, alpha: 1)
         view.enableSetNeedsDisplay = false
@@ -229,11 +309,13 @@ struct ViewportMetalHost: NSViewRepresentable {
             context.coordinator.lastSentSize = intent
             EngineBridge.setViewportSize(width: intent.width, height: intent.height)
         }
-        if let frame {
-            nsView.drawableSize = CGSize(
-                width: CGFloat(frame.width),
-                height: CGFloat(frame.height)
-            )
+        // The drawable is just an allocation: follow the live backing size
+        // uncapped (the 2048 cap stays on the Rust frame intent only). No
+        // hysteresis — re-setting the current value is cheap, and the `!=`
+        // guard skips even that on steady-state ticks.
+        let liveDrawable = viewportDrawableSize(bounds: nsView.bounds.size, scale: scale)
+        if liveDrawable != .zero, nsView.drawableSize != liveDrawable {
+            nsView.drawableSize = liveDrawable
         }
     }
 
