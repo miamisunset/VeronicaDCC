@@ -2,6 +2,7 @@ import ComposableArchitecture
 import IOSurface
 import Metal
 import MetalKit
+import MetalPerformanceShaders
 import SwiftUI
 
 /// Long-edge cap mirrored from Rust `MAX_VIEWPORT_EDGE` (veronica-scene).
@@ -101,10 +102,9 @@ nonisolated func aspectFitRect(
 /// on the main run loop; the TCA effect in `ViewportFeature` hops
 /// off-MainActor to tick Rust and publish stats plus the frame handle.
 /// `adopt(frame:)` wraps a new handle in an `MTLTexture` once and re-wraps
-/// on address change (viewport re-targets recreate the surface); `draw(in:)`
-/// aspect-fit scales the frame into the live-layout drawable over the
-/// letterbox clear, so consecutive frames differ because Scene state
-/// advanced. `updateNSView` drives `drawableSize` from the live backing
+/// `draw(in:)` centers the frame over the letterbox clear (scaling it only
+/// while sizes disagree mid-resize), so consecutive frames differ because
+/// Scene state advanced. `updateNSView` drives `drawableSize` from the live
 /// size (uncapped allocation) and sends capped, hysteresis-gated size
 /// intents to Rust. `dismantleNSView` invalidates the link, breaking the
 /// link → coordinator retain cycle.
@@ -125,9 +125,12 @@ struct ViewportMetalHost: NSViewRepresentable {
         /// `updateNSView`; the FFI call fires only on hysteresis-exceeding
         /// change, so steady-state ticks cost just the compare.
         var lastSentSize: (width: UInt32, height: UInt32)?
-        private var presentPipeline: MTLRenderPipelineState?
-        private var presentSampler: MTLSamplerState?
-        private var presentPixelFormat: MTLPixelFormat = .invalid
+        /// Cached aspect-fit scaler and transient target. The transient is
+        /// sized to the last fitted region and recreated only when that
+        /// changes (i.e. mid-resize); steady-state frames copy directly.
+        private var scaler: MPSImageBilinearScale?
+        private var scaledTexture: MTLTexture?
+        private var scaledSize: (width: Int, height: Int)?
 
         init(onFrame: @escaping () -> Void) {
             self.onFrame = onFrame
@@ -142,41 +145,127 @@ struct ViewportMetalHost: NSViewRepresentable {
             commandQueue = queue
         }
 
-        /// Build the aspect-fit present pipeline once per pixel format.
+        /// Present the adopted frame into `view`'s drawable, aspect-correct.
         ///
-        /// Called lazily from `draw(in:)` where the view's live
-        /// `colorPixelFormat` is known; `attach` only caches the device
-        /// because the format is not settled yet at `makeNSView` time.
-        private func ensurePresentPipeline(for view: MTKView) {
-            guard let device else { return }
-            if presentPipeline != nil, presentSampler != nil,
-                presentPixelFormat == view.colorPixelFormat {
-                return
-            }
-            guard let library = device.makeDefaultLibrary(),
-                let vertex = library.makeFunction(name: "viewportPresentVertex"),
-                let fragment = library.makeFunction(name: "viewportPresentFragment")
+        /// The drawable follows the live layout while the published frame
+        /// lags by the FFI round trip, so pane aspect != frame aspect
+        /// mid-resize. The fitted region (`aspectFitRect`) is filled by
+        /// scaling into a cached transient (MPS bilinear; recreated only
+        /// when the fitted size changes) and centered 1:1 over the
+        /// letterbox clear — never stretched. Steady-state frames already
+        /// match and copy directly. The 1:1 copy preserves row order, so
+        /// orientation matches the pre-resize path by construction.
+        func draw(in view: MTKView) {
+            guard let drawable = view.currentDrawable,
+                let texture = frameTexture,
+                let device,
+                let queue = commandQueue,
+                let buffer = queue.makeCommandBuffer()
             else {
                 return
             }
-            let descriptor = MTLRenderPipelineDescriptor()
-            descriptor.vertexFunction = vertex
-            descriptor.fragmentFunction = fragment
-            descriptor.colorAttachments[0].pixelFormat = view.colorPixelFormat
-            guard let pipeline = try? device.makeRenderPipelineState(descriptor: descriptor) else {
+            let drawableTexture = drawable.texture
+            let fit = aspectFitRect(
+                frameWidth: texture.width,
+                frameHeight: texture.height,
+                drawableWidth: drawableTexture.width,
+                drawableHeight: drawableTexture.height
+            )
+            guard fit != .zero else { return }
+            let fitWidth = Int(fit.size.width)
+            let fitHeight = Int(fit.size.height)
+            let source: MTLTexture
+            if fitWidth == texture.width, fitHeight == texture.height {
+                source = texture
+            } else if let scaled = scaledTexture(
+                width: fitWidth,
+                height: fitHeight,
+                device: device,
+                texture: texture,
+                buffer: buffer
+            ) {
+                source = scaled
+            } else if texture.width <= drawableTexture.width,
+                texture.height <= drawableTexture.height {
+                // Transient unavailable: centered copy keeps aspect (with
+                // stale borders) instead of presenting nothing.
+                NSLog("Viewport: scaled target missing, falling back to centered copy")
+                source = texture
+            } else {
+                NSLog(
+                    "Viewport: drawable %dx%d < frame %dx%d, skipping present",
+                    drawableTexture.width,
+                    drawableTexture.height,
+                    texture.width,
+                    texture.height
+                )
                 return
             }
-            let samplerDescriptor = MTLSamplerDescriptor()
-            samplerDescriptor.minFilter = .linear
-            samplerDescriptor.magFilter = .linear
-            samplerDescriptor.sAddressMode = .clampToEdge
-            samplerDescriptor.tAddressMode = .clampToEdge
-            guard let sampler = device.makeSamplerState(descriptor: samplerDescriptor) else {
-                return
+            // Letterbox clear first: regions outside the centered copy must
+            // show the clear color, not stale drawable pixels. MTKView's
+            // pass descriptor clears to `clearColor` by default.
+            if let pass = view.currentRenderPassDescriptor,
+                let clear = buffer.makeRenderCommandEncoder(descriptor: pass) {
+                clear.endEncoding()
             }
-            presentPipeline = pipeline
-            presentSampler = sampler
-            presentPixelFormat = view.colorPixelFormat
+            // The encoder is created only after the size checks: an early
+            // return with a live un-ended encoder aborts under Metal
+            // validation when the autorelease pool drains.
+            guard let blit = buffer.makeBlitCommandEncoder() else { return }
+            let originX = (drawableTexture.width - source.width) / 2
+            let originY = (drawableTexture.height - source.height) / 2
+            blit.copy(
+                from: source,
+                sourceSlice: 0,
+                sourceLevel: 0,
+                sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                sourceSize: MTLSize(width: source.width, height: source.height, depth: 1),
+                to: drawableTexture,
+                destinationSlice: 0,
+                destinationLevel: 0,
+                destinationOrigin: MTLOrigin(x: originX, y: originY, z: 0)
+            )
+            blit.endEncoding()
+            buffer.present(drawable)
+            buffer.commit()
+        }
+
+        /// Scale `texture` into the cached transient sized
+        /// `width`x`height`, returning it — or `nil` when the transient
+        /// cannot be allocated. The cache is recreated only when the
+        /// fitted size changes, so steady-state ticks never reach here.
+        private func scaledTexture(
+            width: Int,
+            height: Int,
+            device: MTLDevice,
+            texture: MTLTexture,
+            buffer: MTLCommandBuffer
+        ) -> MTLTexture? {
+            if scaledTexture == nil || scaledSize?.width != width || scaledSize?.height != height {
+                let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                    pixelFormat: .bgra8Unorm,
+                    width: width,
+                    height: height,
+                    mipmapped: false
+                )
+                descriptor.usage = [.shaderRead, .shaderWrite]
+                descriptor.storageMode = .private
+                guard let fresh = device.makeTexture(descriptor: descriptor) else {
+                    return nil
+                }
+                scaledTexture = fresh
+                scaledSize = (width, height)
+            }
+            guard let scaled = scaledTexture else { return nil }
+            if scaler == nil {
+                scaler = MPSImageBilinearScale(device: device)
+            }
+            scaler?.encode(
+                commandBuffer: buffer,
+                sourceTexture: texture,
+                destinationTexture: scaled
+            )
+            return scaled
         }
 
         /// Wrap a newly published handle, skipping re-wraps of the live one.
@@ -215,54 +304,6 @@ struct ViewportMetalHost: NSViewRepresentable {
             // restoring it here would re-trigger this callback and deadlock
             // layout during pane swaps (see slice-2 diagnosis).
         }
-
-        func draw(in view: MTKView) {
-            guard let drawable = view.currentDrawable,
-                let texture = frameTexture,
-                let queue = commandQueue,
-                let buffer = queue.makeCommandBuffer()
-            else {
-                return
-            }
-            ensurePresentPipeline(for: view)
-            guard let pipeline = presentPipeline,
-                let sampler = presentSampler,
-                let pass = view.currentRenderPassDescriptor,
-                let encoder = buffer.makeRenderCommandEncoder(descriptor: pass)
-            else {
-                return
-            }
-            // Aspect-fit scale present: the drawable follows the live layout
-            // (see `updateNSView`) while the frame lags by the FFI round
-            // trip, so pane aspect != frame aspect mid-resize. Scaling the
-            // frame into the fitted region preserves aspect and letterboxes
-            // the remainder via the clear color instead of stretching.
-            // UVs in `ViewportPresent.metal` are Y-flipped so texture row 0
-            // (top) lands on the region's top-left, matching the old blit.
-            let fit = aspectFitRect(
-                frameWidth: texture.width,
-                frameHeight: texture.height,
-                drawableWidth: drawable.texture.width,
-                drawableHeight: drawable.texture.height
-            )
-            if fit != .zero {
-                encoder.setViewport(MTLViewport(
-                    originX: fit.origin.x,
-                    originY: fit.origin.y,
-                    width: fit.size.width,
-                    height: fit.size.height,
-                    znear: 0,
-                    zfar: 1
-                ))
-                encoder.setRenderPipelineState(pipeline)
-                encoder.setFragmentTexture(texture, index: 0)
-                encoder.setFragmentSamplerState(sampler, index: 0)
-                encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
-            }
-            encoder.endEncoding()
-            buffer.present(drawable)
-            buffer.commit()
-        }
     }
 
     func makeCoordinator() -> Coordinator {
@@ -273,8 +314,9 @@ struct ViewportMetalHost: NSViewRepresentable {
         let view = MTKView()
         let device = MTLCreateSystemDefaultDevice()
         view.device = device
-        // The drawable is a render target for the aspect-fit present shader;
-        // keep framebuffer-only off (matches the old blit path requirement).
+        // The present path blits into the drawable, and blit writes are
+        // illegal on framebuffer-only textures (Metal validation aborts:
+        // "destinationTexture must not be a framebufferOnly texture").
         view.framebufferOnly = false
         // The drawable follows the live layout size (see `updateNSView`).
         // Auto-resize would fight that every layout pass: the view resets
