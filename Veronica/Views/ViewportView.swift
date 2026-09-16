@@ -16,31 +16,42 @@ nonisolated let viewportMaxEdge: UInt32 = 2048
 /// staging rebuild) every frame. 2px is invisible and kills the churn.
 nonisolated let viewportSizeHysteresis: UInt32 = 2
 
+/// Backing pixels for the current layout, rounded — or `nil` for empty or
+/// hidden views (`bounds <= 0`, `scale <= 0`) and sub-1px layouts that would
+/// round to a zero extent (a zero intent is an FFI error, so callers send
+/// nothing). Shared by the Rust size intent and the drawable size so the
+/// two cannot drift apart. Pure for testing.
+nonisolated func backingPixels(bounds: CGSize, scale: CGFloat) -> (width: CGFloat, height: CGFloat)? {
+    guard bounds.width > 0, bounds.height > 0, scale > 0 else { return nil }
+    let width = (bounds.width * scale).rounded()
+    let height = (bounds.height * scale).rounded()
+    guard width >= 1, height >= 1 else { return nil }
+    return (width, height)
+}
+
 /// Compute the viewport size intent for the current layout, or `nil` when no
 /// FFI call is owed.
 ///
-/// Backing pixels are `bounds * scale`, rounded, then scaled proportionally
-/// to fit `viewportMaxEdge` on the long edge (per-axis clamping would
-/// distort aspect: 8000x6000 must become 2048x1536, not 2048x2048). Empty or
-/// hidden views (`bounds <= 0`, `scale <= 0`) send nothing (a zero intent is
-/// an FFI error), and sub-hysteresis jitter stays quiet so per-tick updates
-/// cost only the compare. Pure for testing.
+/// Backing pixels are scaled proportionally to fit `viewportMaxEdge` on the
+/// long edge (per-axis clamping would distort aspect: 8000x6000 must become
+/// 2048x1536, not 2048x2048), and sub-hysteresis jitter stays quiet so
+/// per-tick updates cost only the compare. Pure for testing.
 nonisolated func viewportSizeIntent(
     bounds: CGSize,
     scale: CGFloat,
     lastSent: (width: UInt32, height: UInt32)?
 ) -> (width: UInt32, height: UInt32)? {
-    guard bounds.width > 0, bounds.height > 0, scale > 0 else { return nil }
-    var width = (bounds.width * scale).rounded()
-    var height = (bounds.height * scale).rounded()
+    guard let backing = backingPixels(bounds: bounds, scale: scale) else { return nil }
+    var width = backing.width
+    var height = backing.height
     let longest = max(width, height)
     if longest > CGFloat(viewportMaxEdge) {
         let factor = CGFloat(viewportMaxEdge) / longest
         width = (width * factor).rounded()
         height = (height * factor).rounded()
     }
-    // Positive by construction (`bounds`/`scale` guarded above, cap factor
-    // in (0, 1]), so the conversions below cannot trap.
+    // Positive by construction (`backingPixels` guarantees >= 1px, cap
+    // factor in (0, 1]), so the conversions below cannot trap.
     let snapped = (width: UInt32(width), height: UInt32(height))
     if let lastSent {
         let deltaWidth = abs(Int(snapped.width) - Int(lastSent.width))
@@ -54,17 +65,13 @@ nonisolated func viewportSizeIntent(
 
 /// Backing-pixel size of the drawable for the current layout, UNCAPPED.
 ///
-/// The drawable is just an allocation: it follows the live layout
-/// (`bounds * scale`, rounded) with no 2048 cap and no hysteresis. The cap
-/// and hysteresis live on the Rust frame intent (`viewportSizeIntent`) only.
-/// Empty or hidden views yield `.zero` (callers must not assign that).
-/// Pure for testing.
+/// The drawable is just an allocation: it follows the live layout with no
+/// 2048 cap and no hysteresis. The cap and hysteresis live on the Rust
+/// frame intent (`viewportSizeIntent`) only. Empty or hidden views yield
+/// `.zero` (callers must not assign that). Pure for testing.
 nonisolated func viewportDrawableSize(bounds: CGSize, scale: CGFloat) -> CGSize {
-    guard bounds.width > 0, bounds.height > 0, scale > 0 else { return .zero }
-    return CGSize(
-        width: (bounds.width * scale).rounded(),
-        height: (bounds.height * scale).rounded()
-    )
+    guard let backing = backingPixels(bounds: bounds, scale: scale) else { return .zero }
+    return CGSize(width: backing.width, height: backing.height)
 }
 
 /// Aspect-fit destination rect (contain semantics) of a frame inside a
@@ -177,7 +184,7 @@ struct ViewportMetalHost: NSViewRepresentable {
             let source: MTLTexture
             if fitWidth == texture.width, fitHeight == texture.height {
                 source = texture
-            } else if let scaled = scaledTexture(
+            } else if let scaled = scaledFrame(
                 width: fitWidth,
                 height: fitHeight,
                 device: device,
@@ -234,7 +241,9 @@ struct ViewportMetalHost: NSViewRepresentable {
         /// `width`x`height`, returning it — or `nil` when the transient
         /// cannot be allocated. The cache is recreated only when the
         /// fitted size changes, so steady-state ticks never reach here.
-        private func scaledTexture(
+        /// (Named `scaledFrame` to avoid colliding with the `scaledTexture`
+        /// cache property.)
+        private func scaledFrame(
             width: Int,
             height: Int,
             device: MTLDevice,

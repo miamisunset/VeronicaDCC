@@ -77,13 +77,15 @@ final class ViewportPixelsTests: XCTestCase {
     }
 
     /// Regression oracle for the unbundled-metallib blackout (#30 follow-up):
-    /// the pane must show lit pixels, not just the letterbox clear. Waits
+    /// the window must show lit pixels, not just the letterbox clear. Waits
     /// past GPU warm-up (cold ticks publish clear-only frames while the
-    /// Bevy pipeline spins up), screenshots the app, and asserts the pane
-    /// region's mean luminance clears a threshold no clear-only frame can
-    /// reach. The stats overlay is white text inside the pane, so the
-    /// sampled rect excludes the bottom strip and the threshold uses the
-    /// mean (overlay pixels are a negligible fraction) rather than the max.
+    /// Bevy pipeline spins up), screenshots the app, and asserts the
+    /// window's bright-pixel fraction clears a threshold no clear-only
+    /// frame can reach. Window-wide (not pane-sampled) because the pane
+    /// exposes no geometry to accessibility; the threshold still separates
+    /// lit geometry (~10%) from clear plus overlay text (0.16% measured)
+    /// by over an order of magnitude — and a mis-cropped region fails
+    /// closed (dark desktop measures ~0%, below threshold).
     @MainActor
     func testViewportPaneShowsLitPixels() throws {
         let app = XCUIApplication()
@@ -101,7 +103,10 @@ final class ViewportPixelsTests: XCTestCase {
                 tickCount = parsed
                 break
             }
-            Thread.sleep(forTimeInterval: 0.5)
+            // Pump, don't sleep: the display link pacing ticks is scheduled
+            // on the main run loop, so blocking this actor would starve the
+            // very counter being waited on.
+            RunLoop.main.run(until: Date().addingTimeInterval(0.5))
         }
         XCTAssertGreaterThanOrEqual(tickCount, 120, "engine never warmed up")
 

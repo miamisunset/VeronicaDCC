@@ -44,6 +44,17 @@ struct ViewportSizeTests {
         ) == nil)
     }
 
+    @Test func subPixelLayoutsSendNothing() {
+        // A 0.1pt pane mid-swap rounds to zero backing pixels — send nothing
+        // rather than the zero extent Rust would reject as InvalidArgument.
+        #expect(viewportSizeIntent(
+            bounds: CGSize(width: 0.1, height: 320),
+            scale: 2,
+            lastSent: nil
+        ) == nil)
+        #expect(viewportDrawableSize(bounds: CGSize(width: 0.1, height: 320), scale: 2) == .zero)
+    }
+
     @Test func intentClampsToLongEdgeCap() throws {
         // Backing 8000x6000 scales proportionally to 2048x1536 — per-axis
         // clamping would distort aspect to 2048x2048.
