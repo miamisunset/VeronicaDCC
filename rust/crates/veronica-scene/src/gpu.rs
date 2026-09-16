@@ -44,8 +44,24 @@ use bevy_render::{
 
 use crate::{
     SceneError,
-    render::{FRAME_BYTES_PER_PIXEL, FRAME_HEIGHT, FRAME_WIDTH, RenderFrame},
+    render::{FRAME_BYTES_PER_PIXEL, FRAME_HEIGHT, FRAME_WIDTH, MAX_VIEWPORT_EDGE, RenderFrame},
 };
+
+/// Live extents of the offscreen target, in pixels.
+///
+/// Initialized to the [`FRAME_WIDTH`] x [`FRAME_HEIGHT`] contract in
+/// [`SceneWorld::new_headless`](crate::SceneWorld::new_headless) and
+/// re-targeted by
+/// [`SceneWorld::set_viewport_size`](crate::SceneWorld::set_viewport_size);
+/// [`readback_frame`] reads this (never the constants) so frames follow the
+/// pane size.
+#[derive(Debug, Clone, Copy, Resource)]
+pub(crate) struct GpuViewportSize {
+    /// Target width in pixels.
+    pub width: u32,
+    /// Target height in pixels.
+    pub height: u32,
+}
 
 /// Handle of the offscreen target the demo camera renders into.
 ///
@@ -63,26 +79,41 @@ pub(crate) struct GpuFrameTarget {
 ///
 /// Created lazily on the first [`readback_frame`] (a fallible context, so the
 /// `u32` stride conversion can use `?` instead of panicking) and reused every
-/// tick: map, copy the bytes out, unmap. The stride is recomputed from the
-/// fixed frame constants on every readback, so the buffer needs no layout
-/// metadata of its own.
+/// tick: map, copy the bytes out, unmap. The recorded extents detect a
+/// viewport re-target that bypassed the drop in
+/// [`SceneWorld::set_viewport_size`](crate::SceneWorld::set_viewport_size),
+/// so the buffer is rebuilt rather than over-/under-read.
 #[derive(Debug, Clone, Resource)]
 pub(crate) struct GpuFrameStaging {
     /// `MAP_READ | COPY_DST` buffer holding one padded frame.
     pub buffer: Buffer,
+    /// Width the buffer was allocated for.
+    pub width: u32,
+    /// Height the buffer was allocated for.
+    pub height: u32,
 }
 
-/// Build the offscreen render-target image for the fixed frame extents.
+/// Build the offscreen render-target image for the initial frame extents.
 ///
 /// `Rgba8UnormSrgb` matches the RGBA8 seam so Swift's swizzle stays untouched;
 /// `COPY_SRC` is added to the default target usages for the readback copy.
 pub(crate) fn create_frame_target(images: &mut Assets<Image>) -> bevy_asset::Handle<Image> {
-    let mut image = Image::new_target_texture(
-        FRAME_WIDTH,
-        FRAME_HEIGHT,
-        TextureFormat::Rgba8UnormSrgb,
-        None,
-    );
+    create_frame_target_sized(images, FRAME_WIDTH, FRAME_HEIGHT)
+}
+
+/// Build the offscreen render-target image for explicit extents.
+///
+/// Callers must have validated `width`/`height` (nonzero,
+/// `max <= MAX_VIEWPORT_EDGE`); the image constructor takes raw `u32` and
+/// cannot fail on them.
+pub(crate) fn create_frame_target_sized(
+    images: &mut Assets<Image>,
+    width: u32,
+    height: u32,
+) -> bevy_asset::Handle<Image> {
+    debug_assert!(width > 0 && height > 0);
+    debug_assert!(width.max(height) <= MAX_VIEWPORT_EDGE);
+    let mut image = Image::new_target_texture(width, height, TextureFormat::Rgba8UnormSrgb, None);
     image.texture_descriptor.usage |= TextureUsages::COPY_SRC;
     images.add(image)
 }
@@ -102,6 +133,7 @@ pub(crate) fn create_frame_target(images: &mut Assets<Image>) -> bevy_asset::Han
 /// and map variants when the copy-back fails.
 pub(crate) fn readback_frame(app: &mut App) -> Result<RenderFrame, SceneError> {
     let target = app.world().resource::<GpuFrameTarget>().handle.clone();
+    let size = *app.world().resource::<GpuViewportSize>();
     let (device, queue, gpu_image) = {
         let render_world = app.sub_app(RenderApp).world();
         (
@@ -117,20 +149,31 @@ pub(crate) fn readback_frame(app: &mut App) -> Result<RenderFrame, SceneError> {
         return Err(SceneError::NoGpuImage);
     };
 
-    let unpadded_bytes_per_row = FRAME_WIDTH as usize * FRAME_BYTES_PER_PIXEL;
+    let unpadded_bytes_per_row = size.width as usize * FRAME_BYTES_PER_PIXEL;
     let padded_bytes_per_row = RenderDevice::align_copy_bytes_per_row(unpadded_bytes_per_row);
     let padded_stride =
         u32::try_from(padded_bytes_per_row).map_err(|_| SceneError::StagingStrideOverflow)?;
-    let buffer_size = u64::from(padded_stride) * u64::from(FRAME_HEIGHT);
+    let buffer_size = u64::from(padded_stride) * u64::from(size.height);
 
-    if app.world().get_resource::<GpuFrameStaging>().is_none() {
+    let staging_matches = app
+        .world()
+        .get_resource::<GpuFrameStaging>()
+        .is_some_and(|staging| staging.width == size.width && staging.height == size.height);
+    if !staging_matches {
+        if app.world().get_resource::<GpuFrameStaging>().is_some() {
+            app.world_mut().remove_resource::<GpuFrameStaging>();
+        }
         let buffer = device.create_buffer(&BufferDescriptor {
             label: Some("veronica-frame-staging"),
             size: buffer_size,
             usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        app.world_mut().insert_resource(GpuFrameStaging { buffer });
+        app.world_mut().insert_resource(GpuFrameStaging {
+            buffer,
+            width: size.width,
+            height: size.height,
+        });
     }
     let staging = app.world().resource::<GpuFrameStaging>().clone();
 
@@ -144,12 +187,12 @@ pub(crate) fn readback_frame(app: &mut App) -> Result<RenderFrame, SceneError> {
             layout: TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(padded_stride),
-                rows_per_image: Some(FRAME_HEIGHT),
+                rows_per_image: Some(size.height),
             },
         },
         Extent3d {
-            width: FRAME_WIDTH,
-            height: FRAME_HEIGHT,
+            width: size.width,
+            height: size.height,
             depth_or_array_layers: 1,
         },
     );
@@ -177,9 +220,9 @@ pub(crate) fn readback_frame(app: &mut App) -> Result<RenderFrame, SceneError> {
     };
     staging.buffer.unmap();
 
-    let mut pixels = Vec::with_capacity(unpadded_bytes_per_row * FRAME_HEIGHT as usize);
+    let mut pixels = Vec::with_capacity(unpadded_bytes_per_row * size.height as usize);
     for row in bytes.chunks_exact(padded_bytes_per_row) {
         pixels.extend_from_slice(&row[..unpadded_bytes_per_row]);
     }
-    RenderFrame::from_raw_parts(FRAME_WIDTH, FRAME_HEIGHT, pixels)
+    RenderFrame::from_raw_parts(size.width, size.height, pixels)
 }

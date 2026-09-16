@@ -14,10 +14,17 @@
 
 use crate::SceneError;
 
-/// Fixed frame width in pixels (resize is out of scope for slice 2).
+/// Fixed initial frame width in pixels (see [`MAX_VIEWPORT_EDGE`]).
 pub const FRAME_WIDTH: u32 = 512;
-/// Fixed frame height in pixels (resize is out of scope for slice 2).
+/// Fixed initial frame height in pixels (see [`MAX_VIEWPORT_EDGE`]).
 pub const FRAME_HEIGHT: u32 = 320;
+/// Long-edge cap for the live viewport: `set_viewport_size` accepts any
+/// nonzero `width` x `height` with `max(width, height) <= MAX_VIEWPORT_EDGE`.
+///
+/// The bound keeps one padded staging buffer comfortably in GPU memory
+/// (2048 x 2048 x 4 B ≈ 16 MiB before row padding) while covering every
+/// realistic Retina pane. Raise it only with a memory rationale in tow.
+pub const MAX_VIEWPORT_EDGE: u32 = 2048;
 /// Bytes per pixel in the published frames.
 pub const FRAME_BYTES_PER_PIXEL: usize = 4;
 

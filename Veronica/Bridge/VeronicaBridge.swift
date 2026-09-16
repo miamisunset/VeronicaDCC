@@ -121,8 +121,21 @@ nonisolated enum EngineBridge {
         }
     }
 
-    // MARK: - Operator graph (ADR-0002)
+    /// Request a viewport re-target to `width` x `height` backing pixels.
+    ///
+    /// Fire-and-forget on `engineQueue` (never MainActor-blocking): the
+    /// intent is validated in Rust (`vrn_viewport_set_size` rejects zeros
+    /// and over-cap extents) and applied ahead of the next tick. Repeated
+    /// calls before a tick keep only the latest intent. The serial queue
+    /// orders intents against ticks, so no extra synchronization is needed.
+    static func setViewportSize(width: UInt32, height: UInt32) {
+        engineQueue.async {
+            guard let context = graphContext.pointer else { return }
+            _ = vrnViewportSetSize(context, width, height)
+        }
+    }
 
+    // MARK: - Operator graph (ADR-0002)
     /// `VrnResult` codes mirrored from `veronica-ffi`.
     ///
     /// Must match the Rust enum discriminant-for-discriminant; drift fails
@@ -169,6 +182,12 @@ nonisolated enum EngineBridge {
         _ outSurface: UnsafeMutablePointer<UnsafeMutableRawPointer?>?,
         _ outWidth: UnsafeMutablePointer<UInt32>?,
         _ outHeight: UnsafeMutablePointer<UInt32>?
+    ) -> Int32
+    @_silgen_name("vrn_viewport_set_size")
+    nonisolated private static func vrnViewportSetSize(
+        _ context: UnsafeMutableRawPointer?,
+        _ width: UInt32,
+        _ height: UInt32
     ) -> Int32
     @_silgen_name("vrn_graph_create_operator")
     nonisolated private static func vrnGraphCreateOperator(

@@ -1,9 +1,11 @@
 //! `IOSurface` frame publishing (ADR-0001 slice 2).
 //!
-//! The context owns one fixed-size `IOSurface`; every [`vrn_tick`] renders
-//! the software frame and uploads it under lock, and [`vrn_frame_surface`]
-//! hands Swift the borrowed handle plus extents. Swift wraps it in an
-//! `MTLTexture` with zero copies on the present path.
+//! The context owns a ping-pong pair of fixed-size `IOSurface`s; every
+//! [`vrn_tick`] renders the software frame and uploads it into the back
+//! buffer under lock, then publishes it as the new front, and
+//! [`vrn_frame_surface`] hands Swift the borrowed front handle plus
+//! extents. Swift wraps it in an `MTLTexture` with zero copies on the
+//! present path.
 //!
 //! All `unsafe` in this crate lives here and in the `vrn_*` exports:
 //! raw CoreFoundation / `IOSurface` handles, each block with a `SAFETY`
@@ -108,8 +110,10 @@ pub enum SurfaceError {
 
 /// One context-owned `IOSurface` plus its fixed extents.
 ///
-/// Created lazily on the first tick; Swift borrows the handle for the
-/// context lifetime and must not release it.
+/// Created lazily on the first tick and recreated whenever the published
+/// frame extents drift (viewport re-target); the handle address changes on
+/// recreation and Swift re-adopts it via its address-change path. Swift
+/// borrows the handle for the context lifetime and must not release it.
 #[derive(Debug)]
 pub struct FrameSurface {
     surface: IOSurfaceRef,
@@ -205,6 +209,39 @@ impl Drop for FrameSurface {
         unsafe {
             CFRelease(self.surface);
         }
+    }
+}
+
+#[cfg(test)]
+impl FrameSurface {
+    /// Copy the surface contents as packed rows (test-only readback).
+    ///
+    /// Locks the surface, copies `width * 4` bytes per row (skipping any
+    /// stride padding, whose bytes Rust never wrote), then unlocks. The
+    /// ping-pong contract test uses this to prove consecutive fronts carry
+    /// different frames. Returns an empty vector when the surface will
+    /// not lock.
+    pub fn snapshot_bytes(&self) -> Vec<u8> {
+        let row_bytes = self.width as usize * 4;
+        let mut packed = vec![0u8; row_bytes * self.height as usize];
+        // SAFETY: handle came from `IOSurfaceCreate`, alive until `drop`.
+        let locked = unsafe { IOSurfaceLock(self.surface, 0, std::ptr::null_mut()) };
+        if locked != KERN_SUCCESS {
+            return Vec::new();
+        }
+        // SAFETY: locked above; base address and stride stay valid until
+        // the matching unlock below. Only `width * 4` bytes per row are
+        // copied, so unwritten stride padding never leaks into the result.
+        unsafe {
+            let base = IOSurfaceGetBaseAddress(self.surface).cast::<u8>();
+            let stride = IOSurfaceGetBytesPerRow(self.surface);
+            for (row, dst) in packed.chunks_exact_mut(row_bytes).enumerate() {
+                let src = base.add(row * stride);
+                std::ptr::copy_nonoverlapping(src, dst.as_mut_ptr(), row_bytes);
+            }
+            IOSurfaceUnlock(self.surface, 0, std::ptr::null_mut());
+        }
+        packed
     }
 }
 
