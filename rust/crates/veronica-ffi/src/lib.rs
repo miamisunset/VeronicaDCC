@@ -1121,13 +1121,42 @@ mod viewport_tests {
     }
 
     #[test]
+    fn pan_round_trip_moves_the_demo_camera() {
+        let context = vrn_context_create();
+        let before = camera_translation(context);
+        // SAFETY: just created, alive, single-threaded test.
+        unsafe {
+            assert_eq!(vrn_viewport_pan(context, 60.0, 20.0), VrnResult::Ok);
+        }
+        let after = camera_translation(context);
+        // SAFETY: alive until this destroy; single-threaded test.
+        unsafe {
+            vrn_context_destroy(context);
+        }
+        let moved = before
+            .iter()
+            .zip(after.iter())
+            .any(|(a, b)| (a - b).abs() > 1e-6);
+        assert!(moved, "a 60x20px pan must move the camera");
+    }
+
+    #[test]
     fn frame_all_round_trip_succeeds() {
         let context = vrn_context_create();
+        let before = distance_from_origin(camera_translation(context));
         // SAFETY: just created, alive, single-threaded test.
         unsafe {
             assert_eq!(vrn_viewport_frame_all(context), VrnResult::Ok);
+        }
+        let after = distance_from_origin(camera_translation(context));
+        // SAFETY: alive until this destroy; single-threaded test.
+        unsafe {
             vrn_context_destroy(context);
         }
+        assert!(
+            (after - before).abs() > 0.1,
+            "frame-all must refit the demo distance, went {before} -> {after}"
+        );
     }
     #[test]
     fn set_size_guards_map_to_result_codes() {

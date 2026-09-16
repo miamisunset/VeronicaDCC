@@ -162,7 +162,11 @@ impl SceneWorld {
             .map(|transform| transform.translation.to_array())
     }
 
-    /// Camera entity's [`Transform`], or [`SceneError::NoViewportCamera`].
+    /// Camera entity's [`Transform`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SceneError::NoViewportCamera`] when the demo camera is gone.
     fn viewport_camera(&mut self) -> Result<Entity, SceneError> {
         let world = self.app.world_mut();
         let mut cameras = world.query_filtered::<Entity, With<DemoCamera>>();
@@ -384,24 +388,26 @@ mod tests {
     fn orbit_clamps_elevation_before_the_pole() {
         let mut world = SceneWorld::new_headless();
         let _ = world.spawn_demo_scene();
-        world.orbit_camera(0.0, 100_000.0).expect("orbit works");
-        let camera = world.viewport_camera().expect("demo camera exists");
-        let translation = world
-            .app
-            .world()
-            .get::<Transform>(camera)
-            .expect("camera has a transform")
-            .translation;
-        let offset = translation - world.pivot();
-        let sine = offset.y / offset.length();
-        assert!(
-            sine.is_finite() && sine <= 1.0,
-            "elevation must stay valid, got sine {sine}"
-        );
-        assert!(
-            (sine - 1.0).abs() < 1e-3,
-            "a huge upward drag must park at +89.9 degrees, got sine {sine}"
-        );
+        for vertical_px in [100_000.0, -100_000.0] {
+            world.orbit_camera(0.0, vertical_px).expect("orbit works");
+            let camera = world.viewport_camera().expect("demo camera exists");
+            let translation = world
+                .app
+                .world()
+                .get::<Transform>(camera)
+                .expect("camera has a transform")
+                .translation;
+            let offset = translation - world.pivot();
+            let sine = offset.y / offset.length();
+            assert!(
+                sine.is_finite() && sine.abs() <= 1.0,
+                "elevation must stay valid, got sine {sine}"
+            );
+            assert!(
+                (sine.abs() - 1.0).abs() < 1e-3,
+                "a huge vertical drag must park at ±89.9 degrees, got sine {sine}"
+            );
+        }
     }
 
     #[test]
@@ -585,7 +591,36 @@ mod tests {
             world.orbit_camera(10.0, 0.0),
             Err(SceneError::NoViewportCamera)
         );
+        assert_eq!(
+            world.pan_camera(10.0, 0.0),
+            Err(SceneError::NoViewportCamera)
+        );
+        assert_eq!(
+            world.dolly_camera(1.0, (0.0, 0.0)),
+            Err(SceneError::NoViewportCamera)
+        );
         assert_eq!(world.frame_all(), Err(SceneError::NoViewportCamera));
+    }
+
+    #[test]
+    fn spawn_seats_pivot_at_bounds_center() {
+        let mut world = SceneWorld::new_headless();
+        let _ = world.spawn_demo_scene();
+        let bounds = world.scene_bounds().expect("demo cube has bounds");
+        let center = Vec3::from((bounds.min + bounds.max) * 0.5);
+        assert_eq!(world.pivot(), center);
+    }
+
+    #[test]
+    fn ticks_never_recenter_the_pivot() {
+        let mut world = SceneWorld::new_headless();
+        let _ = world.spawn_demo_scene();
+        world.pan_camera(50.0, 25.0).expect("pan works");
+        let pivot = world.pivot();
+        for _ in 0..5 {
+            world.update();
+        }
+        assert_eq!(world.pivot(), pivot);
     }
 
     #[test]
