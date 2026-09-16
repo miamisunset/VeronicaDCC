@@ -43,3 +43,18 @@ fn frame_angle_follows_tick_count() {
     world.update();
     assert!(world.spin_angle() > 0.0);
 }
+
+/// No cube, no motion: with no `DemoCube` alive the published angle is zero
+/// and consecutive ticks publish identical frames. Pixels follow ECS state.
+#[test]
+fn frames_hold_still_without_a_cube() {
+    let mut world = SceneWorld::new_headless();
+    world.update();
+    // Exact bit comparison: the cubeless path returns the `0.0` constant
+    // with no float arithmetic in between.
+    assert_eq!(world.spin_angle().to_bits(), 0.0f32.to_bits());
+    let before = world.render_frame().pixels().to_vec();
+    world.update();
+    let after = world.render_frame().pixels().to_vec();
+    assert_eq!(before, after);
+}

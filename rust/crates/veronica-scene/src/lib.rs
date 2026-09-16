@@ -10,6 +10,7 @@
 
 use bevy_app::{App, ScheduleRunnerPlugin, Update};
 use bevy_ecs::prelude::*;
+use bevy_math::prelude::EulerRot;
 use bevy_transform::prelude::Transform;
 use std::time::Duration;
 use thiserror::Error;
@@ -197,18 +198,21 @@ impl SceneWorld {
         self.app.world().resource::<TickCount>().0
     }
 
-    /// Current turntable angle in radians: ticks times the fixed spin step.
+    /// Current turntable angle in radians, read from the demo cube's live
+    /// [`Transform`].
     ///
-    /// Deterministic on purpose — the published pixels are a pure function
-    /// of this angle, so tests assert frame differences without a clock.
-    /// Exact for tick counts below 2^24 (~3 years at 60 Hz).
-    #[allow(
-        clippy::cast_precision_loss,
-        reason = "exact below 2^24 ticks; turntable wraps long before that matters"
-    )]
+    /// The angle is ECS state, not a tick multiple: [`spin_demo_cubes`]
+    /// rotates the cube each update, and the published pixels derive from
+    /// this reading — so a world with no cube publishes identical frames.
+    /// Deterministic on purpose, so tests assert frame differences without
+    /// a clock. `0.0` when no [`DemoCube`] is alive.
     #[must_use]
-    pub fn spin_angle(&self) -> f32 {
-        self.tick_count() as f32 * DEMO_SPIN_STEP
+    pub fn spin_angle(&mut self) -> f32 {
+        let world = self.app.world_mut();
+        let mut cubes = world.query_filtered::<&Transform, With<DemoCube>>();
+        cubes.iter(world).next().map_or(0.0, |transform| {
+            transform.rotation.to_euler(EulerRot::YXZ).0
+        })
     }
 
     /// Render the current demo-scene state into a fixed-size frame.
@@ -217,7 +221,7 @@ impl SceneWorld {
     /// interpreting scene content. Pixels derive from [`SceneWorld::spin_angle`],
     /// so consecutive ticks publish observably different frames.
     #[must_use]
-    pub fn render_frame(&self) -> RenderFrame {
+    pub fn render_frame(&mut self) -> RenderFrame {
         // Fixed constants are nonzero by construction; the fallible entry
         // point is `render_demo_frame`, pinned by its own tests.
         render::rasterize_for_world(self.spin_angle())

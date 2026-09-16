@@ -152,7 +152,8 @@ impl FrameSurface {
         self.height
     }
 
-    /// Upload one full RGBA8 frame under lock.
+    /// Upload one full RGBA8 frame under lock, swizzling to the surface's
+    /// BGRA8 layout during the copy.
     ///
     /// # Errors
     ///
@@ -174,15 +175,23 @@ impl FrameSurface {
         }
         // SAFETY: locked above; base address and stride stay valid until
         // the matching unlock below. Rows copy one by one because the
-        // framework may pad each row past `width * 4`.
+        // framework may pad each row past `width * 4`; channels swizzle
+        // RGBA source order into the surface's BGRA layout per pixel.
         unsafe {
             let base = IOSurfaceGetBaseAddress(self.surface).cast::<u8>();
             let stride = IOSurfaceGetBytesPerRow(self.surface);
             let row_bytes = self.width as usize * 4;
             for row in 0..self.height as usize {
-                let dst = base.add(row * stride);
-                let src = rgba.as_ptr().add(row * row_bytes);
-                std::ptr::copy_nonoverlapping(src, dst, row_bytes);
+                let dst_row = base.add(row * stride);
+                let src_row = rgba.as_ptr().add(row * row_bytes);
+                for pixel in 0..self.width as usize {
+                    let src = src_row.add(pixel * 4);
+                    let dst = dst_row.add(pixel * 4);
+                    *dst = *src.add(2);
+                    *dst.add(1) = *src.add(1);
+                    *dst.add(2) = *src;
+                    *dst.add(3) = *src.add(3);
+                }
             }
             IOSurfaceUnlock(self.surface, 0, std::ptr::null_mut());
         }
@@ -304,13 +313,35 @@ mod tests {
         }
         surface.upload(&payload).unwrap();
         // SAFETY: just uploaded; re-lock and compare the first row, then
-        // unlock. Test-only read-back of our own surface.
+        // unlock. Test-only read-back of our own surface. Bytes come back
+        // swizzled: surface order is B, G, R, A against the RGBA payload.
         unsafe {
             assert_eq!(IOSurfaceLock(surface.handle(), 0, std::ptr::null_mut()), 0);
             let base = IOSurfaceGetBaseAddress(surface.handle()).cast::<u8>();
             let first_row = std::slice::from_raw_parts(base.cast_const(), 8 * 4).to_vec();
             IOSurfaceUnlock(surface.handle(), 0, std::ptr::null_mut());
-            assert_eq!(first_row, payload[..8 * 4]);
+            for pixel in 0..8 {
+                assert_eq!(first_row[pixel * 4], payload[pixel * 4 + 2]);
+                assert_eq!(first_row[pixel * 4 + 1], payload[pixel * 4 + 1]);
+                assert_eq!(first_row[pixel * 4 + 2], payload[pixel * 4]);
+                assert_eq!(first_row[pixel * 4 + 3], payload[pixel * 4 + 3]);
+            }
+        }
+    }
+
+    #[test]
+    fn upload_swizzles_pure_red_to_bgra() {
+        let surface = FrameSurface::new(2, 1).unwrap();
+        let payload = [255u8, 0, 0, 255, 0, 255, 0, 255];
+        surface.upload(&payload).unwrap();
+        // SAFETY: just uploaded; re-lock, read both pixels, unlock.
+        unsafe {
+            assert_eq!(IOSurfaceLock(surface.handle(), 0, std::ptr::null_mut()), 0);
+            let base = IOSurfaceGetBaseAddress(surface.handle()).cast::<u8>();
+            let row = std::slice::from_raw_parts(base.cast_const(), 8).to_vec();
+            IOSurfaceUnlock(surface.handle(), 0, std::ptr::null_mut());
+            assert_eq!(&row[..4], &[0, 0, 255, 255]);
+            assert_eq!(&row[4..], &[0, 255, 0, 255]);
         }
     }
 }
