@@ -10,7 +10,9 @@
 //! `crate::gpu::readback_frame`; the `IOSurface` handoff and Swift are
 //! untouched by either source.
 //!
-//! Format is fixed RGBA8, row-major, non-premultiplied.
+//! Format is RGBA8 for the CPU rasterizer below, row-major, non-premultiplied.
+//! Frames from the GPU readback path ([`RenderFrame::from_raw_parts`]) hold
+//! BGRA8 instead — channel order is producer-specified, see [`RenderFrame`].
 
 use crate::SceneError;
 
@@ -28,7 +30,10 @@ pub const MAX_VIEWPORT_EDGE: u32 = 2048;
 /// Bytes per pixel in the published frames.
 pub const FRAME_BYTES_PER_PIXEL: usize = 4;
 
-/// One published frame: fixed-size RGBA8 bytes, row-major, non-premultiplied.
+/// One published frame: fixed-size 4-bytes-per-pixel bytes, row-major,
+/// non-premultiplied. Channel order is producer-specified: RGBA8 from
+/// [`render_demo_frame`], BGRA8 from the GPU readback path
+/// ([`RenderFrame::from_raw_parts`]).
 #[derive(Debug, Clone)]
 pub struct RenderFrame {
     width: u32,
@@ -49,13 +54,14 @@ impl RenderFrame {
         self.height
     }
 
-    /// Raw RGBA8 bytes, row-major (`width * height * 4` long).
+    /// Raw frame bytes, row-major (`width * height * 4` long) in the
+    /// producer's channel order (see the struct docs).
     #[must_use]
     pub fn pixels(&self) -> &[u8] {
         &self.pixels
     }
 
-    /// Assemble a published frame from externally rendered RGBA8 bytes.
+    /// Assemble a published frame from externally rendered BGRA8 bytes.
     ///
     /// Crate-visible constructor for the GPU readback path
     /// (`crate::gpu::readback_frame`), which produces tight row-major bytes

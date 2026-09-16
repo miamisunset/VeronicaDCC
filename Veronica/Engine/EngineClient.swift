@@ -28,7 +28,7 @@ nonisolated struct SceneStats: Equatable, Sendable {
 ///
 /// Mirrors `vrn_tick_timings`: `update` is the Bevy schedule (ECS + GPU
 /// render submission), `readback` the texture-to-buffer copy plus the
-/// synchronous map, `upload` the swizzle copy into the back `IOSurface`.
+/// synchronous map, `upload` the row-stride memcpy into the back `IOSurface`.
 /// Debug/attribution only (issue #32) — never drives behavior.
 nonisolated struct TickTimings: Equatable, Sendable {
     /// Bevy-schedule microseconds.

@@ -13,8 +13,8 @@
 //! the `RenderDevice`).
 //!
 //! The demo camera renders into an offscreen [`Image`](bevy_image::Image)
-//! target (`Rgba8UnormSrgb`, matching the RGBA8 seam; `COPY_SRC` added for
-//! readback). [`readback_frame`] copies that GPU texture into a persistent
+//! target (`Bgra8UnormSrgb`, matching the BGRA8 seam straight into the
+//! `IOSurface`; `COPY_SRC` added for readback). [`readback_frame`] copies that GPU texture into a persistent
 //! `MAP_READ | COPY_DST` staging buffer, submits, then maps synchronously
 //! (`map_async` + `Device::poll(wait_indefinitely)`) and reads directly from
 //! the [`RenderApp`](bevy_render::RenderApp) world — no channels. Row stride
@@ -71,7 +71,7 @@ pub(crate) struct GpuViewportSize {
 /// untouched (zeroed) texture deterministically.
 #[derive(Debug, Clone, Resource)]
 pub(crate) struct GpuFrameTarget {
-    /// The `Rgba8UnormSrgb` target texture handle.
+    /// The `Bgra8UnormSrgb` target texture handle.
     pub handle: bevy_asset::Handle<Image>,
 }
 
@@ -95,8 +95,9 @@ pub(crate) struct GpuFrameStaging {
 
 /// Build the offscreen render-target image for the initial frame extents.
 ///
-/// `Rgba8UnormSrgb` matches the RGBA8 seam so Swift's swizzle stays untouched;
-/// `COPY_SRC` is added to the default target usages for the readback copy.
+/// `Bgra8UnormSrgb` matches the BGRA8 seam so the `IOSurface` upload is a
+/// plain memcpy with no swizzle; `COPY_SRC` is added to the default target
+/// usages for the readback copy.
 pub(crate) fn create_frame_target(images: &mut Assets<Image>) -> bevy_asset::Handle<Image> {
     create_frame_target_sized(images, FRAME_WIDTH, FRAME_HEIGHT)
 }
@@ -113,7 +114,7 @@ pub(crate) fn create_frame_target_sized(
 ) -> bevy_asset::Handle<Image> {
     debug_assert!(width > 0 && height > 0);
     debug_assert!(width.max(height) <= MAX_VIEWPORT_EDGE);
-    let mut image = Image::new_target_texture(width, height, TextureFormat::Rgba8UnormSrgb, None);
+    let mut image = Image::new_target_texture(width, height, TextureFormat::Bgra8UnormSrgb, None);
     image.texture_descriptor.usage |= TextureUsages::COPY_SRC;
     images.add(image)
 }
@@ -124,7 +125,7 @@ pub(crate) fn create_frame_target_sized(
 /// [`RenderApp`](bevy_render::RenderApp) world, copies it to the staging
 /// buffer with an explicit encoder (submitted after the frame's own commands,
 /// so the GPU executes the copy after rendering), then maps synchronously.
-/// Padding rows are stripped, so the returned bytes are tight RGBA8.
+/// Padding rows are stripped, so the returned bytes are tight BGRA8.
 ///
 /// # Errors
 ///

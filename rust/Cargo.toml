@@ -23,6 +23,7 @@ bevy_asset = "0.19"
 bevy_mesh = "0.19"
 bevy_math = "0.19"
 bevy_camera = "0.19"
+bevy_color = "0.19"
 # `tonemapping_luts` ships the real AgX/TonyMcMapface LUTs. Without it the
 # tonemapper samples a 1x1 magenta placeholder (`lut_placeholder`), so the
 # default AgX method paints every lit pixel magenta (issue #27 diagnosis).

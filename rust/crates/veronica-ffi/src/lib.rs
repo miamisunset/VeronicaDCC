@@ -72,7 +72,7 @@ pub struct VrnContext {
 /// Attribution for the display-scaling slowdown: `update` is the Bevy
 /// schedule (ECS + GPU render submission), `readback` is the
 /// texture-to-buffer copy plus the synchronous map (`poll`
-/// stall included), and `upload` is the swizzle copy into the back
+/// stall included), and `upload` is the row-stride memcpy into the back
 /// `IOSurface`. Surface recreation on extent drift is excluded — it fires
 /// only on re-target ticks, so steady-state cells of the repro matrix are
 /// unaffected. Read via [`vrn_tick_timings`].
