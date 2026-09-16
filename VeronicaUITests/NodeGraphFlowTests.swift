@@ -185,6 +185,67 @@ final class NodeGraphFlowTests: XCTestCase {
         XCTAssertTrue(element(app, "parameterEmptyState").exists)
     }
 
+    /// Slice-3 dive history: chevrons traverse, a new dive clears the
+    /// orphaned forward, breadcrumb jumps behave as dives, and ⌘[ / ⌘]
+    /// match the chevrons (mock engine).
+    @MainActor
+    func testDiveHistoryChevronsTraverseAndClear() throws {
+        let app = XCUIApplication()
+        app.launchArguments = launchArguments(mocked: true, reset: true)
+        app.launch()
+
+        XCTAssertTrue(element(app, "nodeGraphPane").waitForExistence(timeout: 10))
+        try createContainer(app, at: rootOrigin)
+        let box1 = element(app, "operatorBox-1")
+        XCTAssertTrue(box1.waitForExistence(timeout: 5))
+
+        let back = element(app, "historyBack")
+        let forward = element(app, "historyForward")
+        // At root with no history both chevrons rest disabled.
+        XCTAssertFalse(back.isEnabled)
+        XCTAssertFalse(forward.isEnabled)
+
+        // Diving enables back; forward stays disabled (nothing orphaned).
+        box1.doubleClick()
+        let segment = element(app, "breadcrumbSegment-0")
+        XCTAssertTrue(segment.waitForExistence(timeout: 5))
+        XCTAssertTrue(back.isEnabled)
+        XCTAssertFalse(forward.isEnabled)
+
+        // Back returns to root and hands the path to forward.
+        back.click()
+        XCTAssertTrue(box1.waitForExistence(timeout: 5))
+        XCTAssertFalse(segment.exists)
+        XCTAssertFalse(back.isEnabled)
+        XCTAssertTrue(forward.isEnabled)
+
+        // Forward re-dives; diving again from root then clears it.
+        forward.click()
+        XCTAssertTrue(segment.waitForExistence(timeout: 5))
+        back.click()
+        XCTAssertTrue(box1.waitForExistence(timeout: 5))
+        box1.doubleClick()
+        XCTAssertTrue(segment.waitForExistence(timeout: 5))
+        XCTAssertTrue(back.isEnabled)
+        XCTAssertFalse(forward.isEnabled)
+
+        // ⌘[ steps back, ⌘] steps forward: the shortcuts match the chevrons.
+        app.typeKey("[", modifierFlags: .command)
+        XCTAssertTrue(box1.waitForExistence(timeout: 5))
+        XCTAssertFalse(segment.exists)
+        app.typeKey("]", modifierFlags: .command)
+        XCTAssertTrue(segment.waitForExistence(timeout: 5))
+
+        // A breadcrumb jump is a new dive: back reaches the jumped-from
+        // network, and the orphaned forward is gone.
+        element(app, "breadcrumbRoot").click()
+        XCTAssertTrue(box1.waitForExistence(timeout: 5))
+        XCTAssertTrue(back.isEnabled)
+        XCTAssertFalse(forward.isEnabled)
+        back.click()
+        XCTAssertTrue(segment.waitForExistence(timeout: 5))
+    }
+
     /// Canvas-absolute coordinate for a canvas-space point.
     ///
     /// The canvas carries the pane identifier (identifiers on SwiftUI

@@ -184,23 +184,65 @@ struct NodeGraphFeatureTests {
         await store.send(.snapshotResponse(.success(newer), epoch: 3))
     }
 
-    @Test func diveBreadcrumbAndBack() async {
+    @Test func diveHistoryPushClearAndTraverse() async {
         let store = TestStore(initialState: NodeGraphFeature.State()) {
             NodeGraphFeature()
         }
+        // Dives push the departed path and orphan the forward future.
         await store.send(.diveRequested(7)) {
             $0.path = [7]
+            $0.backStack = [[]]
         }
         await store.send(.diveRequested(9)) {
             $0.path = [7, 9]
+            $0.backStack = [[], [7]]
         }
-        await store.send(.breadcrumbSelected(depth: 1)) {
+        // Chevrons traverse: back stashes the departure on the forward
+        // stack, forward restores it onto the back stack.
+        await store.send(.historyBack) {
             $0.path = [7]
+            $0.backStack = [[]]
+            $0.forwardStack = [[7, 9]]
         }
-        await store.send(.backToParent) {
+        await store.send(.historyForward) {
+            $0.path = [7, 9]
+            $0.backStack = [[], [7]]
+            $0.forwardStack = []
+        }
+        // A breadcrumb jump is a new dive: it pushes and clears forward.
+        await store.send(.historyBack) {
+            $0.path = [7]
+            $0.backStack = [[]]
+            $0.forwardStack = [[7, 9]]
+        }
+        await store.send(.breadcrumbSelected(depth: 0)) {
             $0.path = []
+            $0.backStack = [[], [7]]
+            $0.forwardStack = []
         }
-        await store.send(.backToParent)
+        // Ends are no-ops: back at the start, forward with nothing orphaned,
+        // and re-clicking the current segment (no self-loop in history).
+        await store.send(.historyForward)
+        await store.send(.diveRequested(7)) {
+            $0.path = [7]
+            $0.backStack = [[], [7], []]
+        }
+        await store.send(.historyBack) {
+            $0.path = []
+            $0.backStack = [[], [7]]
+            $0.forwardStack = [[7]]
+        }
+        await store.send(.historyBack) {
+            $0.path = [7]
+            $0.backStack = [[]]
+            $0.forwardStack = [[7], []]
+        }
+        await store.send(.historyBack) {
+            $0.path = []
+            $0.backStack = []
+            $0.forwardStack = [[7], [], [7]]
+        }
+        await store.send(.historyBack)
         await store.send(.breadcrumbSelected(depth: 0))
     }
 
@@ -818,6 +860,7 @@ struct NodeGraphFeatureTests {
         }
         await store.send(.diveRequested(1)) {
             $0.path = [1]
+            $0.backStack = [[]]
             $0.editorNameDraft = "Root"
             $0.editorDirty = false
         }
@@ -827,6 +870,7 @@ struct NodeGraphFeatureTests {
         }
         await store.send(.breadcrumbSelected(depth: 0)) {
             $0.path = []
+            $0.backStack = [[], [1]]
             $0.editorNameDraft = "Root"
             $0.editorDirty = false
         }
@@ -834,7 +878,12 @@ struct NodeGraphFeatureTests {
             $0.editorNameDraft = "Typed"
             $0.editorDirty = true
         }
-        await store.send(.backToParent) {
+        // The back chevron is navigation, not a layout or edit op: it
+        // re-seeds the draft and records the traversal in the stacks.
+        await store.send(.historyBack) {
+            $0.path = [1]
+            $0.backStack = [[]]
+            $0.forwardStack = [[]]
             $0.editorNameDraft = "Root"
             $0.editorDirty = false
         }
@@ -909,9 +958,14 @@ struct NodeGraphFeatureTests {
         }
         await store.send(.diveRequested(1)) {
             $0.path = [1]
+            $0.backStack = [[]]
         }
-        await store.send(.backToParent) {
+        // History traversal is navigation, not layout: the stacks move but
+        // the arrangement still must not.
+        await store.send(.historyBack) {
             $0.path = []
+            $0.backStack = []
+            $0.forwardStack = [[1]]
         }
         // Mirror refreshes preserve the arrangement too: success advances
         // the mirror (and re-seeds the clean editor draft), save-failure

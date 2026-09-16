@@ -41,10 +41,36 @@ struct NodeGraphView: View {
     /// Path from the root to the shown network. Tolerates dead ids.
     ///
     /// Every jump reclaims canvas focus: key handling (Enter/Delete/arrows)
-    /// lives on the canvas, and a focused breadcrumb button would otherwise
-    /// swallow Enter for activation.
+    /// lives on the canvas, and a focused bar button would otherwise
+    /// swallow Enter for activation. The chevrons carry the standard
+    /// Command-bracket shortcuts; a disabled chevron (history end) takes
+    /// neither clicks nor its shortcut.
     private var breadcrumbBar: some View {
         HStack(spacing: 6) {
+            Button {
+                canvasFocused = true
+                store.send(.historyBack)
+            } label: {
+                Image(systemName: "chevron.left")
+            }
+            .buttonStyle(.link)
+            .focusable(false)
+            .disabled(store.backStack.isEmpty)
+            .keyboardShortcut("[", modifiers: .command)
+            .accessibilityLabel("Back")
+            .accessibilityIdentifier("historyBack")
+            Button {
+                canvasFocused = true
+                store.send(.historyForward)
+            } label: {
+                Image(systemName: "chevron.right")
+            }
+            .buttonStyle(.link)
+            .focusable(false)
+            .disabled(store.forwardStack.isEmpty)
+            .keyboardShortcut("]", modifiers: .command)
+            .accessibilityLabel("Forward")
+            .accessibilityIdentifier("historyForward")
             Button("Root") {
                 canvasFocused = true
                 store.send(.breadcrumbSelected(depth: 0))
@@ -70,14 +96,6 @@ struct NodeGraphView: View {
                     .font(.caption)
                     .foregroundStyle(.orange)
                     .accessibilityIdentifier("mockEngineBadge")
-            }
-            if !store.path.isEmpty {
-                Button("Back") {
-                    canvasFocused = true
-                    store.send(.backToParent)
-                }
-                .focusable(false)
-                .accessibilityIdentifier("breadcrumbBack")
             }
         }
         .padding(8)
