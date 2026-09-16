@@ -11,7 +11,14 @@ workspace = true
 [dependencies]
 veronica-core.workspace = true
 veronica-graph.workspace = true
+veronica-geometry.workspace = true
 bevy_ecs.workspace = true
 bevy_app.workspace = true
 bevy_transform.workspace = true
+bevy_asset.workspace = true
+bevy_mesh.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+bevy_math.workspace = true
+serde_json.workspace = true

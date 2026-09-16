@@ -8,13 +8,14 @@
 //! Cooking is two-phase. [`cook`] walks the graph in dependency-first order
 //! and emits lightweight [`ImplicitGeometry`] — parameters, not vertices —
 //! so downstream nodes that only transform parameters never pay for
-//! topology. Realization to [`EvaluatedMesh`] vertices happens on demand
-//! (a later job) only when a consumer needs topology.
+//! topology. [`realize`] turns implicit geometry into [`EvaluatedMesh`]
+//! vertices on demand, only when a consumer needs topology.
 
 mod cook;
 mod cube;
 mod error;
 mod payload;
+mod realize;
 
 pub use cook::cook;
 pub use cube::{
@@ -24,3 +25,4 @@ pub use error::CookError;
 pub use payload::{
     AttributeData, EvaluatedMesh, GeometryPayload, ImplicitGeometry, PRIMVAR_NORMAL, PRIMVAR_UV,
 };
+pub use realize::realize;
