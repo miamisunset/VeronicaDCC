@@ -20,13 +20,17 @@ struct EngineBridgeTests {
     }
 
     /// Slice-2 oracle: every tick publishes a valid frame — a borrowed
-    /// `IOSurface` handle with the fixed nonzero extents.
+    /// `IOSurface` handle with nonzero extents. Extents are dynamic since
+    /// #30 (these tests are app-hosted, so the live pane re-targets the
+    /// shared context to its backing size); this pins validity, not size.
+    /// Exact propagation is covered in Rust
+    /// (`viewport_resize_propagates_mid_life`).
     @Test func tickPublishesValidFrame() async throws {
         let stats = await EngineBridge.tickWithStats()
         let frame = try #require(stats.frame)
         #expect(frame.surfaceAddress != 0)
-        #expect(frame.width == 512)
-        #expect(frame.height == 320)
+        #expect(frame.width > 0)
+        #expect(frame.height > 0)
     }
 
     /// The graph externs are linked from `libveronica.a` and resolved

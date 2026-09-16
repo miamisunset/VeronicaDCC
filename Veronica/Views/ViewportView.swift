@@ -6,13 +6,13 @@ import SwiftUI
 
 /// Long-edge cap mirrored from Rust `MAX_VIEWPORT_EDGE` (veronica-scene).
 /// Both sides clamp to it, so Swift never sends what Rust would reject.
-let viewportMaxEdge: UInt32 = 2048
+nonisolated let viewportMaxEdge: UInt32 = 2048
 /// Minimum per-axis backing-pixel delta before a size intent crosses FFI.
 ///
 /// `updateNSView` runs every tick; without hysteresis, rounding jitter on
 /// fractional scales would re-target the GPU target (a full texture +
 /// staging rebuild) every frame. 2px is invisible and kills the churn.
-let viewportSizeHysteresis: UInt32 = 2
+nonisolated let viewportSizeHysteresis: UInt32 = 2
 
 /// Compute the viewport size intent for the current layout, or `nil` when no
 /// FFI call is owed.
@@ -21,7 +21,7 @@ let viewportSizeHysteresis: UInt32 = 2
 /// `1...viewportMaxEdge`. Empty or hidden views (`bounds <= 0`, `scale <= 0`)
 /// send nothing (a zero intent is an FFI error), and sub-hysteresis jitter
 /// stays quiet so per-tick updates cost only the compare. Pure for testing.
-func viewportSizeIntent(
+nonisolated func viewportSizeIntent(
     bounds: CGSize,
     scale: CGFloat,
     lastSent: (width: UInt32, height: UInt32)?
