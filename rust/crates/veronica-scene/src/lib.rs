@@ -17,9 +17,13 @@ use veronica_core::{BoneTransform, MeshId, MorphWeights};
 
 mod cook;
 mod mesh;
+mod render;
 
 pub use cook::{CookedMesh, SourceOperator};
 pub use mesh::render_mesh_from_evaluated;
+pub use render::{
+    FRAME_BYTES_PER_PIXEL, FRAME_HEIGHT, FRAME_WIDTH, RenderFrame, render_demo_frame,
+};
 
 /// Errors for scene operations.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -62,6 +66,14 @@ pub enum SceneError {
     /// The graph failed to cook before any mesh reached the scene.
     #[error(transparent)]
     Cook(#[from] veronica_geometry::CookError),
+    /// A frame was requested with a zero width or height.
+    #[error("frame extents must be nonzero, got {width}x{height}")]
+    InvalidFrameSize {
+        /// Requested width in pixels.
+        width: u32,
+        /// Requested height in pixels.
+        height: u32,
+    },
 }
 
 /// Bevy component mirroring [`MorphWeights`] for one mesh entity.
@@ -183,6 +195,32 @@ impl SceneWorld {
     #[must_use]
     pub fn tick_count(&self) -> u64 {
         self.app.world().resource::<TickCount>().0
+    }
+
+    /// Current turntable angle in radians: ticks times the fixed spin step.
+    ///
+    /// Deterministic on purpose — the published pixels are a pure function
+    /// of this angle, so tests assert frame differences without a clock.
+    /// Exact for tick counts below 2^24 (~3 years at 60 Hz).
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "exact below 2^24 ticks; turntable wraps long before that matters"
+    )]
+    #[must_use]
+    pub fn spin_angle(&self) -> f32 {
+        self.tick_count() as f32 * DEMO_SPIN_STEP
+    }
+
+    /// Render the current demo-scene state into a fixed-size frame.
+    ///
+    /// The frame-publish seam: Swift presents whatever this returns without
+    /// interpreting scene content. Pixels derive from [`SceneWorld::spin_angle`],
+    /// so consecutive ticks publish observably different frames.
+    #[must_use]
+    pub fn render_frame(&self) -> RenderFrame {
+        // Fixed constants are nonzero by construction; the fallible entry
+        // point is `render_demo_frame`, pinned by its own tests.
+        render::rasterize_for_world(self.spin_angle())
     }
 
     /// Number of live demo-scene entities (those tagged [`DemoScene`]).

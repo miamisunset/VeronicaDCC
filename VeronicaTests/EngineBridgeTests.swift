@@ -2,6 +2,9 @@ import Testing
 
 @testable import Veronica
 
+/// Serialized: every test hits the shared process-lifetime engine context,
+/// so parallel runs would interleave ticks and flake the oracles.
+@Suite(.serialized)
 struct EngineBridgeTests {
     @Test func validateMeshAcceptsWholeElements() async {
         await #expect(EngineBridge.validateMesh(positionsCount: 6, indicesCount: 3))
@@ -14,6 +17,16 @@ struct EngineBridgeTests {
         let second = await EngineBridge.tickWithStats()
         #expect(second.tickCount > first.tickCount)
         #expect(first.entityCount == 3)
+    }
+
+    /// Slice-2 oracle: every tick publishes a valid frame — a borrowed
+    /// `IOSurface` handle with the fixed nonzero extents.
+    @Test func tickPublishesValidFrame() async throws {
+        let stats = await EngineBridge.tickWithStats()
+        let frame = try #require(stats.frame)
+        #expect(frame.surfaceAddress != 0)
+        #expect(frame.width == 512)
+        #expect(frame.height == 320)
     }
 
     /// The graph externs are linked from `libveronica.a` and resolved

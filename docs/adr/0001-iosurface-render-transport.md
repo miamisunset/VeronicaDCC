@@ -45,3 +45,14 @@ handles, `VrnResult` codes).
 - Fallback, timeboxed: if the headless Metal adapter will not initialize
   windowless on the target machine, fall back to option 2 at reduced rate to
   still land visual proof, and record it here.
+
+## Slice 2 implementation note (2026-09-15)
+
+Transport landed as decided: Rust owns one fixed-size (512x320) `IOSurface`,
+Swift owns the `MTKView` and presents via `MTLTexture` wrap + blit, and the
+turntable ticks Rust-side. The pixel source is a deterministic CPU rasterizer
+of live ECS state behind the frame-publish seam — not the GPU renderer yet —
+so the windowless-Metal proof (/tmp/bevy_probe) still stands unintegrated:
+attaching the wgpu render target is a pixel-source swap behind the same
+handle. Swift coalesces display refreshes onto at most one in-flight tick so
+frame work cannot starve graph intents on the serial engine queue.

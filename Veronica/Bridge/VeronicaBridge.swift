@@ -18,35 +18,98 @@ nonisolated enum EngineBridge {
         qos: .userInitiated
     )
 
-    /// Serialized placeholder tick counter (engine queue only).
-    private static let tickCounter = Mutex<UInt64>(0)
-
     /// Validate mesh buffer sizes via Rust without touching scene state.
     static func validateMesh(positionsCount: Int, indicesCount: Int) async -> Bool {
         await withCheckedContinuation { continuation in
             engineQueue.async {
-                // Placeholder until libveronica.a is linked: mirror the Rust
-                // stride rule (whole vertices + whole triangles).
-                let valid = positionsCount % 3 == 0 && indicesCount % 3 == 0
-                continuation.resume(returning: valid)
+                let code = vrnValidateMesh(
+                    UInt(bitPattern: positionsCount),
+                    UInt(bitPattern: indicesCount)
+                )
+                continuation.resume(returning: code == VrnResultCode.ok.rawValue)
             }
         }
     }
 
+    /// Coalescing tick state (engine queue only, via `tickState`).
+    ///
+    /// The display link fires every refresh, but a tick now renders and
+    /// uploads a frame: when a tick is already running, late refreshes reuse
+    /// the latest stats instead of queueing behind it. Without this, tick
+    /// work piles up on the serial `engineQueue` and starves graph intents.
+    private struct TickState: Sendable {
+        /// A tick is currently executing on `engineQueue`.
+        var inFlight = false
+        /// Last completed stats, served to coalesced refreshes.
+        var latest = SceneStats(tickCount: 0, entityCount: 0, frame: nil)
+    }
+
+    /// Guards `TickState`. Short critical sections only; never held across
+    /// engine calls.
+    private static let tickState = Mutex<TickState>(TickState())
+
     /// Tick once and return mirrored scene stats, off the main actor.
     ///
-    /// Placeholder until `libveronica.a` is linked: advances a local counter
-    /// and reports the Rust-owned demo scene size (camera, light, cube).
-    /// Becomes `vrn_tick` + `vrn_tick_count` + `vrn_entity_count`.
+    /// Calls the real `libveronica.a` surface on the shared context: one
+    /// `vrn_tick` (advances the Rust turntable and publishes the frame),
+    /// then the stats getters plus the borrowed `IOSurface` handle.
+    /// Refreshes arriving while a tick runs share its result (see
+    /// `TickState`).
     static func tickWithStats() async -> SceneStats {
+        let shouldRun = tickState.withLock { state in
+            if state.inFlight {
+                return false
+            }
+            state.inFlight = true
+            return true
+        }
+        guard shouldRun else {
+            return tickState.withLock { $0.latest }
+        }
+        let stats = await runTick()
+        return tickState.withLock { state in
+            state.inFlight = false
+            state.latest = stats
+            return stats
+        }
+    }
+
+    /// The uncoalesced tick body: one `vrn_tick` plus stats on `engineQueue`.
+    private static func runTick() async -> SceneStats {
         await withCheckedContinuation { continuation in
             engineQueue.async {
-                let tick = tickCounter.withLock { counter in
-                    counter += 1
-                    return counter
+                guard let context = graphContext.pointer else {
+                    continuation.resume(
+                        returning: SceneStats(tickCount: 0, entityCount: 0, frame: nil)
+                    )
+                    return
+                }
+                guard vrnTick(context) == VrnResultCode.ok.rawValue else {
+                    continuation.resume(
+                        returning: SceneStats(tickCount: 0, entityCount: 0, frame: nil)
+                    )
+                    return
+                }
+                var tick: UInt64 = 0
+                var entities: UInt64 = 0
+                var surface: UnsafeMutableRawPointer?
+                var width: UInt32 = 0
+                var height: UInt32 = 0
+                _ = vrnTickCount(context, &tick)
+                _ = vrnEntityCount(context, &entities)
+                let frameCode = vrnFrameSurface(context, &surface, &width, &height)
+                let frame: VideoFrame?
+                if frameCode == VrnResultCode.ok.rawValue, let surface {
+                    frame = VideoFrame(
+                        surfaceAddress: UInt64(UInt(bitPattern: surface)),
+                        width: UInt64(width),
+                        height: UInt64(height)
+                    )
+                } else {
+                    frame = nil
                 }
                 continuation.resume(
-                    returning: SceneStats(tickCount: tick, entityCount: 3)
+                    returning: SceneStats(tickCount: tick, entityCount: entities, frame: frame)
                 )
             }
         }
@@ -80,6 +143,27 @@ nonisolated enum EngineBridge {
     // inputs are `const char *` (read-only on both sides).
     @_silgen_name("vrn_context_create")
     nonisolated private static func vrnContextCreate() -> UnsafeMutableRawPointer?
+    @_silgen_name("vrn_validate_mesh")
+    nonisolated private static func vrnValidateMesh(_ positionsLen: UInt, _ indicesLen: UInt) -> Int32
+    @_silgen_name("vrn_tick")
+    nonisolated private static func vrnTick(_ context: UnsafeMutableRawPointer?) -> Int32
+    @_silgen_name("vrn_tick_count")
+    nonisolated private static func vrnTickCount(
+        _ context: UnsafeMutableRawPointer?,
+        _ out: UnsafeMutablePointer<UInt64>?
+    ) -> Int32
+    @_silgen_name("vrn_entity_count")
+    nonisolated private static func vrnEntityCount(
+        _ context: UnsafeMutableRawPointer?,
+        _ out: UnsafeMutablePointer<UInt64>?
+    ) -> Int32
+    @_silgen_name("vrn_frame_surface")
+    nonisolated private static func vrnFrameSurface(
+        _ context: UnsafeMutableRawPointer?,
+        _ outSurface: UnsafeMutablePointer<UnsafeMutableRawPointer?>?,
+        _ outWidth: UnsafeMutablePointer<UInt32>?,
+        _ outHeight: UnsafeMutablePointer<UInt32>?
+    ) -> Int32
     @_silgen_name("vrn_graph_create_operator")
     nonisolated private static func vrnGraphCreateOperator(
         _ context: UnsafeMutableRawPointer?,
