@@ -97,37 +97,30 @@ pub(crate) fn create_frame_target(images: &mut Assets<Image>) -> bevy_asset::Han
 ///
 /// # Errors
 ///
-/// Returns [`SceneError::RenderReadback`] when the target has no GPU image
-/// yet (read before the first tick uploaded it), the stride does not fit in a
-/// `u32`, the device poll fails, or the staging map fails.
+/// Returns [`SceneError::NoGpuImage`] when the target has no GPU image
+/// yet (read before the first tick uploaded it), [`SceneError`] staging, poll,
+/// and map variants when the copy-back fails.
 pub(crate) fn readback_frame(app: &mut App) -> Result<RenderFrame, SceneError> {
     let target = app.world().resource::<GpuFrameTarget>().handle.clone();
-    let (device, queue) = {
+    let (device, queue, gpu_image) = {
         let render_world = app.sub_app(RenderApp).world();
         (
             render_world.resource::<RenderDevice>().clone(),
             render_world.resource::<RenderQueue>().clone(),
+            render_world
+                .resource::<RenderAssets<GpuImage>>()
+                .get(&target)
+                .cloned(),
         )
     };
-    let gpu_image = {
-        let render_world = app.sub_app(RenderApp).world();
-        render_world
-            .resource::<RenderAssets<GpuImage>>()
-            .get(&target)
-            .cloned()
-    };
     let Some(gpu_image) = gpu_image else {
-        return Err(SceneError::RenderReadback {
-            reason: "render target has no GPU image yet; tick the world first",
-        });
+        return Err(SceneError::NoGpuImage);
     };
 
     let unpadded_bytes_per_row = FRAME_WIDTH as usize * FRAME_BYTES_PER_PIXEL;
     let padded_bytes_per_row = RenderDevice::align_copy_bytes_per_row(unpadded_bytes_per_row);
     let padded_stride =
-        u32::try_from(padded_bytes_per_row).map_err(|_| SceneError::RenderReadback {
-            reason: "staging stride does not fit in u32",
-        })?;
+        u32::try_from(padded_bytes_per_row).map_err(|_| SceneError::StagingStrideOverflow)?;
     let buffer_size = u64::from(padded_stride) * u64::from(FRAME_HEIGHT);
 
     if app.world().get_resource::<GpuFrameStaging>().is_none() {
@@ -172,17 +165,11 @@ pub(crate) fn readback_frame(app: &mut App) -> Result<RenderFrame, SceneError> {
     device
         .wgpu_device()
         .poll(PollType::wait_indefinitely())
-        .map_err(|_| SceneError::RenderReadback {
-            reason: "GPU device poll failed during frame readback",
-        })?;
+        .map_err(|_| SceneError::DevicePollFailed)?;
     receiver
         .recv()
-        .map_err(|_| SceneError::RenderReadback {
-            reason: "staging buffer map callback never ran",
-        })?
-        .map_err(|_| SceneError::RenderReadback {
-            reason: "staging buffer map failed",
-        })?;
+        .map_err(|_| SceneError::MapCallbackLost)?
+        .map_err(|_| SceneError::MapFailed)?;
 
     let bytes = {
         let view = staging.buffer.slice(..).get_mapped_range();

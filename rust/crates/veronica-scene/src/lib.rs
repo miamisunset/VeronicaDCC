@@ -87,11 +87,28 @@ pub enum SceneError {
         /// Requested height in pixels.
         height: u32,
     },
-    /// The GPU rendered but its bytes could not be read back.
-    #[error("gpu frame readback failed: {reason}")]
-    RenderReadback {
-        /// Fixed label naming the readback step that failed.
-        reason: &'static str,
+    /// The GPU render target has no uploaded image yet; tick the world first.
+    #[error("render target has no GPU image yet")]
+    NoGpuImage,
+    /// The staging stride does not fit in a `u32`.
+    #[error("frame staging stride does not fit in u32")]
+    StagingStrideOverflow,
+    /// The GPU device poll failed during frame readback.
+    #[error("GPU device poll failed during frame readback")]
+    DevicePollFailed,
+    /// The staging buffer map callback never ran.
+    #[error("staging buffer map callback never ran")]
+    MapCallbackLost,
+    /// The staging buffer map failed.
+    #[error("staging buffer map failed")]
+    MapFailed,
+    /// Raw bytes do not fill a `width` x `height` RGBA8 frame.
+    #[error("raw frame has {actual} bytes, expected {expected}")]
+    FrameLengthMismatch {
+        /// Bytes the frame layout requires.
+        expected: usize,
+        /// Bytes actually supplied.
+        actual: usize,
     },
 }
 
@@ -350,8 +367,9 @@ impl SceneWorld {
     ///
     /// # Errors
     ///
-    /// Returns [`SceneError::RenderReadback`] when the render target has no
-    /// GPU image yet or the staging copy/map fails.
+    /// Returns [`SceneError::NoGpuImage`] when the render target has no
+    /// GPU image yet, or the staging, poll, and map [`SceneError`] variants
+    /// when the copy-back fails.
     pub fn render_frame(&mut self) -> Result<RenderFrame, SceneError> {
         gpu::readback_frame(&mut self.app)
     }

@@ -56,7 +56,7 @@ impl RenderFrame {
     ///
     /// # Errors
     ///
-    /// Returns [`SceneError::RenderReadback`] when `pixels` is not exactly
+    /// Returns [`SceneError::FrameLengthMismatch`] when `pixels` is not exactly
     /// `width * height * 4` bytes long.
     pub(crate) fn from_raw_parts(
         width: u32,
@@ -65,8 +65,9 @@ impl RenderFrame {
     ) -> Result<RenderFrame, SceneError> {
         let expected = width as usize * height as usize * FRAME_BYTES_PER_PIXEL;
         if pixels.len() != expected {
-            return Err(SceneError::RenderReadback {
-                reason: "GPU staging bytes do not match the frame extents",
+            return Err(SceneError::FrameLengthMismatch {
+                expected,
+                actual: pixels.len(),
             });
         }
         Ok(RenderFrame {
