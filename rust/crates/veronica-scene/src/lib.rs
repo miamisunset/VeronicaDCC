@@ -15,8 +15,10 @@ use std::time::Duration;
 use thiserror::Error;
 use veronica_core::{BoneTransform, MeshId, MorphWeights};
 
+mod cook;
 mod mesh;
 
+pub use cook::{CookedMesh, SourceOperator};
 pub use mesh::render_mesh_from_evaluated;
 
 /// Errors for scene operations.
@@ -57,6 +59,9 @@ pub enum SceneError {
         /// Vertices the mesh actually holds.
         vertex_count: usize,
     },
+    /// The graph failed to cook before any mesh reached the scene.
+    #[error(transparent)]
+    Cook(#[from] veronica_geometry::CookError),
 }
 
 /// Bevy component mirroring [`MorphWeights`] for one mesh entity.
