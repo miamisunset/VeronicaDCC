@@ -1,0 +1,13 @@
+{
+  "version": 2,
+  "operators": [
+    {"id": 7, "kind": "container", "name": "Hero", "parent": null,
+     "position": {"x": 120.0, "y": 80.0},
+     "parameters": {"count": {"integer": 3}, "label": {"text": "Hero"},
+                    "opacity": {"float": 0.5}, "size": {"vec3": [1.0, 2.0, 3.0]},
+                    "visible": {"flag": true}}},
+    {"id": 8, "kind": "container", "name": "Sidekick", "parent": 7,
+     "position": {"x": 200.0, "y": 80.0}}
+  ],
+  "edges": []
+}

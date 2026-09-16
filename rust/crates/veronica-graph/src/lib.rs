@@ -12,9 +12,11 @@ use veronica_core::NodeId;
 
 /// `version` tag written into every [`GraphSnapshot`].
 ///
-/// Restores reject any other value; Swift persists the same JSON verbatim, so
-/// both sides drift-fail loudly instead of misreading each other (ADR-0002).
-pub const GRAPH_SNAPSHOT_VERSION: u32 = 1;
+/// Version 2 carries typed parameter values ([`ParamValue`]). Restores reject
+/// any other value — including version 1, which is not migrated — and Swift
+/// persists the same JSON verbatim, so both sides drift-fail loudly instead
+/// of misreading each other (ADR-0002).
+pub const GRAPH_SNAPSHOT_VERSION: u32 = 2;
 
 /// Name assigned to an operator at creation (ADR-0002).
 pub const DEFAULT_OPERATOR_NAME: &str = "Container";
@@ -166,6 +168,28 @@ pub struct Position {
     pub y: f64,
 }
 
+/// A typed parameter value (wire v2).
+///
+/// Closed set: every value on the wire is one of these, so consumers match
+/// exhaustively instead of sniffing JSON. External tagging keeps the golden
+/// fixture self-describing (`{"vec3": [...]}`); 3-vectors travel as `f64`
+/// triples and convert to engine math types only at evaluation and upload
+/// boundaries — never on the wire.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ParamValue {
+    /// Double-precision scalar.
+    Float(f64),
+    /// 64-bit integer.
+    Integer(i64),
+    /// Verbatim text; the only variant [`OperatorGraph::set_parameter`] writes.
+    Text(String),
+    /// Boolean flag.
+    Flag(bool),
+    /// 3-vector as an `f64` triple (sizes, centers, colors-as-data).
+    Vec3([f64; 3]),
+}
+
 /// The behavior-carrying element of the procedural graph.
 ///
 /// Rust owns operators; Swift renders them and sends intents. `parent` is
@@ -184,12 +208,12 @@ pub struct Operator {
     pub parent: Option<NodeId>,
     /// Canvas position in unbounded `f64` coordinates.
     pub position: Position,
-    /// String parameter map (slice 1: `ParameterEditor`).
+    /// Typed parameter map (wire v2: [`ParamValue`]).
     ///
     /// Sorted keys keep snapshots stable; missing on old payloads decodes
-    /// to an empty map via `default` (wire v1 stays).
+    /// to an empty map via `default`.
     #[serde(default)]
-    pub parameters: BTreeMap<String, String>,
+    pub parameters: BTreeMap<String, ParamValue>,
 }
 
 impl Operator {
@@ -344,10 +368,12 @@ impl OperatorGraph {
         Ok(())
     }
 
-    /// Set a string parameter on an operator.
+    /// Set a text parameter on an operator.
     ///
-    /// Keys are trimmed, values are stored verbatim. A trimmed key of
-    /// `"name"` delegates to the rename path ([`OperatorGraph::rename_operator`]).
+    /// Keys are trimmed, values are stored verbatim as [`ParamValue::Text`].
+    /// Other variants only enter through snapshot restore until typed setters
+    /// land with typed editing. A trimmed key of `"name"` delegates to the
+    /// rename path ([`OperatorGraph::rename_operator`]).
     ///
     /// # Errors
     ///
@@ -368,7 +394,7 @@ impl OperatorGraph {
         }
         operator
             .parameters
-            .insert(trimmed.to_owned(), value.to_owned());
+            .insert(trimmed.to_owned(), ParamValue::Text(value.to_owned()));
         Ok(())
     }
 
@@ -619,15 +645,17 @@ mod operator_tests {
     #[test]
     fn restore_rejects_unsupported_version() {
         let mut graph = OperatorGraph::new();
-        let snapshot = GraphSnapshot {
-            version: 2,
-            ..GraphSnapshot::default()
-        };
-        assert_eq!(
-            graph.restore(snapshot),
-            Err(GraphError::UnsupportedVersion(2))
-        );
-        assert!(graph.is_empty());
+        for version in [1, GRAPH_SNAPSHOT_VERSION + 1] {
+            let snapshot = GraphSnapshot {
+                version,
+                ..GraphSnapshot::default()
+            };
+            assert_eq!(
+                graph.restore(snapshot),
+                Err(GraphError::UnsupportedVersion(version))
+            );
+            assert!(graph.is_empty());
+        }
     }
 
     #[test]
@@ -812,8 +840,14 @@ mod operator_tests {
         // Keys trim; values keep every byte.
         graph.set_parameter(id, "  padded  ", "v").unwrap();
         let operator = graph.operator(id).unwrap();
-        assert_eq!(operator.parameters["label"], "  spaced  ");
-        assert_eq!(operator.parameters["padded"], "v");
+        assert_eq!(
+            operator.parameters["label"],
+            ParamValue::Text("  spaced  ".to_owned())
+        );
+        assert_eq!(
+            operator.parameters["padded"],
+            ParamValue::Text("v".to_owned())
+        );
         assert!(!operator.parameters.contains_key("  padded  "));
     }
 
@@ -872,7 +906,8 @@ mod operator_tests {
             None,
             position(0.0, 0.0),
         );
-        bad.parameters.insert(String::new(), "v".to_owned());
+        bad.parameters
+            .insert(String::new(), ParamValue::Text("v".to_owned()));
         let snapshot = GraphSnapshot {
             version: GRAPH_SNAPSHOT_VERSION,
             operators: vec![bad],
@@ -888,7 +923,9 @@ mod operator_tests {
             None,
             position(0.0, 0.0),
         );
-        blank.parameters.insert("   ".to_owned(), "v".to_owned());
+        blank
+            .parameters
+            .insert("   ".to_owned(), ParamValue::Text("v".to_owned()));
         let snapshot = GraphSnapshot {
             version: GRAPH_SNAPSHOT_VERSION,
             operators: vec![blank],
@@ -906,6 +943,14 @@ mod operator_tests {
             .unwrap();
         graph.set_parameter(id, "label", "Hero").unwrap();
         graph.set_parameter(id, "note", "  verbatim  ").unwrap();
+        // Typed variants only enter through restore today; the test seeds
+        // them directly, mirroring what a v2 fixture carries.
+        graph
+            .operators
+            .get_mut(&id)
+            .unwrap()
+            .parameters
+            .insert("size".to_owned(), ParamValue::Vec3([1.0, -0.0, 3.25]));
         let before = serde_json::to_string(&graph.snapshot()).unwrap();
         let mut revived = OperatorGraph::new();
         let parsed: GraphSnapshot = serde_json::from_str(&before).unwrap();
@@ -916,12 +961,83 @@ mod operator_tests {
             revived.operator(id).unwrap().parameters,
             graph.operator(id).unwrap().parameters
         );
+        // `-0.0 == 0.0` under `PartialEq`, so the map comparison above cannot
+        // see a sign flip; pin the bits explicitly.
+        assert!(
+            matches!(
+                revived.operator(id).unwrap().parameters["size"],
+                ParamValue::Vec3(_)
+            ),
+            "size must survive as a triple"
+        );
+        if let ParamValue::Vec3(triple) = &revived.operator(id).unwrap().parameters["size"] {
+            assert_eq!(triple[1].to_bits(), (-0.0_f64).to_bits());
+        }
+    }
+
+    /// Every variant owns a stable, self-describing wire form; the golden
+    /// fixture and the Swift mirror both pin these exact bytes.
+    #[test]
+    fn param_values_have_stable_wire_forms() {
+        assert_eq!(
+            serde_json::to_string(&ParamValue::Float(1.5)).unwrap(),
+            r#"{"float":1.5}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ParamValue::Integer(-3)).unwrap(),
+            r#"{"integer":-3}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ParamValue::Text("Hero".to_owned())).unwrap(),
+            r#"{"text":"Hero"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ParamValue::Flag(true)).unwrap(),
+            r#"{"flag":true}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ParamValue::Vec3([1.0, 2.0, 3.0])).unwrap(),
+            r#"{"vec3":[1.0,2.0,3.0]}"#
+        );
+    }
+
+    /// Triples round-trip bit-identical, including float edge cases serde
+    /// text must preserve (`-0.0`, subnormals, large magnitudes).
+    #[test]
+    fn vec3_parameters_round_trip_bit_identical() {
+        let value = ParamValue::Vec3([1.0, -0.0, 3.25]);
+        let json = serde_json::to_string(&value).unwrap();
+        let back: ParamValue = serde_json::from_str(&json).unwrap();
+        assert!(
+            matches!(back, ParamValue::Vec3(_)),
+            "wire must stay a triple"
+        );
+        if let ParamValue::Vec3(triple) = back {
+            assert_eq!(triple[0].to_bits(), 1.0_f64.to_bits());
+            assert_eq!(triple[1].to_bits(), (-0.0_f64).to_bits());
+            assert_eq!(triple[2].to_bits(), 3.25_f64.to_bits());
+        }
+    }
+
+    /// Version 1 is rejected, not migrated: no shipped graphs exist to
+    /// preserve, and silent coercion is worse than a loud error.
+    #[test]
+    fn version_one_snapshots_are_rejected_not_migrated() {
+        let stale: GraphSnapshot = serde_json::from_str(
+            r#"{"version":1,"operators":[{"id":7,"kind":"container","name":"Hero","parent":null,"position":{"x":120.0,"y":80.0}}],"edges":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(stale.version, 1);
+        assert_ne!(stale.version, GRAPH_SNAPSHOT_VERSION);
+        let mut graph = OperatorGraph::new();
+        assert_eq!(graph.restore(stale), Err(GraphError::UnsupportedVersion(1)));
+        assert!(graph.is_empty());
     }
 
     #[test]
     fn fixture_without_parameters_decodes_to_empty_map() {
         let snapshot: GraphSnapshot = serde_json::from_str(
-            r#"{"version":1,"operators":[{"id":7,"kind":"container","name":"Hero","parent":null,"position":{"x":120.0,"y":80.0}}],"edges":[]}"#,
+            r#"{"version":2,"operators":[{"id":7,"kind":"container","name":"Hero","parent":null,"position":{"x":120.0,"y":80.0}}],"edges":[]}"#,
         )
         .unwrap();
         assert_eq!(snapshot.operators.len(), 1);

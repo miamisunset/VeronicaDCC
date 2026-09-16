@@ -329,7 +329,7 @@ pub unsafe extern "C" fn vrn_graph_rename_operator(
     }
 }
 
-/// Set a string parameter on an operator; `key == "name"` renames.
+/// Set a text parameter on an operator; `key == "name"` renames.
 ///
 /// Keys are trimmed, values stored verbatim (see
 /// [`OperatorGraph::set_parameter`]). Guards mirror
@@ -830,7 +830,7 @@ mod graph_tests {
     }
 
     #[test]
-    fn restore_round_trip_and_rejects_v2_and_garbage() {
+    fn restore_round_trip_and_rejects_v1_and_garbage() {
         let context = vrn_context_create();
         assert!(!context.is_null());
         let kind = cstring("container");
@@ -863,9 +863,9 @@ mod graph_tests {
             );
             assert_eq!(snapshot_json(fresh), json);
             // Wrong version and garbage are rejected; state is untouched.
-            let v2 = cstring(r#"{"version":2,"operators":[],"edges":[]}"#);
+            let v1 = cstring(r#"{"version":1,"operators":[],"edges":[]}"#);
             assert_eq!(
-                vrn_graph_restore(fresh, v2.as_ptr().cast_mut()),
+                vrn_graph_restore(fresh, v1.as_ptr().cast_mut()),
                 VrnResult::InvalidArgument
             );
             let garbage = cstring("not json");
@@ -912,7 +912,7 @@ mod graph_tests {
                 VrnResult::Ok
             );
             let json = snapshot_json(context);
-            assert!(json.contains(r#""label":"Hero""#));
+            assert!(json.contains(r#""label":{"text":"Hero"}"#));
             // The `name` key delegates to the rename path.
             assert_eq!(
                 vrn_graph_set_parameter(

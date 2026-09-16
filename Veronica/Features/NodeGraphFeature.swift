@@ -4,7 +4,7 @@ import Foundation
 
 /// Right-pane feature: the procedural node graph editor (slice 1).
 ///
-/// Rust owns operators and the DAG; this feature mirrors the v1 snapshot
+/// Rust owns operators and the DAG; this feature mirrors the v2 snapshot
 /// read-only and sends mutation intents. Dive, breadcrumb, pan, selection,
 /// and drag previews are Swift-local and never touch FFI. Every committed
 /// mutation refreshes the mirror from a post-mutation snapshot and autosaves

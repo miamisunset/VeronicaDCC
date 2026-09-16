@@ -40,7 +40,7 @@ nonisolated struct EngineClient: Sendable {
     /// Fetch the whole-graph mirror. Owns the allocate/free boundary — the
     /// raw FFI pointer never escapes `EngineBridge`.
     var requestSnapshot: @Sendable () async throws(GraphEngineError) -> GraphSnapshot
-    /// Replace the whole DAG from a snapshot. Rejects `version != 1`.
+    /// Replace the whole DAG from a snapshot. Rejects `version != 2`.
     var restoreSnapshot: @Sendable (GraphSnapshot) async throws(GraphEngineError) -> Void
 }
 

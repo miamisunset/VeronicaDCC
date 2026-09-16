@@ -5,7 +5,7 @@ import Testing
 
 @testable import Veronica
 
-/// Contract pins for the v1 snapshot schema (ADR-0002): golden-fixture
+/// Contract pins for the v2 snapshot schema: golden-fixture
 /// drift, `f64` round-trips, registry shape, and canvas geometry.
 struct GraphSnapshotTests {
     /// Repo-relative URL of the golden fixture owned by `veronica-graph`.
@@ -13,20 +13,20 @@ struct GraphSnapshotTests {
         URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-            .appendingPathComponent("rust/crates/veronica-graph/tests/fixtures/graph-v1.json")
+            .appendingPathComponent("rust/crates/veronica-graph/tests/fixtures/graph-v2.json")
     }
 
     @Test func goldenFixtureDecodesAndRoundTrips() throws {
         let url = fixtureURL
         guard FileManager.default.fileExists(atPath: url.path) else {
-            withKnownIssue("Rust track has not delivered graph-v1.json yet") {
+            withKnownIssue("Rust track has not delivered graph-v2.json yet") {
                 Issue.record("missing golden fixture: \(url.path)")
             }
             return
         }
         let data = try Data(contentsOf: url)
         let decoded = try JSONDecoder().decode(GraphSnapshot.self, from: data)
-        #expect(decoded.version == 1)
+        #expect(decoded.version == GraphSnapshot.currentVersion)
         #expect(decoded.edges.isEmpty)
         #expect(decoded.operators == [
             OperatorMirror(
@@ -34,13 +34,51 @@ struct GraphSnapshotTests {
                 kind: "container",
                 name: "Hero",
                 parent: nil,
-                position: GraphPosition(x: 120, y: 80)
+                position: GraphPosition(x: 120, y: 80),
+                parameters: [
+                    "count": .integer(3),
+                    "label": .text("Hero"),
+                    "opacity": .float(0.5),
+                    "size": .vec3(1.0, 2.0, 3.0),
+                    "visible": .flag(true)
+                ]
+            ),
+            OperatorMirror(
+                id: 8,
+                kind: "container",
+                name: "Sidekick",
+                parent: 7,
+                position: GraphPosition(x: 200, y: 80)
             )
         ])
+        // The file triple survives bit-identical, not just `==`.
+        if case let .vec3(x, y, z) = decoded.operators[0].parameters["size"] {
+            #expect(x.bitPattern == (1.0).bitPattern)
+            #expect(y.bitPattern == (2.0).bitPattern)
+            #expect(z.bitPattern == (3.0).bitPattern)
+        } else {
+            Issue.record("expected a vec3 for size")
+        }
         // Decode -> encode -> decode equality: the mirror survives the wire.
         let recoded = try JSONEncoder().encode(decoded)
         let roundTripped = try JSONDecoder().decode(GraphSnapshot.self, from: recoded)
         #expect(roundTripped == decoded)
+    }
+
+    /// Decoding is structurally tolerant (a v1 payload still parses) while
+    /// restore rejects it — see `restoreRejectsWrongVersionAndContinuesIds`.
+    /// Decode and restore are different gates; this pins the first.
+    @Test func v1PayloadDecodesStructurallyButIsNotCurrent() throws {
+        let json = """
+        {"version": 1, "operators": [
+            {"id": 7, "kind": "container", "name": "Hero",
+             "parent": null, "position": {"x": 120.0, "y": 80.0}}
+        ], "edges": []}
+        """
+        let decoded = try JSONDecoder().decode(GraphSnapshot.self, from: Data(json.utf8))
+        #expect(decoded.version == 1)
+        #expect(decoded.version != GraphSnapshot.currentVersion)
+        #expect(decoded.operators.first?.name == "Hero")
     }
 
     @Test func f64PositionsSurviveRoundTripBitIdentical() throws {
@@ -71,16 +109,16 @@ struct GraphSnapshotTests {
 
     @Test func missingEdgesDefaultsToEmpty() throws {
         let json = """
-        {"version": 1, "operators": []}
+        {"version": 2, "operators": []}
         """
         let decoded = try JSONDecoder().decode(GraphSnapshot.self, from: Data(json.utf8))
-        #expect(decoded.version == 1)
+        #expect(decoded.version == GraphSnapshot.currentVersion)
         #expect(decoded.edges.isEmpty)
     }
 
     @Test func missingParametersDefaultsToEmpty() throws {
         let json = """
-        {"version": 1, "operators": [
+        {"version": 2, "operators": [
             {"id": 1, "kind": "container", "name": "P",
              "parent": null, "position": {"x": 1.0, "y": 2.0}}
         ], "edges": []}
@@ -93,19 +131,77 @@ struct GraphSnapshotTests {
         let mirrored = OperatorMirror(
             id: 1, kind: "container", name: "P", parent: nil,
             position: GraphPosition(x: 1, y: 2),
-            parameters: ["seed": "7"]
+            parameters: ["seed": .text("7")]
         )
         let snapshot = GraphSnapshot(operators: [mirrored])
         let data = try JSONEncoder().encode(snapshot)
         let roundTripped = try JSONDecoder().decode(GraphSnapshot.self, from: data)
         #expect(roundTripped == snapshot)
-        #expect(roundTripped.operators.first?.parameters == ["seed": "7"])
+        #expect(roundTripped.operators.first?.parameters == ["seed": .text("7")])
+    }
+
+    @Test func typedParametersDecodeAllFiveVariantsWithF64Parity() throws {
+        let json = """
+        {"version": 2, "operators": [
+            {"id": 1, "kind": "container", "name": "P",
+             "parent": null, "position": {"x": 1.0, "y": 2.0},
+             "parameters": {
+                 "label": {"text": "hello"},
+                 "gain": {"float": 0.12345678901234568},
+                 "seed": {"integer": 7},
+                 "enabled": {"flag": true},
+                 "offset": {"vec3": [0.1, 0.2, 0.30000000000000004]}
+             }}
+        ], "edges": []}
+        """
+        let decoded = try JSONDecoder().decode(GraphSnapshot.self, from: Data(json.utf8))
+        #expect(decoded.version == GraphSnapshot.currentVersion)
+        #expect(GraphSnapshot.currentVersion == 2)
+        let parameters = try #require(decoded.operators.first?.parameters)
+        #expect(parameters["label"] == .text("hello"))
+        #expect(parameters["gain"] == .float(0.12345678901234568))
+        #expect(parameters["seed"] == .integer(7))
+        #expect(parameters["enabled"] == .flag(true))
+        #expect(parameters["offset"] == .vec3(0.1, 0.2, 0.30000000000000004))
+        // f64 triple parity: the wire triple survives bit-identical.
+        if case let .vec3(x, y, z) = parameters["offset"] {
+            #expect(x.bitPattern == (0.1).bitPattern)
+            #expect(y.bitPattern == (0.2).bitPattern)
+            #expect(z.bitPattern == (0.30000000000000004).bitPattern)
+        } else {
+            Issue.record("expected a vec3 for offset")
+        }
+        // Round-trip preserves the typed map.
+        let recoded = try JSONEncoder().encode(decoded)
+        let roundTripped = try JSONDecoder().decode(GraphSnapshot.self, from: recoded)
+        #expect(roundTripped == decoded)
+    }
+
+    @Test(
+        "malformed parameter values are rejected",
+        arguments: [
+            "{}",
+            #"{"text": "a", "flag": true}"#,
+            #"{"vec3": [1.0, 2.0]}"#
+        ]
+    )
+    func malformedParameterValuesAreRejected(payload: String) throws {
+        let json = """
+        {"version": 2, "operators": [
+            {"id": 1, "kind": "container", "name": "P",
+             "parent": null, "position": {"x": 0.0, "y": 0.0},
+             "parameters": {"bad": \(payload)}}
+        ], "edges": []}
+        """
+        #expect(throws: DecodingError.self) {
+            try JSONDecoder().decode(GraphSnapshot.self, from: Data(json.utf8))
+        }
     }
 
     @Test func codableUsesDoubleNeverFloat() throws {
         // `position` must decode full `f64` precision, not `Float` mush.
         let json = """
-        {"version": 1, "operators": [
+        {"version": 2, "operators": [
             {"id": 1, "kind": "container", "name": "P",
              "parent": null, "position": {"x": 0.12345678901234568, "y": 0.0}}
         ], "edges": []}

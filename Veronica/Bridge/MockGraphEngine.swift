@@ -6,7 +6,7 @@ import Foundation
 /// `GraphLaunchOptions`). Validation mirrors ADR-0002 so the double
 /// cross-checks the contract: strict `"container"` kind, known-id
 /// moves/renames/deletes, non-blank names, existing parents, Rust-issued
-/// ids from 1, `version == 1` restores, cascading deletes.
+/// ids from 1, `version == 2` restores, cascading deletes.
 ///
 /// Retained as the hermetic UI-test double (mock mode is the default test
 /// path) alongside the real-engine mode: both run the same flow, and the
@@ -65,11 +65,11 @@ actor MockGraphEngine {
         operators[id] = mirrored
     }
 
-    /// Sets one string parameter. Unknown ids and blank keys are rejected;
-    /// the `"name"` key mirrors `rename` (blank rejected, the old value
-    /// preserved on failure). Keys are trimmed and values stored verbatim,
-    /// mirroring Rust so the double never accepts what the engine rejects
-    /// or normalizes what it stores.
+    /// Sets one text parameter, storing `.text(value)` verbatim. Unknown ids
+    /// and blank keys are rejected; the `"name"` key mirrors `rename`
+    /// (blank rejected, the old value preserved on failure). Keys are
+    /// trimmed and values stored verbatim, mirroring Rust so the double
+    /// never accepts what the engine rejects or normalizes what it stores.
     func setParameter(id: UInt64, key: String, value: String) throws(GraphEngineError) {
         guard var mirrored = operators[id] else {
             throw .ffiFailed(operation: "setParameter", code: 2)
@@ -84,7 +84,7 @@ actor MockGraphEngine {
             }
             mirrored.name = value
         } else {
-            mirrored.parameters[trimmedKey] = value
+            mirrored.parameters[trimmedKey] = .text(value)
         }
         operators[id] = mirrored
     }
@@ -113,7 +113,7 @@ actor MockGraphEngine {
         GraphSnapshot(operators: operators.values.sorted { $0.id < $1.id })
     }
 
-    /// Replaces the whole DAG. Rejects `version != 1`, zero ids, blank
+    /// Replaces the whole DAG. Rejects `version != 2`, zero ids, blank
     /// names, blank parameter keys, and dangling parent/edge references —
     /// mirroring Rust so the double never accepts what the engine rejects.
     func restore(_ snapshot: GraphSnapshot) throws(GraphEngineError) {
