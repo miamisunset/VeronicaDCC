@@ -5,7 +5,8 @@ import MetalKit
 import SwiftUI
 
 /// Long-edge cap mirrored from Rust `MAX_VIEWPORT_EDGE` (veronica-scene).
-/// Both sides clamp to it, so Swift never sends what Rust would reject.
+/// Intents scale proportionally to fit it, so Swift never sends what Rust
+/// would reject and aspect never distorts at the cap.
 nonisolated let viewportMaxEdge: UInt32 = 2048
 /// Minimum per-axis backing-pixel delta before a size intent crosses FFI.
 ///
@@ -17,27 +18,37 @@ nonisolated let viewportSizeHysteresis: UInt32 = 2
 /// Compute the viewport size intent for the current layout, or `nil` when no
 /// FFI call is owed.
 ///
-/// Backing pixels are `bounds * scale`, rounded and clamped to
-/// `1...viewportMaxEdge`. Empty or hidden views (`bounds <= 0`, `scale <= 0`)
-/// send nothing (a zero intent is an FFI error), and sub-hysteresis jitter
-/// stays quiet so per-tick updates cost only the compare. Pure for testing.
+/// Backing pixels are `bounds * scale`, rounded, then scaled proportionally
+/// to fit `viewportMaxEdge` on the long edge (per-axis clamping would
+/// distort aspect: 8000x6000 must become 2048x1536, not 2048x2048). Empty or
+/// hidden views (`bounds <= 0`, `scale <= 0`) send nothing (a zero intent is
+/// an FFI error), and sub-hysteresis jitter stays quiet so per-tick updates
+/// cost only the compare. Pure for testing.
 nonisolated func viewportSizeIntent(
     bounds: CGSize,
     scale: CGFloat,
     lastSent: (width: UInt32, height: UInt32)?
 ) -> (width: UInt32, height: UInt32)? {
     guard bounds.width > 0, bounds.height > 0, scale > 0 else { return nil }
-    let maxEdge = CGFloat(viewportMaxEdge)
-    let width = UInt32(max(1, min((bounds.width * scale).rounded(), maxEdge)))
-    let height = UInt32(max(1, min((bounds.height * scale).rounded(), maxEdge)))
+    var width = (bounds.width * scale).rounded()
+    var height = (bounds.height * scale).rounded()
+    let longest = max(width, height)
+    if longest > CGFloat(viewportMaxEdge) {
+        let factor = CGFloat(viewportMaxEdge) / longest
+        width = (width * factor).rounded()
+        height = (height * factor).rounded()
+    }
+    // Positive by construction (`bounds`/`scale` guarded above, cap factor
+    // in (0, 1]), so the conversions below cannot trap.
+    let snapped = (width: UInt32(width), height: UInt32(height))
     if let lastSent {
-        let deltaWidth = abs(Int(width) - Int(lastSent.width))
-        let deltaHeight = abs(Int(height) - Int(lastSent.height))
+        let deltaWidth = abs(Int(snapped.width) - Int(lastSent.width))
+        let deltaHeight = abs(Int(snapped.height) - Int(lastSent.height))
         if deltaWidth < Int(viewportSizeHysteresis), deltaHeight < Int(viewportSizeHysteresis) {
             return nil
         }
     }
-    return (width, height)
+    return snapped
 }
 
 /// Hosts the Metal view presenting Rust-published `IOSurface` frames, and

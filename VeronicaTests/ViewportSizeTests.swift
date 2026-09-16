@@ -45,13 +45,15 @@ struct ViewportSizeTests {
     }
 
     @Test func intentClampsToLongEdgeCap() throws {
+        // Backing 8000x6000 scales proportionally to 2048x1536 — per-axis
+        // clamping would distort aspect to 2048x2048.
         let intent = try #require(viewportSizeIntent(
             bounds: CGSize(width: 4000, height: 3000),
             scale: 2,
             lastSent: nil
         ))
         #expect(intent.width == viewportMaxEdge)
-        #expect(intent.height == viewportMaxEdge)
+        #expect(intent.height == 1536)
     }
 
     @Test func fractionalScaleRoundsToPixels() throws {
