@@ -53,6 +53,13 @@ struct NodeGraphFeature {
         var operators: [OperatorMirror] = []
         /// Dive stack of container ids from the root to the shown network.
         var path: [UInt64] = []
+        /// Browser-model past: every path the chevrons can go back to, most
+        /// recent last. Dives — including breadcrumb jumps — push the
+        /// departed path here and clear `forwardStack`.
+        var backStack: [[UInt64]] = []
+        /// Browser-model future: paths a new dive orphaned, next first from
+        /// the back. Back pushes the departed path here; forward pops it.
+        var forwardStack: [[UInt64]] = []
         /// Single selection. Tolerates dead ids (post-undo future).
         var selected: UInt64?
         /// Swift-local pan offset in points. Never sent to Rust.
@@ -110,10 +117,16 @@ struct NodeGraphFeature {
         case operatorSelected(UInt64?)
         /// Double-click dove into a container. Never touches FFI.
         case diveRequested(UInt64)
-        /// Breadcrumb jumped to `depth` (0 is root). Never touches FFI.
+        /// Breadcrumb jump to `depth` (0 is root). A jump is a new dive:
+        /// the departed path is pushed onto the back stack and the forward
+        /// stack is cleared. Never touches FFI.
         case breadcrumbSelected(depth: Int)
-        /// Back stepped one level up. Never touches FFI.
-        case backToParent
+        /// Back chevron (or Command-[): the departed path goes onto the
+        /// forward stack. No-op at the history start. Never touches FFI.
+        case historyBack
+        /// Forward chevron (or Command-]): the departed path goes back onto
+        /// the back stack. No-op at the history end. Never touches FFI.
+        case historyForward
         /// Background drag panned by a delta. Never touches FFI.
         case panChanged(delta: CGSize)
         /// Hover tracked a new canvas point for menu creation.
@@ -241,19 +254,42 @@ struct NodeGraphFeature {
                 return .none
 
             case let .diveRequested(id):
+                // A dive orphans the forward future, like a browser: the
+                // departed path stays reachable through the back stack.
+                state.backStack.append(state.path)
+                state.forwardStack = []
                 state.path.append(id)
                 seedEditor(&state)
                 return .none
 
             case let .breadcrumbSelected(depth):
-                state.path = Array(state.path.prefix(Swift.max(0, depth)))
+                let next = Array(state.path.prefix(Swift.max(0, depth)))
+                // Re-clicking the current segment changes nothing: recording
+                // it would pollute the back stack with a self-loop.
+                guard next != state.path else {
+                    return .none
+                }
+                state.backStack.append(state.path)
+                state.forwardStack = []
+                state.path = next
                 seedEditor(&state)
                 return .none
 
-            case .backToParent:
-                if !state.path.isEmpty {
-                    state.path.removeLast()
+            case .historyBack:
+                guard let previous = state.backStack.popLast() else {
+                    return .none
                 }
+                state.forwardStack.append(state.path)
+                state.path = previous
+                seedEditor(&state)
+                return .none
+
+            case .historyForward:
+                guard let next = state.forwardStack.popLast() else {
+                    return .none
+                }
+                state.backStack.append(state.path)
+                state.path = next
                 seedEditor(&state)
                 return .none
 
