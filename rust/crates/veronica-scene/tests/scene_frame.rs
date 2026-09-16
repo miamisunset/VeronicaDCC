@@ -228,3 +228,37 @@ fn frames_hold_still_without_a_cube() {
         .to_vec();
     assert_eq!(before, after);
 }
+
+/// Frame-all visibly reframes through the readback seam: fitting moves the
+/// camera nearer, so the lit cube covers substantially more pixels. Lit-area
+/// ratio is spin-proof — one turntable step reshuffles edges but barely
+/// changes the lit count, while the 4.7→2.6 distance fit grows it ~3×.
+#[test]
+fn frame_all_reframes_the_published_image() {
+    /// Pixels brighter than a lit face threshold (sum over B+G+R).
+    fn lit_pixel_count(pixels: &[u8]) -> usize {
+        pixels
+            .chunks_exact(4)
+            .filter(|pixel| u16::from(pixel[0]) + u16::from(pixel[1]) + u16::from(pixel[2]) > 450)
+            .count()
+    }
+
+    let mut world = SceneWorld::new_headless();
+    let _ = world.spawn_demo_scene();
+    let before = render_when_ready(&mut world);
+    world.frame_all().expect("frame-all works");
+    world.update();
+    let reframed = world
+        .render_frame()
+        .expect("readback stays live after frame-all");
+    assert_eq!(
+        (reframed.width(), reframed.height()),
+        (FRAME_WIDTH, FRAME_HEIGHT)
+    );
+    let before_lit = lit_pixel_count(&before).max(1);
+    let reframed_lit = lit_pixel_count(reframed.pixels());
+    assert!(
+        reframed_lit >= before_lit + before_lit / 2,
+        "fitting must grow the lit area ~3x, went {before_lit} -> {reframed_lit} lit pixels"
+    );
+}
