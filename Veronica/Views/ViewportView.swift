@@ -101,6 +101,43 @@ nonisolated func aspectFitRect(
     return CGRect(x: originX, y: originY, width: width, height: height)
 }
 
+/// Smoothed display rate from the inter-refresh interval (issue #32).
+///
+/// Exponential moving average over the instantaneous `1 / deltaSeconds`;
+/// the first sample seeds the average, non-positive intervals keep the
+/// previous value. Pure for testing.
+nonisolated func smoothedFrameRate(
+    previous: Double?,
+    deltaSeconds: Double,
+    alpha: Double = 0.15
+) -> Double {
+    guard deltaSeconds > 0 else { return previous ?? 0 }
+    let instant = 1 / deltaSeconds
+    guard let previous else { return instant }
+    return previous + alpha * (instant - previous)
+}
+
+/// Whole milliseconds with one decimal, for the timing overlay.
+nonisolated func milliseconds(_ microseconds: UInt64) -> Double {
+    (Double(microseconds) / 100).rounded() / 10
+}
+
+/// One-line timing readout for the viewport stats overlay (issue #32).
+///
+/// `fps` is the achieved display-link rate; `tick` the Rust tick wall
+/// time; `u`/`r`/`w` the Bevy-schedule / readback / upload splits;
+/// `p` the last completed present. Pure for testing.
+nonisolated func timingLine(
+    fps: Double,
+    tickUs: UInt64,
+    updateUs: UInt64,
+    readbackUs: UInt64,
+    uploadUs: UInt64,
+    presentUs: UInt64
+) -> String {
+    "\(Int(fps.rounded())) fps · \(milliseconds(tickUs)) ms tick · u \(milliseconds(updateUs)) r \(milliseconds(readbackUs)) w \(milliseconds(uploadUs)) p \(milliseconds(presentUs))"
+}
+
 /// Hosts the Metal view presenting Rust-published `IOSurface` frames, and
 /// owns the display link pacing the loop.
 ///
@@ -116,18 +153,25 @@ nonisolated func aspectFitRect(
 /// intents to Rust. `dismantleNSView` invalidates the link, breaking the
 /// link → coordinator retain cycle.
 struct ViewportMetalHost: NSViewRepresentable {
-    /// Invoked on the main thread, once per display refresh.
-    var onFrame: () -> Void
+    /// Invoked on the main thread, once per display refresh, carrying the
+    /// host's pacing observations (fps EMA + last present cost).
+    var onFrame: (FramePacing) -> Void
     /// Latest published frame handle from `ViewportFeature.State`.
     var frame: VideoFrame?
 
     final class Coordinator: NSObject, MTKViewDelegate {
-        var onFrame: () -> Void
+        var onFrame: (FramePacing) -> Void
         var link: CADisplayLink?
         private var device: MTLDevice?
         private var commandQueue: MTLCommandQueue?
         private var cachedAddress: UInt64?
         private var frameTexture: MTLTexture?
+        /// Smoothed display-link rate; seeded by the first interval.
+        private var fps: Double?
+        /// Last `fire` timestamp, for the inter-refresh interval.
+        private var lastFireAt: Double?
+        /// Last completed `draw` body cost, in whole microseconds.
+        private var lastPresentUs: UInt64 = 0
         /// Last backing-pixel size sent to Rust. Compared per tick in
         /// `updateNSView`; the FFI call fires only on hysteresis-exceeding
         /// change, so steady-state ticks cost just the compare.
@@ -139,12 +183,21 @@ struct ViewportMetalHost: NSViewRepresentable {
         private var scaledTexture: MTLTexture?
         private var scaledSize: (width: Int, height: Int)?
 
-        init(onFrame: @escaping () -> Void) {
+        init(onFrame: @escaping (FramePacing) -> Void) {
             self.onFrame = onFrame
         }
 
         @objc func fire() {
-            onFrame()
+            // Display-link pacing meter: EMA over inter-refresh intervals.
+            // Stays at the display rate while ticks coalesce on the engine
+            // queue, so a drop here (not in tick-ms) indicts the main
+            // thread — i.e. the present path.
+            let now = CACurrentMediaTime()
+            if let last = lastFireAt {
+                fps = smoothedFrameRate(previous: fps, deltaSeconds: now - last)
+            }
+            lastFireAt = now
+            onFrame(FramePacing(fps: fps ?? 0, presentMicroseconds: lastPresentUs))
         }
 
         func attach(device: MTLDevice?, queue: MTLCommandQueue?) {
@@ -163,6 +216,12 @@ struct ViewportMetalHost: NSViewRepresentable {
         /// match and copy directly. The 1:1 copy preserves row order, so
         /// orientation matches the pre-resize path by construction.
         func draw(in view: MTKView) {
+            let presentStart = CACurrentMediaTime()
+            // Stale by one frame by construction: `fire` reads the last
+            // completed present. A meter, never a signal.
+            defer {
+                lastPresentUs = UInt64((CACurrentMediaTime() - presentStart) * 1_000_000)
+            }
             guard let drawable = view.currentDrawable,
                 let texture = frameTexture,
                 let device,
@@ -318,7 +377,6 @@ struct ViewportMetalHost: NSViewRepresentable {
     func makeCoordinator() -> Coordinator {
         Coordinator(onFrame: onFrame)
     }
-
     func makeNSView(context: Context) -> MTKView {
         let view = MTKView()
         let device = MTLCreateSystemDefaultDevice()
@@ -386,7 +444,7 @@ struct ViewportView: View {
     var body: some View {
         ZStack(alignment: .bottomLeading) {
             ViewportMetalHost(
-                onFrame: { store.send(.frame) },
+                onFrame: { pacing in store.send(.frame(pacing: pacing)) },
                 frame: store.frame
             )
             VStack(alignment: .leading, spacing: 2) {
@@ -396,6 +454,16 @@ struct ViewportView: View {
                 Text("entities \(store.entityCount)")
                     .monospacedDigit()
                     .accessibilityIdentifier("viewportEntityLabel")
+                Text(timingLine(
+                    fps: store.frameRate,
+                    tickUs: store.tickMicroseconds,
+                    updateUs: store.timings.update,
+                    readbackUs: store.timings.readback,
+                    uploadUs: store.timings.upload,
+                    presentUs: store.presentMicroseconds
+                ))
+                .monospacedDigit()
+                .accessibilityIdentifier("viewportTimingLabel")
             }
             .font(.caption)
             .foregroundStyle(.white.opacity(0.85))

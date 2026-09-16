@@ -18,12 +18,21 @@ struct ViewportFeature {
         var frameCount: UInt64 = 0
         /// Latest published frame handle for the Metal host.
         var frame: VideoFrame?
+        /// Wall-clock cost of the last published tick, in microseconds.
+        var tickMicroseconds: UInt64 = 0
+        /// Per-stage splits of the last published tick.
+        var timings = TickTimings()
+        /// Smoothed display-link rate (achieved presentation fps).
+        var frameRate: Double = 0
+        /// Last completed present cost, in microseconds.
+        var presentMicroseconds: UInt64 = 0
     }
 
     /// `Equatable` so `TestStore` can assert received actions by value.
     enum Action: Equatable {
-        /// One display refresh elapsed: request a Rust tick.
-        case frame
+        /// One display refresh elapsed: request a Rust tick, carrying the
+        /// Metal host's pacing observations (fps + last present cost).
+        case frame(pacing: FramePacing)
         /// Engine answered with fresh stats.
         case statsResponse(SceneStats)
     }
@@ -33,7 +42,9 @@ struct ViewportFeature {
     var body: some Reducer<ViewportFeature.State, ViewportFeature.Action> {
         Reduce { state, action in
             switch action {
-            case .frame:
+            case let .frame(pacing):
+                state.frameRate = pacing.fps
+                state.presentMicroseconds = pacing.presentMicroseconds
                 return .run { send in
                     let stats = await engine.tick()
                     await send(.statsResponse(stats))
@@ -45,6 +56,8 @@ struct ViewportFeature {
                 state.tickCount = stats.tickCount
                 state.entityCount = stats.entityCount
                 state.frame = stats.frame
+                state.tickMicroseconds = stats.tickMicroseconds
+                state.timings = stats.timings
                 state.frameCount += 1
                 return .none
             }

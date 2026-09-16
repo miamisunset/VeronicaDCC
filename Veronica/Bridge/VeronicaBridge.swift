@@ -81,6 +81,11 @@ nonisolated enum EngineBridge {
     }
 
     /// The uncoalesced tick body: one `vrn_tick` plus stats on `engineQueue`.
+    ///
+    /// Wall-clocks the tick (Bevy schedule + readback + upload) and reads
+    /// the per-stage splits, so the overlay can attribute tick cost without
+    /// guessing. Failure paths keep zero timings (the reducer drops
+    /// zero-tick stats anyway).
     private static func runTick() async -> SceneStats {
         await withCheckedContinuation { continuation in
             engineQueue.async {
@@ -90,12 +95,17 @@ nonisolated enum EngineBridge {
                     )
                     return
                 }
+                let tickStartNanos = DispatchTime.now().uptimeNanoseconds
                 guard vrnTick(context) == VrnResultCode.ok.rawValue else {
                     continuation.resume(
                         returning: SceneStats(tickCount: 0, entityCount: 0, frame: nil)
                     )
                     return
                 }
+                // Monotonic nanoseconds: the end read follows the start, so
+                // the subtraction cannot underflow.
+                let tickMicroseconds =
+                    (DispatchTime.now().uptimeNanoseconds - tickStartNanos) / 1_000
                 var tick: UInt64 = 0
                 var entities: UInt64 = 0
                 var surface: UnsafeMutableRawPointer?
@@ -114,8 +124,18 @@ nonisolated enum EngineBridge {
                 } else {
                     frame = nil
                 }
+                var update: UInt64 = 0
+                var readback: UInt64 = 0
+                var upload: UInt64 = 0
+                _ = vrnTickTimings(context, &update, &readback, &upload)
                 continuation.resume(
-                    returning: SceneStats(tickCount: tick, entityCount: entities, frame: frame)
+                    returning: SceneStats(
+                        tickCount: tick,
+                        entityCount: entities,
+                        frame: frame,
+                        tickMicroseconds: tickMicroseconds,
+                        timings: TickTimings(update: update, readback: readback, upload: upload)
+                    )
                 )
             }
         }
@@ -182,6 +202,13 @@ nonisolated enum EngineBridge {
         _ outSurface: UnsafeMutablePointer<UnsafeMutableRawPointer?>?,
         _ outWidth: UnsafeMutablePointer<UInt32>?,
         _ outHeight: UnsafeMutablePointer<UInt32>?
+    ) -> Int32
+    @_silgen_name("vrn_tick_timings")
+    nonisolated private static func vrnTickTimings(
+        _ context: UnsafeMutableRawPointer?,
+        _ outUpdate: UnsafeMutablePointer<UInt64>?,
+        _ outReadback: UnsafeMutablePointer<UInt64>?,
+        _ outUpload: UnsafeMutablePointer<UInt64>?
     ) -> Int32
     @_silgen_name("vrn_viewport_set_size")
     nonisolated private static func vrnViewportSetSize(
