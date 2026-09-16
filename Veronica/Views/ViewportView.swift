@@ -73,20 +73,38 @@ struct ViewportMetalHost: NSViewRepresentable {
         }
 
         func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
-            // Fixed-size frames (slice 2): no resize handling.
+            // Fixed-size frames (slice 2): no resize handling yet. Deliberately
+            // empty — restoring `drawableSize` here re-triggers this callback
+            // and deadlocks layout during pane swaps (see slice-2 diagnosis).
         }
 
         func draw(in view: MTKView) {
             guard let drawable = view.currentDrawable,
-                  let texture = frameTexture,
-                  drawable.texture.width == texture.width,
-                  drawable.texture.height == texture.height,
-                  let queue = commandQueue,
-                  let buffer = queue.makeCommandBuffer(),
-                  let blit = buffer.makeBlitCommandEncoder()
+                let texture = frameTexture,
+                let queue = commandQueue,
+                let buffer = queue.makeCommandBuffer()
             else {
                 return
             }
+            guard drawable.texture.width == texture.width,
+                drawable.texture.height == texture.height
+            else {
+                // Size drift (e.g. relayout racing the fixed drawable):
+                // skip the frame loudly rather than presenting a black view
+                // with no trace. Scaling blits belong to the resize slice.
+                NSLog(
+                    "Viewport: drawable %dx%d != frame %dx%d, skipping blit",
+                    drawable.texture.width,
+                    drawable.texture.height,
+                    texture.width,
+                    texture.height
+                )
+                return
+            }
+            // The encoder is created only after the size check: an early
+            // return with a live un-ended encoder aborts under Metal
+            // validation when the autorelease pool drains.
+            guard let blit = buffer.makeBlitCommandEncoder() else { return }
             blit.copy(from: texture, to: drawable.texture)
             blit.endEncoding()
             buffer.present(drawable)

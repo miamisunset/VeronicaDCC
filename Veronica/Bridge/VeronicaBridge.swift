@@ -69,8 +69,14 @@ nonisolated enum EngineBridge {
         let stats = await runTick()
         return tickState.withLock { state in
             state.inFlight = false
-            state.latest = stats
-            return stats
+            // A zero tick count marks the failure path in `runTick`; serving
+            // it would move coalesced callers backward in time. Keep the
+            // last good stats instead (the reducer drops stale ones anyway).
+            if stats.tickCount > 0 {
+                state.latest = stats
+                return stats
+            }
+            return state.latest
         }
     }
 

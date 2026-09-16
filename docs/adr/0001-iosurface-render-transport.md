@@ -56,3 +56,13 @@ so the windowless-Metal proof (/tmp/bevy_probe) still stands unintegrated:
 attaching the wgpu render target is a pixel-source swap behind the same
 handle. Swift coalesces display refreshes onto at most one in-flight tick so
 frame work cannot starve graph intents on the serial engine queue.
+
+## Known limitations (slice 2, external review)
+
+- No frame synchronization: one `IOSurface` is reused in place while the
+  GPU blits from it, so a slow blit overlapping the next tick upload can
+  tear. Acceptable for the fixed demo; double-buffering or a generation
+  check lands with the GPU attach (#27) or sooner if tearing shows.
+- Fixed 512x320 with a 1:1 blit: HiDPI relayouts that change the drawable
+  size skip the frame with an `NSLog`, and the delegate restores the fixed
+  drawable size. Scaling presentation belongs to the resize slice.

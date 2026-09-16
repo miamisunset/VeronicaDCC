@@ -79,10 +79,12 @@ downstream consumer needs topology.
 
 ## Viewport Pixels
 
-The rendered frames displayed in the Viewport. Produced Rust-side by the
-Bevy renderer and published per Tick over `IOSurface`; Swift presents them
-without interpreting scene content. _Avoid_: rendering (also names the data
-handoff from `EvaluatedMesh` to engine mesh — a different step).
+The rendered frames displayed in the Viewport. Produced Rust-side from live
+Scene state and published per Tick over `IOSurface`; Swift presents them
+without interpreting scene content. Slice 2 rasterizes on the CPU behind
+the frame-publish seam; the GPU renderer attaches later (#27). _Avoid_:
+rendering (also names the data handoff from `EvaluatedMesh` to engine
+mesh — a different step).
 
 ## Recook Loop
 

@@ -134,7 +134,8 @@ pub extern "C" fn vrn_validate_mesh(positions_len: usize, indices_len: usize) ->
     }
 }
 
-/// Tick the headless scene once. Must be called off the Swift `MainActor`.
+/// Tick the headless scene once, publishing the new frame. Must be called
+/// off the Swift `MainActor`.
 ///
 /// # Safety
 ///
