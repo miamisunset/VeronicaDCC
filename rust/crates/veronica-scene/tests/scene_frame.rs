@@ -76,6 +76,36 @@ fn published_frame_is_valid_after_tick() {
     );
 }
 
+/// The lit cube reads achromatic: white material under a white key light
+/// through `AgX` must be near-gray, never the magenta canary.
+/// Regression pin for #27 — without the `tonemapping_luts` cargo feature the
+/// `AgX` LUT resolves to a 1x1 magenta placeholder (`lut_placeholder`) and the
+/// cube publishes `(255, 0, 255)`.
+#[test]
+fn lit_cube_is_achromatic_not_magenta() {
+    let mut world = SceneWorld::new_headless();
+    let _ = world.spawn_demo_scene();
+    let pixels = render_when_ready(&mut world);
+    // Brightest pixel: the lit cube face is far brighter than the dark clear
+    // color, whatever the turntable angle.
+    let brightest = pixels
+        .chunks_exact(4)
+        .max_by_key(|pixel| u16::from(pixel[0]) + u16::from(pixel[1]) + u16::from(pixel[2]))
+        .expect("frame holds pixels");
+    let [r, g, b, a] = [brightest[0], brightest[1], brightest[2], brightest[3]];
+    assert_eq!(a, 255, "opaque PBR output, got {brightest:?}");
+    assert!(
+        r > 150 && g > 150 && b > 150,
+        "lit face must be bright, got [{r}, {g}, {b}]"
+    );
+    for (first, second) in [(r, g), (g, b), (r, b)] {
+        assert!(
+            first.abs_diff(second) <= 12,
+            "white cube must read achromatic, got [{r}, {g}, {b}]"
+        );
+    }
+}
+
 /// Consecutive ticks publish different pixels: the turntable angle advanced
 /// through the GPU path.
 #[test]

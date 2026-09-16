@@ -23,9 +23,14 @@ bevy_asset = "0.19"
 bevy_mesh = "0.19"
 bevy_math = "0.19"
 bevy_camera = "0.19"
-bevy_core_pipeline = "0.19"
+# `tonemapping_luts` ships the real AgX/TonyMcMapface LUTs. Without it the
+# tonemapper samples a 1x1 magenta placeholder (`lut_placeholder`), so the
+# default AgX method paints every lit pixel magenta (issue #27 diagnosis).
+bevy_core_pipeline = { version = "0.19", features = ["tonemapping_luts"] }
 bevy_diagnostic = "0.19"
-bevy_image = "0.19"
+# `zstd_rust` (pure Rust, no C toolchain) backs the KTX2 LUT decode pulled in
+# by `tonemapping_luts` above; `bevy_image/zstd` alone is a compile error.
+bevy_image = { version = "0.19", features = ["zstd_rust"] }
 bevy_light = "0.19"
 bevy_pbr = "0.19"
 bevy_render = "0.19"
