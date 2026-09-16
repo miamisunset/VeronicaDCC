@@ -77,6 +77,21 @@ parametric (both describe the graph, not the data).
 The step turning Implicit Geometry into vertices, run only when a
 downstream consumer needs topology.
 
+## Viewport Pixels
+
+The rendered frames displayed in the Viewport. Produced Rust-side from live
+Scene state and published per Tick over `IOSurface`; Swift presents them
+without interpreting scene content. Slice 2 rasterizes on the CPU behind
+the frame-publish seam; the GPU renderer attaches later (#27). _Avoid_:
+rendering (also names the data handoff from `EvaluatedMesh` to engine
+mesh — a different step).
+
+## Recook Loop
+
+The path from a Parameter change through cook → realize → scene to updated
+Viewport Pixels. The loop is closed when editing a Cube's size visibly
+changes the Viewport.
+
 ## Primvar
 
 Named data carried by geometry, from standard channels (position, normal,

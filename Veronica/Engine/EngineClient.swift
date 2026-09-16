@@ -14,6 +14,22 @@ nonisolated struct SceneStats: Equatable, Sendable {
     var tickCount: UInt64
     /// Live demo-scene entities (camera, light, cube).
     var entityCount: UInt64
+    /// Latest published frame, if a tick has published one yet.
+    var frame: VideoFrame?
+}
+
+/// Borrowed handle to the Rust-owned `IOSurface` for one published frame.
+///
+/// The address is the `IOSurfaceRef` pointer owned by the engine context
+/// (valid for the context lifetime; Swift never releases it). Compared by
+/// value so the view can skip re-wrapping an unchanged surface.
+nonisolated struct VideoFrame: Equatable, Sendable {
+    /// `IOSurfaceRef` pointer address.
+    var surfaceAddress: UInt64
+    /// Frame width in pixels.
+    var width: UInt64
+    /// Frame height in pixels.
+    var height: UInt64
 }
 
 /// TCA dependency for the Rust engine. The live value will call `vrn_tick`

@@ -4,7 +4,7 @@
 //! Rust panics are caught and mapped to [`VrnResult`] codes, never
 //! propagated into Swift. All state lives behind an opaque pointer.
 
-use std::ffi::{CStr, CString};
+use std::ffi::{CStr, CString, c_void};
 use std::os::raw::c_char;
 use std::sync::Mutex;
 use veronica_core::{
@@ -14,6 +14,10 @@ use veronica_graph::{
     GRAPH_SNAPSHOT_VERSION, GraphSnapshot, NodeGraph, OperatorGraph, OperatorKind, Position,
 };
 use veronica_scene::{DemoSceneIds, SceneWorld};
+
+mod surface;
+
+use surface::FrameSurface;
 
 /// Result codes returned across the FFI boundary.
 #[repr(C)]
@@ -42,6 +46,8 @@ pub struct VrnContext {
     scene: SceneWorld,
     demo: DemoSceneIds,
     mesh_history: UndoHistory<MeshTopology>,
+    /// Published `IOSurface`, created lazily on the first tick.
+    surface: Option<FrameSurface>,
 }
 
 impl VrnContext {
@@ -55,6 +61,27 @@ impl VrnContext {
             scene,
             demo,
             mesh_history: UndoHistory::new(64),
+            surface: None,
+        }
+    }
+
+    /// Render the current scene state into the owned surface, creating it
+    /// on the first call. Returns `Internal` when the framework refuses
+    /// the surface or its lock.
+    fn publish_frame(&mut self) -> VrnResult {
+        let frame = self.scene.render_frame();
+        if self.surface.is_none() {
+            match FrameSurface::new(frame.width(), frame.height()) {
+                Ok(surface) => self.surface = Some(surface),
+                Err(_) => return VrnResult::Internal,
+            }
+        }
+        match self.surface.as_ref() {
+            Some(surface) => match surface.upload(frame.pixels()) {
+                Ok(()) => VrnResult::Ok,
+                Err(_) => VrnResult::Internal,
+            },
+            None => VrnResult::Internal,
         }
     }
 }
@@ -107,7 +134,8 @@ pub extern "C" fn vrn_validate_mesh(positions_len: usize, indices_len: usize) ->
     }
 }
 
-/// Tick the headless scene once. Must be called off the Swift `MainActor`.
+/// Tick the headless scene once, publishing the new frame. Must be called
+/// off the Swift `MainActor`.
 ///
 /// # Safety
 ///
@@ -127,7 +155,7 @@ pub unsafe extern "C" fn vrn_tick(context: *mut VrnContextHandle) -> VrnResult {
     match handle.0.lock() {
         Ok(mut ctx) => {
             ctx.scene.update();
-            VrnResult::Ok
+            ctx.publish_frame()
         }
         Err(_) => VrnResult::Internal,
     }
@@ -180,6 +208,52 @@ pub unsafe extern "C" fn vrn_entity_count(
             *slot = ctx.scene.entity_count() as u64;
             VrnResult::Ok
         }
+        Err(_) => VrnResult::Internal,
+    }
+}
+
+/// Read the latest published frame: borrowed `IOSurface` handle plus extents.
+///
+/// The handle is owned by the context (valid until [`vrn_context_destroy`])
+/// and must not be released by Swift. Swift wraps it in an `MTLTexture`
+/// with no copies on the present path.
+///
+/// Returns [`VrnResult::InvalidArgument`] when no tick has published yet.
+///
+/// # Safety
+///
+/// `context` must be a live pointer from [`vrn_context_create`]; `out_surface`,
+/// `out_width`, and `out_height` must be non-null writable slots for the
+/// duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vrn_frame_surface(
+    context: *mut VrnContextHandle,
+    out_surface: *mut *mut c_void,
+    out_width: *mut u32,
+    out_height: *mut u32,
+) -> VrnResult {
+    if context.is_null() || out_surface.is_null() || out_width.is_null() || out_height.is_null() {
+        return VrnResult::NullArgument;
+    }
+    // SAFETY: all pointers checked non-null; context is alive per contract.
+    let (mutex, surface_slot, width_slot, height_slot) = unsafe {
+        (
+            &(*context).0,
+            &mut *out_surface,
+            &mut *out_width,
+            &mut *out_height,
+        )
+    };
+    match mutex.lock() {
+        Ok(ctx) => match ctx.surface.as_ref() {
+            Some(surface) => {
+                *surface_slot = surface.handle();
+                *width_slot = surface.width();
+                *height_slot = surface.height();
+                VrnResult::Ok
+            }
+            None => VrnResult::InvalidArgument,
+        },
         Err(_) => VrnResult::Internal,
     }
 }
@@ -607,6 +681,70 @@ mod stats_tests {
             );
             assert_eq!(
                 vrn_entity_count(context, ptr::null_mut()),
+                VrnResult::NullArgument
+            );
+            vrn_context_destroy(context);
+        }
+    }
+}
+
+#[cfg(test)]
+mod frame_tests {
+    use super::*;
+    use std::ptr;
+    use veronica_scene::{FRAME_HEIGHT, FRAME_WIDTH};
+
+    #[test]
+    fn published_frame_is_valid_after_tick() {
+        let context = vrn_context_create();
+        assert!(!context.is_null());
+        let mut surface: *mut c_void = ptr::null_mut();
+        let mut width = 0u32;
+        let mut height = 0u32;
+        // SAFETY: just created, alive, single-threaded test; slots are live.
+        unsafe {
+            // Nothing published before the first tick.
+            assert_eq!(
+                vrn_frame_surface(context, &raw mut surface, &raw mut width, &raw mut height),
+                VrnResult::InvalidArgument
+            );
+            assert_eq!(vrn_tick(context), VrnResult::Ok);
+            assert_eq!(
+                vrn_frame_surface(context, &raw mut surface, &raw mut width, &raw mut height),
+                VrnResult::Ok
+            );
+            assert!(!surface.is_null());
+            assert_eq!(width, FRAME_WIDTH);
+            assert_eq!(height, FRAME_HEIGHT);
+            assert!(width > 0 && height > 0);
+            // The surface is reused: a second tick republishes in place.
+            let first = surface;
+            assert_eq!(vrn_tick(context), VrnResult::Ok);
+            assert_eq!(
+                vrn_frame_surface(context, &raw mut surface, &raw mut width, &raw mut height),
+                VrnResult::Ok
+            );
+            assert_eq!(surface, first);
+            // Null slots and null context are safe.
+            assert_eq!(
+                vrn_frame_surface(context, ptr::null_mut(), &raw mut width, &raw mut height),
+                VrnResult::NullArgument
+            );
+            assert_eq!(
+                vrn_frame_surface(context, &raw mut surface, ptr::null_mut(), &raw mut height),
+                VrnResult::NullArgument
+            );
+            assert_eq!(
+                vrn_frame_surface(context, &raw mut surface, &raw mut width, ptr::null_mut()),
+                VrnResult::NullArgument
+            );
+            assert_eq!(
+                vrn_frame_surface(
+                    ptr::null_mut(),
+                    &raw mut surface,
+                    &raw mut width,
+                    &raw mut height
+                ),
                 VrnResult::NullArgument
             );
             vrn_context_destroy(context);

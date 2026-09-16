@@ -45,4 +45,26 @@ struct ViewportFeatureTests {
         await store.send(.frame)
         await store.receive(.statsResponse(SceneStats(tickCount: 2, entityCount: 3)))
     }
+
+    /// The published frame handle rides the same stats response into state
+    /// so the Metal host can present it.
+    @Test func frameHandleLandsInState() async {
+        let frame = VideoFrame(surfaceAddress: 99, width: 512, height: 320)
+        let store = TestStore(initialState: ViewportFeature.State()) {
+            ViewportFeature()
+        } withDependencies: {
+            $0.engineClient.tick = {
+                SceneStats(tickCount: 7, entityCount: 3, frame: frame)
+            }
+        }
+        await store.send(.frame)
+        await store.receive(
+            .statsResponse(SceneStats(tickCount: 7, entityCount: 3, frame: frame))
+        ) {
+            $0.tickCount = 7
+            $0.entityCount = 3
+            $0.frame = frame
+            $0.frameCount = 1
+        }
+    }
 }

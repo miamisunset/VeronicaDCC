@@ -16,6 +16,8 @@ struct ViewportFeature {
         var entityCount: UInt64 = 0
         /// Frames presented by Swift (ticks requested).
         var frameCount: UInt64 = 0
+        /// Latest published frame handle for the Metal host.
+        var frame: VideoFrame?
     }
 
     /// `Equatable` so `TestStore` can assert received actions by value.
@@ -42,6 +44,7 @@ struct ViewportFeature {
                 guard stats.tickCount > state.tickCount else { return .none }
                 state.tickCount = stats.tickCount
                 state.entityCount = stats.entityCount
+                state.frame = stats.frame
                 state.frameCount += 1
                 return .none
             }

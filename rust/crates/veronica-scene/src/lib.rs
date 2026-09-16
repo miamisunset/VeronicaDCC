@@ -10,6 +10,7 @@
 
 use bevy_app::{App, ScheduleRunnerPlugin, Update};
 use bevy_ecs::prelude::*;
+use bevy_math::prelude::EulerRot;
 use bevy_transform::prelude::Transform;
 use std::time::Duration;
 use thiserror::Error;
@@ -17,9 +18,13 @@ use veronica_core::{BoneTransform, MeshId, MorphWeights};
 
 mod cook;
 mod mesh;
+mod render;
 
 pub use cook::{CookedMesh, SourceOperator};
 pub use mesh::render_mesh_from_evaluated;
+pub use render::{
+    FRAME_BYTES_PER_PIXEL, FRAME_HEIGHT, FRAME_WIDTH, RenderFrame, render_demo_frame,
+};
 
 /// Errors for scene operations.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -62,6 +67,14 @@ pub enum SceneError {
     /// The graph failed to cook before any mesh reached the scene.
     #[error(transparent)]
     Cook(#[from] veronica_geometry::CookError),
+    /// A frame was requested with a zero width or height.
+    #[error("frame extents must be nonzero, got {width}x{height}")]
+    InvalidFrameSize {
+        /// Requested width in pixels.
+        width: u32,
+        /// Requested height in pixels.
+        height: u32,
+    },
 }
 
 /// Bevy component mirroring [`MorphWeights`] for one mesh entity.
@@ -183,6 +196,35 @@ impl SceneWorld {
     #[must_use]
     pub fn tick_count(&self) -> u64 {
         self.app.world().resource::<TickCount>().0
+    }
+
+    /// Current turntable angle in radians, read from the demo cube's live
+    /// [`Transform`].
+    ///
+    /// The angle is ECS state, not a tick multiple: [`spin_demo_cubes`]
+    /// rotates the cube each update, and the published pixels derive from
+    /// this reading — so a world with no cube publishes identical frames.
+    /// Deterministic on purpose, so tests assert frame differences without
+    /// a clock. `0.0` when no [`DemoCube`] is alive.
+    #[must_use]
+    pub fn spin_angle(&mut self) -> f32 {
+        let world = self.app.world_mut();
+        let mut cubes = world.query_filtered::<&Transform, With<DemoCube>>();
+        cubes.iter(world).next().map_or(0.0, |transform| {
+            transform.rotation.to_euler(EulerRot::YXZ).0
+        })
+    }
+
+    /// Render the current demo-scene state into a fixed-size frame.
+    ///
+    /// The frame-publish seam: Swift presents whatever this returns without
+    /// interpreting scene content. Pixels derive from [`SceneWorld::spin_angle`],
+    /// so consecutive ticks publish observably different frames.
+    #[must_use]
+    pub fn render_frame(&mut self) -> RenderFrame {
+        // Fixed constants are nonzero by construction; the fallible entry
+        // point is `render_demo_frame`, pinned by its own tests.
+        render::rasterize_for_world(self.spin_angle())
     }
 
     /// Number of live demo-scene entities (those tagged [`DemoScene`]).
