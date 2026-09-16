@@ -853,15 +853,17 @@ struct NodeGraphFeatureTests {
         // Layout is orthogonal to editing: only the order flips while the
         // selection, dirty draft, and dive stack survive untouched (the
         // trailing closures assert the full state, so any clobbering fails).
-        await store.send(.paneOrderChanged(.parametersFirst)) {
+        // The flip itself goes through the toggle action, so the shared
+        // transition the toolbar and menu use is the tested one.
+        await store.send(.paneOrderToggled) {
             $0.paneOrder = .parametersFirst
         }
         await store.send(.paneOrderChanged(.graphFirst)) {
             $0.paneOrder = .graphFirst
         }
     }
-
-    @Test func paneOrientationChangePreservesSelectionDraftAndDive() async {        var state = NodeGraphFeature.State()
+    @Test func paneOrientationChangePreservesSelectionDraftAndDive() async {
+        var state = NodeGraphFeature.State()
         state.operators = [container(id: 1, name: "Root")]
         state.path = [1]
         state.selected = 1
@@ -870,8 +872,8 @@ struct NodeGraphFeatureTests {
         let store = TestStore(initialState: state) {
             NodeGraphFeature()
         }
-        // Same orthogonality for the row/column switch.
-        await store.send(.paneOrientationChanged(.column)) {
+        // Same orthogonality for the row/column switch, via the toggle.
+        await store.send(.paneOrientationToggled) {
             $0.paneOrientation = .column
         }
         await store.send(.paneOrientationChanged(.row)) {
@@ -910,6 +912,19 @@ struct NodeGraphFeatureTests {
         }
         await store.send(.backToParent) {
             $0.path = []
+        }
+        // Mirror refreshes preserve the arrangement too: success advances
+        // the mirror (and re-seeds the clean editor draft), save-failure
+        // surfaces the error, and neither touches layout. (Epoch is still
+        // 0 — no intent has run in this test.)
+        let refreshed = GraphSnapshot(operators: [container(id: 1, name: "Refreshed")])
+        await store.send(.snapshotResponse(.success(refreshed), epoch: 0)) {
+            $0.operators = refreshed.operators
+            $0.editorNameDraft = "Refreshed"
+        }
+        let failure = GraphEngineError.ffiFailed(operation: "save", code: 9)
+        await store.send(.snapshotSaveFailed(refreshed, failure, epoch: 0)) {
+            $0.lastError = failure.message
         }
     }
 }

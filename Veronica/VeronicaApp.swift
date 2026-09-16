@@ -27,7 +27,7 @@ struct VeronicaApp: App {
             // item names its explicit target state instead.
             CommandMenu("Panes") {
                 Button("Swap Graph and Parameters") {
-                    store.send(.nodeGraph(.paneOrderChanged(store.nodeGraph.paneOrder.toggled)))
+                    store.send(.nodeGraph(.paneOrderToggled))
                 }
                 Button("Stack Graph and Parameters Vertically") {
                     store.send(.nodeGraph(.paneOrientationChanged(.column)))

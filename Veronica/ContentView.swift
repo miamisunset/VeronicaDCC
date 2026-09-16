@@ -30,13 +30,13 @@ struct ContentView: View {
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button("Swap Panes") {
-                    store.send(.nodeGraph(.paneOrderChanged(store.nodeGraph.paneOrder.toggled)))
+                    store.send(.nodeGraph(.paneOrderToggled))
                 }
                 .accessibilityIdentifier("swapPanesButton")
             }
             ToolbarItem(placement: .primaryAction) {
                 Button(store.nodeGraph.paneOrientation == .row ? "Stack Panes" : "Side by Side") {
-                    store.send(.nodeGraph(.paneOrientationChanged(store.nodeGraph.paneOrientation.toggled)))
+                    store.send(.nodeGraph(.paneOrientationToggled))
                 }
                 .accessibilityIdentifier("paneOrientationButton")
             }

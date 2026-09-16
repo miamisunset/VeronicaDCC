@@ -146,9 +146,15 @@ struct NodeGraphFeature {
         /// toolbar). Pure layout: never touches FFI, selection, drafts, or
         /// dive state.
         case paneOrderChanged(PaneOrder)
+        /// Order flip for the swap controls: the toggle lives here (not in
+        /// the views) so both call sites share one tested transition.
+        case paneOrderToggled
         /// Explicit row/column switch of the Graph/Parameters panes (menu
         /// or toolbar). Same pure-layout lifetime as `paneOrderChanged`.
         case paneOrientationChanged(PaneOrientation)
+        /// Orientation flip for the switch controls. Same rationale as
+        /// `paneOrderToggled`.
+        case paneOrientationToggled
     }
 
     @Dependency(\.engineClient) var engine
@@ -393,8 +399,16 @@ struct NodeGraphFeature {
                 state.paneOrder = order
                 return .none
 
+            case .paneOrderToggled:
+                state.paneOrder = state.paneOrder.toggled
+                return .none
+
             case let .paneOrientationChanged(orientation):
                 state.paneOrientation = orientation
+                return .none
+
+            case .paneOrientationToggled:
+                state.paneOrientation = state.paneOrientation.toggled
                 return .none
             }
         }
