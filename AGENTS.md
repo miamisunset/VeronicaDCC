@@ -29,6 +29,7 @@ No `Cargo.toml`, no Rust bridge, no node-graph/viewport code yet. First backend 
 - Single UI test (XCTest): `xcodebuild ... test -only-testing:VeronicaUITests/<ClassName>/<testName>`
 - Default configuration is Release when `-configuration` is omitted; pass `-configuration Debug` for dev builds.
 - Rust toolchain present (rustc/cargo 1.98.x) but unused until a crate is added. Once added: `cargo test -p <crate>` for backend-only checks.
+- Xcode links `rust/target/release/libveronica.a` in ALL configs (Debug included), so Run-from-Xcode stays smooth: rebuild it via `cargo build --release -p veronica-ffi` from `rust/` after any Rust change, or the app silently runs stale Rust.
 
 ## Project quirks (do not guess wrong)
 - `Veronica/`, `VeronicaTests/`, `VeronicaUITests/` are `PBXFileSystemSynchronizedRootGroup` — files are auto-added by filesystem. Never hand-edit `project.pbxproj` to add sources.
