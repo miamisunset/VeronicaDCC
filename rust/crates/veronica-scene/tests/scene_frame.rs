@@ -228,3 +228,30 @@ fn frames_hold_still_without_a_cube() {
         .to_vec();
     assert_eq!(before, after);
 }
+
+/// Frame-all visibly reframes through the readback seam: after fitting, the
+/// published pixels differ from the pre-frame shot (nearer camera plus the
+/// turntable kept spinning) and still carry valid scene content.
+#[test]
+fn frame_all_reframes_the_published_image() {
+    let mut world = SceneWorld::new_headless();
+    let _ = world.spawn_demo_scene();
+    let before = render_when_ready(&mut world);
+    world.frame_all().expect("frame-all works");
+    for _ in 0..3 {
+        world.update();
+    }
+    let reframed = world
+        .render_frame()
+        .expect("readback stays live after frame-all");
+    assert_eq!(
+        (reframed.width(), reframed.height()),
+        (FRAME_WIDTH, FRAME_HEIGHT)
+    );
+    assert_ne!(
+        before.as_slice(),
+        reframed.pixels(),
+        "fitting must observably change the published image"
+    );
+    assert!(is_non_uniform(reframed.pixels()));
+}

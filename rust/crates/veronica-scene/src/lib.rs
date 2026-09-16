@@ -27,6 +27,7 @@ use bevy_window::{ExitCondition, WindowPlugin};
 use thiserror::Error;
 use veronica_core::{BoneTransform, MeshId, MorphWeights};
 
+mod camera;
 mod cook;
 mod gpu;
 mod mesh;
@@ -106,6 +107,10 @@ pub enum SceneError {
     /// The GPU render target has no uploaded image yet; tick the world first.
     #[error("render target has no GPU image yet")]
     NoGpuImage,
+    /// The viewport camera is missing; the demo scene was never spawned or
+    /// its camera was despawned. Navigation ops need it alive.
+    #[error("viewport camera is missing")]
+    NoViewportCamera,
     /// The staging stride does not fit in a `u32`.
     #[error("frame staging stride does not fit in u32")]
     StagingStrideOverflow,
@@ -347,6 +352,12 @@ impl SceneWorld {
                 Visibility::default(),
             ))
             .id();
+        let pivot = self.scene_bounds().map_or(Vec3::ZERO, |bounds| {
+            Vec3::from((bounds.min + bounds.max) * 0.5)
+        });
+        self.app
+            .world_mut()
+            .insert_resource(camera::ViewportPivot(pivot));
         DemoSceneIds {
             camera,
             light,

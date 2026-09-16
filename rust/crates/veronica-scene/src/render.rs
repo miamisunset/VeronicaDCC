@@ -236,7 +236,7 @@ fn shade_for_face(face: usize, sin_y: f32, cos_y: f32) -> [u8; 3] {
     clippy::cast_precision_loss,
     reason = "frame extents are fixed small constants, far below 2^24"
 )]
-fn f32_from_extent(value: u32) -> f32 {
+pub(crate) fn f32_from_extent(value: u32) -> f32 {
     value as f32
 }
 

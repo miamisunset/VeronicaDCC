@@ -486,6 +486,125 @@ pub unsafe extern "C" fn vrn_viewport_set_size(
     }
 }
 
+/// Orbit the viewport camera around its pivot by a drag delta in pixels.
+///
+/// Turntable semantics (locked Y-up, ±89.9° elevation clamp) live in
+/// `veronica-scene`; this only forwards the coarse op. Swift maps the
+/// gesture (LMB-drag, Option+two-finger-drag) to these deltas.
+///
+/// # Safety
+///
+/// `context` must be a live pointer from [`vrn_context_create`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vrn_viewport_orbit(
+    context: *mut VrnContextHandle,
+    horizontal_px: f32,
+    vertical_px: f32,
+) -> VrnResult {
+    if context.is_null() {
+        return VrnResult::NullArgument;
+    }
+    // SAFETY: non-null pointer from `vrn_context_create`, still alive.
+    let mutex = unsafe { &(*context).0 };
+    let Ok(mut ctx) = mutex.lock() else {
+        return VrnResult::Internal;
+    };
+    match ctx.scene.orbit_camera(horizontal_px, vertical_px) {
+        Ok(()) => VrnResult::Ok,
+        Err(_) => VrnResult::Internal,
+    }
+}
+
+/// Pan the viewport camera and its pivot rigidly by a drag delta in pixels.
+///
+/// Swift maps the gesture (MMB-drag, Command+LMB, two-finger-drag) to these
+/// deltas; the step scales with pivot distance inside `veronica-scene`.
+///
+/// # Safety
+///
+/// `context` must be a live pointer from [`vrn_context_create`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vrn_viewport_pan(
+    context: *mut VrnContextHandle,
+    horizontal_px: f32,
+    vertical_px: f32,
+) -> VrnResult {
+    if context.is_null() {
+        return VrnResult::NullArgument;
+    }
+    // SAFETY: non-null pointer from `vrn_context_create`, still alive.
+    let mutex = unsafe { &(*context).0 };
+    let Ok(mut ctx) = mutex.lock() else {
+        return VrnResult::Internal;
+    };
+    match ctx.scene.pan_camera(horizontal_px, vertical_px) {
+        Ok(()) => VrnResult::Ok,
+        Err(_) => VrnResult::Internal,
+    }
+}
+
+/// Dolly toward the cursor by `log_factor` (positive zooms in) at
+/// `cursor_ndc` (normalized device coordinates, x/y in [-1, 1]).
+///
+/// Swift maps the gesture (wheel, pinch, RMB-drag, Option+LMB) to the factor
+/// and passes the cursor position through; distance scaling, clamping, and
+/// the pivot pull live in `veronica-scene`.
+///
+/// # Safety
+///
+/// `context` must be a live pointer from [`vrn_context_create`].
+#[allow(
+    clippy::similar_names,
+    reason = "the x/y NDC pair is conventional; renaming would hurt the C signature"
+)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vrn_viewport_dolly(
+    context: *mut VrnContextHandle,
+    log_factor: f32,
+    cursor_x_ndc: f32,
+    cursor_y_ndc: f32,
+) -> VrnResult {
+    if context.is_null() {
+        return VrnResult::NullArgument;
+    }
+    // SAFETY: non-null pointer from `vrn_context_create`, still alive.
+    let mutex = unsafe { &(*context).0 };
+    let Ok(mut ctx) = mutex.lock() else {
+        return VrnResult::Internal;
+    };
+    match ctx
+        .scene
+        .dolly_camera(log_factor, (cursor_x_ndc, cursor_y_ndc))
+    {
+        Ok(()) => VrnResult::Ok,
+        Err(_) => VrnResult::Internal,
+    }
+}
+
+/// Frame the whole scene: pivot to the bounds center, distance to fit.
+///
+/// Snap, not animated; preserves the current view direction. A scene with no
+/// meshed entities is a successful no-op.
+///
+/// # Safety
+///
+/// `context` must be a live pointer from [`vrn_context_create`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vrn_viewport_frame_all(context: *mut VrnContextHandle) -> VrnResult {
+    if context.is_null() {
+        return VrnResult::NullArgument;
+    }
+    // SAFETY: non-null pointer from `vrn_context_create`, still alive.
+    let mutex = unsafe { &(*context).0 };
+    let Ok(mut ctx) = mutex.lock() else {
+        return VrnResult::Internal;
+    };
+    match ctx.scene.frame_all() {
+        Ok(()) => VrnResult::Ok,
+        Err(_) => VrnResult::Internal,
+    }
+}
+
 /// Parse a strict operator-kind string from the FFI boundary.
 ///
 /// Only `"container"` and `"cube"` are accepted; anything else is
@@ -917,6 +1036,177 @@ mod stats_tests {
 }
 
 #[cfg(test)]
+mod viewport_tests {
+    use super::*;
+    use std::ptr;
+    use veronica_scene::{FRAME_HEIGHT, FRAME_WIDTH};
+
+    /// Camera translation read through the context lock.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the lock is poisoned or the camera is gone; both indicate
+    /// a broken test setup, not fallible production input.
+    fn camera_translation(context: *mut VrnContextHandle) -> [f32; 3] {
+        // SAFETY: live context, single-threaded test; lock is unpoisoned.
+        let mut ctx = unsafe { (*context).0.lock().unwrap() };
+        ctx.scene.camera_translation().unwrap()
+    }
+
+    /// Euclidean distance of a translation from the demo pivot (origin).
+    fn distance_from_origin(translation: [f32; 3]) -> f32 {
+        (translation[0].powi(2) + translation[1].powi(2) + translation[2].powi(2)).sqrt()
+    }
+
+    #[test]
+    fn navigate_entry_points_reject_null_context() {
+        // SAFETY: null is the input under test; no context is touched.
+        unsafe {
+            assert_eq!(
+                vrn_viewport_orbit(ptr::null_mut(), 10.0, 0.0),
+                VrnResult::NullArgument
+            );
+            assert_eq!(
+                vrn_viewport_pan(ptr::null_mut(), 10.0, 0.0),
+                VrnResult::NullArgument
+            );
+            assert_eq!(
+                vrn_viewport_dolly(ptr::null_mut(), 1.0, 0.0, 0.0),
+                VrnResult::NullArgument
+            );
+            assert_eq!(
+                vrn_viewport_frame_all(ptr::null_mut()),
+                VrnResult::NullArgument
+            );
+        }
+    }
+
+    #[test]
+    fn orbit_round_trip_moves_the_demo_camera() {
+        let context = vrn_context_create();
+        let before = camera_translation(context);
+        // SAFETY: just created, alive, single-threaded test.
+        unsafe {
+            assert_eq!(vrn_viewport_orbit(context, 60.0, 20.0), VrnResult::Ok);
+        }
+        let after = camera_translation(context);
+        // SAFETY: alive until this destroy; single-threaded test.
+        unsafe {
+            vrn_context_destroy(context);
+        }
+        let moved = before
+            .iter()
+            .zip(after.iter())
+            .any(|(a, b)| (a - b).abs() > 1e-6);
+        assert!(moved, "a 60x20px orbit must move the camera");
+    }
+
+    #[test]
+    fn dolly_round_trip_shortens_the_distance() {
+        let context = vrn_context_create();
+        let before = distance_from_origin(camera_translation(context));
+        // SAFETY: just created, alive, single-threaded test.
+        unsafe {
+            assert_eq!(vrn_viewport_dolly(context, 1.0, 0.0, 0.0), VrnResult::Ok);
+        }
+        let after = distance_from_origin(camera_translation(context));
+        // SAFETY: alive until this destroy; single-threaded test.
+        unsafe {
+            vrn_context_destroy(context);
+        }
+        assert!(
+            after < before,
+            "a centered dolly-in must shorten the distance, went {before} -> {after}"
+        );
+    }
+
+    #[test]
+    fn frame_all_round_trip_succeeds() {
+        let context = vrn_context_create();
+        // SAFETY: just created, alive, single-threaded test.
+        unsafe {
+            assert_eq!(vrn_viewport_frame_all(context), VrnResult::Ok);
+            vrn_context_destroy(context);
+        }
+    }
+    #[test]
+    fn set_size_guards_map_to_result_codes() {
+        let context = vrn_context_create();
+        assert!(!context.is_null());
+        // SAFETY: just created, alive, single-threaded test.
+        unsafe {
+            assert_eq!(
+                vrn_viewport_set_size(ptr::null_mut(), 320, 200),
+                VrnResult::NullArgument
+            );
+            for (width, height) in [(0, 200), (320, 0), (0, 0), (2049, 100), (100, 4096)] {
+                assert_eq!(
+                    vrn_viewport_set_size(context, width, height),
+                    VrnResult::InvalidArgument,
+                    "extents {width}x{height} must be rejected"
+                );
+            }
+            // Long-edge cap: exactly 2048 is accepted, 2049 is not.
+            assert_eq!(vrn_viewport_set_size(context, 2048, 2048), VrnResult::Ok);
+            assert_eq!(
+                vrn_viewport_set_size(context, 2049, 2048),
+                VrnResult::InvalidArgument
+            );
+            vrn_context_destroy(context);
+        }
+    }
+
+    #[test]
+    fn pending_size_applies_on_tick_and_recreates_surface() {
+        let context = vrn_context_create();
+        assert!(!context.is_null());
+        let mut surface: *mut c_void = ptr::null_mut();
+        let mut width = 0u32;
+        let mut height = 0u32;
+        // SAFETY: just created, alive, single-threaded test; slots are live.
+        unsafe {
+            assert_eq!(vrn_tick(context), VrnResult::Ok);
+            assert_eq!(
+                vrn_frame_surface(context, &raw mut surface, &raw mut width, &raw mut height),
+                VrnResult::Ok
+            );
+            let first = surface;
+            assert_eq!((width, height), (FRAME_WIDTH, FRAME_HEIGHT));
+            // Re-target mid-life: the next tick publishes the new extents on
+            // a fresh surface (new address); following ticks ping-pong
+            // between the two fresh buffers, never reusing the old one.
+            assert_eq!(vrn_viewport_set_size(context, 320, 200), VrnResult::Ok);
+            assert_eq!(vrn_tick(context), VrnResult::Ok);
+            assert_eq!(
+                vrn_frame_surface(context, &raw mut surface, &raw mut width, &raw mut height),
+                VrnResult::Ok
+            );
+            assert_eq!((width, height), (320, 200));
+            assert_ne!(surface, first);
+            let second = surface;
+            assert_eq!(vrn_tick(context), VrnResult::Ok);
+            assert_eq!(
+                vrn_frame_surface(context, &raw mut surface, &raw mut width, &raw mut height),
+                VrnResult::Ok
+            );
+            assert_eq!((width, height), (320, 200));
+            assert_ne!(surface, second);
+            assert_ne!(surface, first);
+            let third = surface;
+            assert_eq!(vrn_tick(context), VrnResult::Ok);
+            assert_eq!(
+                vrn_frame_surface(context, &raw mut surface, &raw mut width, &raw mut height),
+                VrnResult::Ok
+            );
+            assert_eq!((width, height), (320, 200));
+            assert_eq!(surface, second);
+            assert_ne!(third, second);
+            vrn_context_destroy(context);
+        }
+    }
+}
+
+#[cfg(test)]
 mod frame_tests {
     use super::*;
     use std::ptr;
@@ -1073,89 +1363,6 @@ mod frame_tests {
                 ),
                 VrnResult::NullArgument
             );
-            vrn_context_destroy(context);
-        }
-    }
-}
-
-#[cfg(test)]
-mod viewport_tests {
-    use super::*;
-    use std::ptr;
-    use veronica_scene::{FRAME_HEIGHT, FRAME_WIDTH};
-
-    #[test]
-    fn set_size_guards_map_to_result_codes() {
-        let context = vrn_context_create();
-        assert!(!context.is_null());
-        // SAFETY: just created, alive, single-threaded test.
-        unsafe {
-            assert_eq!(
-                vrn_viewport_set_size(ptr::null_mut(), 320, 200),
-                VrnResult::NullArgument
-            );
-            for (width, height) in [(0, 200), (320, 0), (0, 0), (2049, 100), (100, 4096)] {
-                assert_eq!(
-                    vrn_viewport_set_size(context, width, height),
-                    VrnResult::InvalidArgument,
-                    "extents {width}x{height} must be rejected"
-                );
-            }
-            // Long-edge cap: exactly 2048 is accepted, 2049 is not.
-            assert_eq!(vrn_viewport_set_size(context, 2048, 2048), VrnResult::Ok);
-            assert_eq!(
-                vrn_viewport_set_size(context, 2049, 2048),
-                VrnResult::InvalidArgument
-            );
-            vrn_context_destroy(context);
-        }
-    }
-
-    #[test]
-    fn pending_size_applies_on_tick_and_recreates_surface() {
-        let context = vrn_context_create();
-        assert!(!context.is_null());
-        let mut surface: *mut c_void = ptr::null_mut();
-        let mut width = 0u32;
-        let mut height = 0u32;
-        // SAFETY: just created, alive, single-threaded test; slots are live.
-        unsafe {
-            assert_eq!(vrn_tick(context), VrnResult::Ok);
-            assert_eq!(
-                vrn_frame_surface(context, &raw mut surface, &raw mut width, &raw mut height),
-                VrnResult::Ok
-            );
-            let first = surface;
-            assert_eq!((width, height), (FRAME_WIDTH, FRAME_HEIGHT));
-            // Re-target mid-life: the next tick publishes the new extents on
-            // a fresh surface (new address); following ticks ping-pong
-            // between the two fresh buffers, never reusing the old one.
-            assert_eq!(vrn_viewport_set_size(context, 320, 200), VrnResult::Ok);
-            assert_eq!(vrn_tick(context), VrnResult::Ok);
-            assert_eq!(
-                vrn_frame_surface(context, &raw mut surface, &raw mut width, &raw mut height),
-                VrnResult::Ok
-            );
-            assert_eq!((width, height), (320, 200));
-            assert_ne!(surface, first);
-            let second = surface;
-            assert_eq!(vrn_tick(context), VrnResult::Ok);
-            assert_eq!(
-                vrn_frame_surface(context, &raw mut surface, &raw mut width, &raw mut height),
-                VrnResult::Ok
-            );
-            assert_eq!((width, height), (320, 200));
-            assert_ne!(surface, second);
-            assert_ne!(surface, first);
-            let third = surface;
-            assert_eq!(vrn_tick(context), VrnResult::Ok);
-            assert_eq!(
-                vrn_frame_surface(context, &raw mut surface, &raw mut width, &raw mut height),
-                VrnResult::Ok
-            );
-            assert_eq!((width, height), (320, 200));
-            assert_eq!(surface, second);
-            assert_ne!(third, second);
             vrn_context_destroy(context);
         }
     }
