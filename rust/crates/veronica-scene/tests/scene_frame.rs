@@ -1,6 +1,6 @@
 //! GPU slice: ticks publish GPU-rendered frames behind the same seam.
 //!
-//! A valid published frame has the fixed nonzero extents and a full RGBA8
+//! A valid published frame has the fixed nonzero extents and a full BGRA8
 //! payload; consecutive ticks publish observably different bytes because
 //! the Rust-side turntable advanced, not because anyone re-rendered. The CPU
 //! rasterizer (`render_demo_frame`) is kept only as the deterministic test
@@ -57,7 +57,7 @@ fn render_when_ready(world: &mut SceneWorld) -> Vec<u8> {
     last
 }
 
-/// Fixed extents are nonzero with a full RGBA8 payload after a tick, and the
+/// Fixed extents are nonzero with a full BGRA8 payload after a tick, and the
 /// pixels are GPU-rendered scene content: non-uniform and different from the
 /// CPU oracle's flat rasterization at the same turntable angle.
 #[test]
@@ -94,16 +94,16 @@ fn lit_cube_is_achromatic_not_magenta() {
         .chunks_exact(4)
         .max_by_key(|pixel| u16::from(pixel[0]) + u16::from(pixel[1]) + u16::from(pixel[2]))
         .expect("frame holds pixels");
-    let [r, g, b, a] = [brightest[0], brightest[1], brightest[2], brightest[3]];
+    let [b, g, r, a] = [brightest[0], brightest[1], brightest[2], brightest[3]];
     assert_eq!(a, 255, "opaque PBR output, got {brightest:?}");
     assert!(
         r > 150 && g > 150 && b > 150,
-        "lit face must be bright, got [{r}, {g}, {b}]"
+        "lit face must be bright, got [{b}, {g}, {r}]"
     );
     for (first, second) in [(r, g), (g, b), (r, b)] {
         assert!(
             first.abs_diff(second) <= 12,
-            "white cube must read achromatic, got [{r}, {g}, {b}]"
+            "white cube must read achromatic, got [{b}, {g}, {r}]"
         );
     }
 }
@@ -184,16 +184,16 @@ fn viewport_resize_propagates_mid_life() {
         .chunks_exact(4)
         .max_by_key(|pixel| u16::from(pixel[0]) + u16::from(pixel[1]) + u16::from(pixel[2]))
         .expect("frame holds pixels");
-    let [red, green, blue, alpha] = [brightest[0], brightest[1], brightest[2], brightest[3]];
+    let [blue, green, red, alpha] = [brightest[0], brightest[1], brightest[2], brightest[3]];
     assert_eq!(alpha, 255, "opaque PBR output, got {brightest:?}");
     assert!(
         red > 150 && green > 150 && blue > 150,
-        "lit face must be bright, got [{red}, {green}, {blue}]"
+        "lit face must be bright, got [{blue}, {green}, {red}]"
     );
     for (first, second) in [(red, green), (green, blue), (red, blue)] {
         assert!(
             first.abs_diff(second) <= 12,
-            "white cube must read achromatic, got [{red}, {green}, {blue}]"
+            "white cube must read achromatic, got [{blue}, {green}, {red}]"
         );
     }
 

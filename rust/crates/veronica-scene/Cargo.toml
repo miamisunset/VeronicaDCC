@@ -19,6 +19,7 @@ bevy_asset.workspace = true
 bevy_mesh.workspace = true
 bevy_math.workspace = true
 bevy_camera.workspace = true
+bevy_color.workspace = true
 bevy_core_pipeline.workspace = true
 bevy_diagnostic.workspace = true
 bevy_image.workspace = true

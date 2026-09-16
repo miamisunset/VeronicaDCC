@@ -156,20 +156,23 @@ impl FrameSurface {
         self.height
     }
 
-    /// Upload one full RGBA8 frame under lock, swizzling to the surface's
-    /// BGRA8 layout during the copy.
+    /// Upload one full BGRA8 frame under lock via row-stride memcpy.
+    ///
+    /// The payload is already in the surface's native BGRA8 layout (the GPU
+    /// renders the offscreen target as `Bgra8UnormSrgb`), so each row copies
+    /// verbatim with [`std::ptr::copy_nonoverlapping`]; no channel swizzle.
     ///
     /// # Errors
     ///
-    /// Returns [`SurfaceError::BadPayload`] when `rgba` does not hold
+    /// Returns [`SurfaceError::BadPayload`] when `bgra` does not hold
     /// exactly `width * height * 4` bytes, [`SurfaceError::LockFailed`]
     /// when the surface will not lock.
-    pub fn upload(&self, rgba: &[u8]) -> Result<(), SurfaceError> {
+    pub fn upload(&self, bgra: &[u8]) -> Result<(), SurfaceError> {
         let expected = self.width as usize * self.height as usize * 4;
-        if rgba.len() != expected {
+        if bgra.len() != expected {
             return Err(SurfaceError::BadPayload {
                 expected,
-                actual: rgba.len(),
+                actual: bgra.len(),
             });
         }
         // SAFETY: handle came from `IOSurfaceCreate`, alive until `drop`.
@@ -179,23 +182,16 @@ impl FrameSurface {
         }
         // SAFETY: locked above; base address and stride stay valid until
         // the matching unlock below. Rows copy one by one because the
-        // framework may pad each row past `width * 4`; channels swizzle
-        // RGBA source order into the surface's BGRA layout per pixel.
+        // framework may pad each row past `width * 4`; source and surface
+        // share the BGRA8 layout, so the copy is a plain memcpy.
         unsafe {
             let base = IOSurfaceGetBaseAddress(self.surface).cast::<u8>();
             let stride = IOSurfaceGetBytesPerRow(self.surface);
             let row_bytes = self.width as usize * 4;
             for row in 0..self.height as usize {
                 let dst_row = base.add(row * stride);
-                let src_row = rgba.as_ptr().add(row * row_bytes);
-                for pixel in 0..self.width as usize {
-                    let src = src_row.add(pixel * 4);
-                    let dst = dst_row.add(pixel * 4);
-                    *dst = *src.add(2);
-                    *dst.add(1) = *src.add(1);
-                    *dst.add(2) = *src;
-                    *dst.add(3) = *src.add(3);
-                }
+                let src_row = bgra.as_ptr().add(row * row_bytes);
+                std::ptr::copy_nonoverlapping(src_row, dst_row, row_bytes);
             }
             IOSurfaceUnlock(self.surface, 0, std::ptr::null_mut());
         }
@@ -342,43 +338,63 @@ mod tests {
     }
 
     #[test]
-    fn upload_round_trips_through_the_mapping() {
+    fn oversized_payload_is_an_error() {
+        // Arrange.
+        let surface = FrameSurface::new(4, 4).unwrap();
+        let payload = vec![0u8; 4 * 4 * 4 + 1];
+        // Act + assert.
+        assert_eq!(
+            surface.upload(&payload),
+            Err(SurfaceError::BadPayload {
+                expected: 4 * 4 * 4,
+                actual: 4 * 4 * 4 + 1
+            })
+        );
+    }
+
+    #[test]
+    fn upload_copies_bgra_payload_verbatim() {
+        // Arrange: BGRA payload with every byte distinct per pixel, over
+        // multiple rows so stride handling is exercised.
         let surface = FrameSurface::new(8, 4).unwrap();
         let mut payload = vec![0u8; 8 * 4 * 4];
         for (index, byte) in payload.iter_mut().enumerate() {
             *byte = u8::try_from(index % 251).unwrap_or(u8::MAX);
         }
+        // Act.
         surface.upload(&payload).unwrap();
-        // SAFETY: just uploaded; re-lock and compare the first row, then
-        // unlock. Test-only read-back of our own surface. Bytes come back
-        // swizzled: surface order is B, G, R, A against the RGBA payload.
-        unsafe {
-            assert_eq!(IOSurfaceLock(surface.handle(), 0, std::ptr::null_mut()), 0);
-            let base = IOSurfaceGetBaseAddress(surface.handle()).cast::<u8>();
-            let first_row = std::slice::from_raw_parts(base.cast_const(), 8 * 4).to_vec();
-            IOSurfaceUnlock(surface.handle(), 0, std::ptr::null_mut());
-            for pixel in 0..8 {
-                assert_eq!(first_row[pixel * 4], payload[pixel * 4 + 2]);
-                assert_eq!(first_row[pixel * 4 + 1], payload[pixel * 4 + 1]);
-                assert_eq!(first_row[pixel * 4 + 2], payload[pixel * 4]);
-                assert_eq!(first_row[pixel * 4 + 3], payload[pixel * 4 + 3]);
-            }
-        }
+        // Assert: packed readback skips stride padding, so identity proves
+        // the per-row memcpy wrote every payload byte untouched.
+        assert_eq!(surface.snapshot_bytes(), payload);
     }
 
     #[test]
-    fn upload_swizzles_pure_red_to_bgra() {
+    fn upload_preserves_channel_order_on_primary_colors() {
+        // Arrange: BGRA-order primaries — red is (0, 0, 255, 255) in BGRA.
+        // A stale RGBA→BGRA swizzle would turn this payload blue.
         let surface = FrameSurface::new(2, 1).unwrap();
-        let payload = [255u8, 0, 0, 255, 0, 255, 0, 255];
+        let payload = [0u8, 0, 255, 255, 0, 255, 0, 255];
+        // Act.
         surface.upload(&payload).unwrap();
-        // SAFETY: just uploaded; re-lock, read both pixels, unlock.
-        unsafe {
-            assert_eq!(IOSurfaceLock(surface.handle(), 0, std::ptr::null_mut()), 0);
-            let base = IOSurfaceGetBaseAddress(surface.handle()).cast::<u8>();
-            let row = std::slice::from_raw_parts(base.cast_const(), 8).to_vec();
-            IOSurfaceUnlock(surface.handle(), 0, std::ptr::null_mut());
-            assert_eq!(&row[..4], &[0, 0, 255, 255]);
-            assert_eq!(&row[4..], &[0, 255, 0, 255]);
-        }
+        // Assert.
+        assert_eq!(surface.snapshot_bytes(), payload);
+    }
+
+    #[test]
+    fn upload_round_trips_odd_width_past_stride_padding() {
+        // Arrange: odd width stresses row-stride padding (framework rows
+        // may be wider than `width * 4`); distinct channels per pixel so a
+        // swizzle or a row-offset bug cannot hide.
+        let surface = FrameSurface::new(7, 3).unwrap();
+        let payload: Vec<u8> = (0..7 * 3)
+            .flat_map(|pixel| {
+                let base = u8::try_from(pixel % 251).unwrap_or(u8::MAX);
+                [base, base.wrapping_add(1), base.wrapping_add(2), 255]
+            })
+            .collect();
+        // Act.
+        surface.upload(&payload).unwrap();
+        // Assert.
+        assert_eq!(surface.snapshot_bytes(), payload);
     }
 }

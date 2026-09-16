@@ -1,7 +1,7 @@
 //! Headless Bevy scene: ECS world mirroring the procedural DAG output.
 //!
 //! Runs headless with an explicit GPU plugin set (see `gpu`): no window, an
-//! offscreen `Rgba8UnormSrgb` target, synchronous CPU readback. Never call
+//! offscreen `Bgra8UnormSrgb` target, synchronous CPU readback. Never call
 //! `App::run()` on the Swift `MainActor` thread — drive via
 //! [`SceneWorld::update`] from a background thread or a Swift-driven tick.
 //!
@@ -118,7 +118,7 @@ pub enum SceneError {
     /// The staging buffer map failed.
     #[error("staging buffer map failed")]
     MapFailed,
-    /// Raw bytes do not fill a `width` x `height` RGBA8 frame.
+    /// Raw bytes do not fill a `width` x `height` BGRA8 frame.
     #[error("raw frame has {actual} bytes, expected {expected}")]
     FrameLengthMismatch {
         /// Bytes the frame layout requires.
@@ -570,6 +570,56 @@ mod tests {
         assert!(world.app.world().get::<DemoCamera>(ids.camera).is_some());
         assert!(world.app.world().get::<DemoLight>(ids.light).is_some());
         assert!(world.app.world().get::<DemoCube>(ids.cube).is_some());
+    }
+
+    /// A red key light reads R-dominant in the published BGRA8 bytes: red
+    /// lives at byte 2. A reverted texture format or a reintroduced swizzle
+    /// would park red at byte 0 instead, so this is the end-to-end
+    /// channel-order pin the achromatic oracle (swap-invariant by design)
+    /// cannot be. Regression pin for #34.
+    #[test]
+    fn red_key_light_reads_r_dominant_in_bgra_order() {
+        // Arrange: white cube under a pure-red key light.
+        let mut world = SceneWorld::new_headless();
+        let ids = world.spawn_demo_scene();
+        world
+            .app
+            .world_mut()
+            .get_mut::<DirectionalLight>(ids.light)
+            .expect("demo light exists")
+            .color = bevy_color::Color::srgb(1.0, 0.0, 0.0);
+        // Act: pre-roll bounded ticks; early frames may be clear-only while
+        // shaders compile on first use.
+        let mut pixels = Vec::new();
+        for _ in 0..240 {
+            world.update();
+            if let Ok(frame) = world.render_frame() {
+                pixels = frame.pixels().to_vec();
+                let first = frame.pixels().chunks_exact(4).next();
+                let non_uniform = frame
+                    .pixels()
+                    .chunks_exact(4)
+                    .any(|pixel| Some(pixel) != first);
+                if non_uniform {
+                    break;
+                }
+            }
+        }
+        // Assert on the brightest pixel: the lit face under red light.
+        let brightest = pixels
+            .chunks_exact(4)
+            .max_by_key(|pixel| u16::from(pixel[0]) + u16::from(pixel[1]) + u16::from(pixel[2]))
+            .expect("warmed-up frame holds pixels");
+        let [b, g, r, a] = [brightest[0], brightest[1], brightest[2], brightest[3]];
+        assert_eq!(a, 255, "opaque PBR output, got {brightest:?}");
+        assert!(
+            r > 150 && b < 120,
+            "red light must read R-dominant, got [{b}, {g}, {r}]"
+        );
+        assert!(
+            u16::from(r) > u16::from(b) + 60,
+            "red channel must dominate blue, got [{b}, {g}, {r}]"
+        );
     }
 
     #[test]
