@@ -120,6 +120,10 @@ struct ViewportMetalHost: NSViewRepresentable {
         let view = MTKView()
         let device = MTLCreateSystemDefaultDevice()
         view.device = device
+        // The present path blits into the drawable, and blit writes are
+        // illegal on framebuffer-only textures (Metal validation aborts:
+        // "destinationTexture must not be a framebufferOnly texture").
+        view.framebufferOnly = false
         view.clearColor = MTLClearColor(red: 0.05, green: 0.06, blue: 0.09, alpha: 1)
         view.enableSetNeedsDisplay = false
         view.isPaused = false
