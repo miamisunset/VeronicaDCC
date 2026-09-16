@@ -45,6 +45,9 @@ impl SceneWorld {
     /// so callers observe topological order without re-sorting. Each entity
     /// also carries [`SourceOperator`] with the source operator id.
     ///
+    /// All payloads convert before any entity spawns, so a handoff failure
+    /// leaves the world untouched instead of stranding earlier cooks.
+    ///
     /// # Errors
     ///
     /// Returns [`SceneError::Cook`] when the graph fails to cook (cycle,
@@ -57,19 +60,24 @@ impl SceneWorld {
         graph: &OperatorGraph,
     ) -> Result<Vec<(NodeId, Entity)>, SceneError> {
         let cooked = cook(graph)?;
-        let mut spawned = Vec::with_capacity(cooked.len());
-        for (id, payload) in &cooked {
+        // Convert everything first: the world gains entities only once every
+        // payload has survived the handoff.
+        let mut meshes = Vec::with_capacity(cooked.len());
+        for (id, payload) in cooked {
             let evaluated = match payload {
-                GeometryPayload::Implicit(implicit) => realize(implicit),
-                GeometryPayload::Evaluated(mesh) => mesh.clone(),
+                GeometryPayload::Implicit(implicit) => realize(&implicit),
+                GeometryPayload::Evaluated(mesh) => mesh,
             };
-            let mesh = render_mesh_from_evaluated(&evaluated)?;
+            meshes.push((id, render_mesh_from_evaluated(&evaluated)?));
+        }
+        let mut spawned = Vec::with_capacity(meshes.len());
+        for (id, mesh) in meshes {
             let entity = self
                 .app
                 .world_mut()
-                .spawn((SourceOperator(*id), CookedMesh(mesh)))
+                .spawn((SourceOperator(id), CookedMesh(mesh)))
                 .id();
-            spawned.push((*id, entity));
+            spawned.push((id, entity));
         }
         Ok(spawned)
     }
