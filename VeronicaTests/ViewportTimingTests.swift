@@ -43,8 +43,7 @@ struct ViewportTimingTests {
         ) == "120 fps · 8.3 ms tick · u 5.1 r 2.9 w 0.3 p 0.4")
     }
 
-    @Test func timingLineStartsAtZero() {
-        #expect(timingLine(
+    @Test func timingLineStartsAtZero() {        #expect(timingLine(
             fps: 0,
             tickUs: 0,
             updateUs: 0,
@@ -52,5 +51,10 @@ struct ViewportTimingTests {
             uploadUs: 0,
             presentUs: 0
         ) == "0 fps · 0.0 ms tick · u 0.0 r 0.0 w 0.0 p 0.0")
+    }
+
+    @Test func frameLineShowsExtents() {
+        #expect(frameLine(width: 2048, height: 853) == "frame 2048×853")
+        #expect(frameLine(width: 0, height: 0) == "frame 0×0")
     }
 }

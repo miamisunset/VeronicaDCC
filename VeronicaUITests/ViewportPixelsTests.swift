@@ -50,6 +50,11 @@ final class ViewportPixelsTests: XCTestCase {
         XCTAssertNotNil(value)
         XCTAssertTrue(value?.contains("fps") ?? false)
         XCTAssertTrue(value?.contains("ms tick") ?? false)
+
+        // The frame-extents line rides alongside for the #32 matrix.
+        let frame = element(app, "viewportFrameLabel")
+        XCTAssertTrue(frame.waitForExistence(timeout: 5))
+        XCTAssertTrue((frame.value as? String)?.hasPrefix("frame ") ?? false)
     }
 
     /// Slice-3 oracle (#30): the tick label keeps advancing across pane

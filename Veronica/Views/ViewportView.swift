@@ -122,6 +122,15 @@ nonisolated func milliseconds(_ microseconds: UInt64) -> Double {
     (Double(microseconds) / 100).rounded() / 10
 }
 
+/// Frame-extents readout for the stats overlay (issue #32 follow-up).
+///
+/// The matrix needs Rust extents next to tick cost: identical extents with
+/// different ticks means churn/scale-dependent cost, differing extents
+/// means size-dependent cost. Pure for testing.
+nonisolated func frameLine(width: UInt64, height: UInt64) -> String {
+    "frame \(width)×\(height)"
+}
+
 /// One-line timing readout for the viewport stats overlay (issue #32).
 ///
 /// `fps` is the achieved display-link rate; `tick` the Rust tick wall
@@ -463,7 +472,13 @@ struct ViewportView: View {
                     presentUs: store.presentMicroseconds
                 ))
                 .monospacedDigit()
-                .accessibilityIdentifier("viewportTimingLabel")
+                    .accessibilityIdentifier("viewportTimingLabel")
+                Text(frameLine(
+                    width: store.frame?.width ?? 0,
+                    height: store.frame?.height ?? 0
+                ))
+                .monospacedDigit()
+                .accessibilityIdentifier("viewportFrameLabel")
             }
             .font(.caption)
             .foregroundStyle(.white.opacity(0.85))
