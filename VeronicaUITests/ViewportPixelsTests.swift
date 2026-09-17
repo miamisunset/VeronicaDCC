@@ -1,7 +1,7 @@
 import XCTest
 
 /// Slice-2 oracle: the viewport stats advance across frames because Rust
-/// ticks the turntable, and the entity count holds the demo scene size.
+/// ticks the engine, and the entity count holds the demo scene size.
 final class ViewportPixelsTests: XCTestCase {
     override func setUpWithError() throws {
         continueAfterFailure = false
@@ -101,11 +101,11 @@ final class ViewportPixelsTests: XCTestCase {
     /// past GPU warm-up (cold ticks publish clear-only frames while the
     /// Bevy pipeline spins up), screenshots the app, and asserts the
     /// window's bright-pixel fraction clears a threshold no clear-only
-    /// frame can reach. Window-wide (not pane-sampled) because the pane
-    /// exposes no geometry to accessibility; the threshold still separates
-    /// lit geometry (~10%) from clear plus overlay text (0.16% measured)
-    /// by over an order of magnitude — and a mis-cropped region fails
-    /// closed (dark desktop measures ~0%, below threshold).
+    /// frame can reach. Window-wide (not pane-sampled) for layout
+    /// independence: it still separates lit geometry (~10%) from clear
+    /// plus overlay text (0.16% measured) by over an order of magnitude —
+    /// and a mis-cropped region fails closed (dark desktop measures ~0%,
+    /// below threshold).
     @MainActor
     func testViewportPaneShowsLitPixels() throws {
         let app = XCUIApplication()

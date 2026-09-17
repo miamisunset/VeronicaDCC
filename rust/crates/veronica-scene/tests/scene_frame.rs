@@ -1,11 +1,11 @@
 //! GPU slice: ticks publish GPU-rendered frames behind the same seam.
 //!
 //! A valid published frame has the fixed nonzero extents and a full BGRA8
-//! payload; consecutive ticks publish observably different bytes because
-//! the Rust-side turntable advanced, not because anyone re-rendered. The CPU
-//! rasterizer (`render_demo_frame`) is kept only as the deterministic test
-//! oracle: GPU frames must be non-uniform and visibly beyond flat
-//! rasterization.
+//! payload. The scene is static (no auto-spin since #46), so consecutive
+//! ticks publish identical bytes — pixels follow ECS state, and only nav
+//! ops move them. The CPU rasterizer (`render_demo_frame`) is kept only as
+//! the deterministic test oracle: GPU frames must be non-uniform and
+//! visibly beyond flat rasterization.
 //!
 //! Pipeline warm-up: early frames may be clear-only while shaders compile on
 //! first use, so tests pre-roll bounded ticks (poll-until-non-uniform with a
@@ -59,7 +59,7 @@ fn render_when_ready(world: &mut SceneWorld) -> Vec<u8> {
 
 /// Fixed extents are nonzero with a full BGRA8 payload after a tick, and the
 /// pixels are GPU-rendered scene content: non-uniform and different from the
-/// CPU oracle's flat rasterization at the same turntable angle.
+/// CPU oracle's flat rasterization at the same cube angle.
 #[test]
 fn published_frame_is_valid_after_tick() {
     let mut world = SceneWorld::new_headless();
@@ -70,7 +70,7 @@ fn published_frame_is_valid_after_tick() {
         FRAME_WIDTH as usize * FRAME_HEIGHT as usize * 4
     );
     assert!(is_non_uniform(&pixels));
-    let oracle = render_demo_frame(world.spin_angle(), FRAME_WIDTH, FRAME_HEIGHT).unwrap();
+    let oracle = render_demo_frame(world.cube_angle_y(), FRAME_WIDTH, FRAME_HEIGHT).unwrap();
     assert_ne!(
         pixels,
         oracle.pixels(),
@@ -89,7 +89,7 @@ fn lit_cube_is_achromatic_not_magenta() {
     let _ = world.spawn_demo_scene();
     let pixels = render_when_ready(&mut world);
     // Brightest pixel: the lit cube face is far brighter than the dark clear
-    // color, whatever the turntable angle.
+    // color, whatever the cube angle.
     let brightest = pixels
         .chunks_exact(4)
         .max_by_key(|pixel| u16::from(pixel[0]) + u16::from(pixel[1]) + u16::from(pixel[2]))
@@ -108,10 +108,10 @@ fn lit_cube_is_achromatic_not_magenta() {
     }
 }
 
-/// Consecutive ticks publish different pixels: the turntable angle advanced
-/// through the GPU path.
+/// Consecutive ticks publish identical pixels: the static scene holds still,
+/// so pixels follow ECS state and only nav ops move them.
 #[test]
-fn consecutive_ticks_publish_different_pixels() {
+fn consecutive_ticks_publish_identical_pixels() {
     let mut world = SceneWorld::new_headless();
     let _ = world.spawn_demo_scene();
     let before = render_when_ready(&mut world);
@@ -121,21 +121,23 @@ fn consecutive_ticks_publish_different_pixels() {
         .expect("GPU readback stays live after warm-up")
         .pixels()
         .to_vec();
-    assert_ne!(before, after);
+    assert_eq!(before, after);
 }
 
-/// The pixel source tracks the world tick counter, not wall time.
+/// The pixel source tracks the world tick counter, not wall time: ticks
+/// advance while the cube angle holds at its spawn orientation.
 #[test]
-fn frame_angle_follows_tick_count() {
+fn cube_angle_holds_still_while_ticks_advance() {
     let mut world = SceneWorld::new_headless();
     let _ = world.spawn_demo_scene();
     assert_eq!(world.tick_count(), 0);
     world.update();
-    assert!(world.spin_angle() > 0.0);
+    assert_eq!(world.cube_angle_y().to_bits(), 0.0f32.to_bits());
+    assert_eq!(world.tick_count(), 1);
 }
 
-/// Re-targeting mid-life propagates to the published frame: extents follow,
-/// the turntable stays alive across the switch, and the lit cube still reads
+/// Re-targeting mid-life propagates to the published frame: extents follow
+/// while the static scene holds still, and the lit cube still reads
 /// achromatic at the new size. Zero and over-cap requests error.
 #[test]
 fn viewport_resize_propagates_mid_life() {
@@ -170,14 +172,24 @@ fn viewport_resize_propagates_mid_life() {
         384_usize * 256 * FRAME_BYTES_PER_PIXEL
     );
 
-    // The turntable survived the switch: consecutive ticks still differ.
+    // Stillness survives the switch: after one settle tick past the
+    // re-target (staging rebuild), the static scene publishes identical
+    // bytes at the new extents.
+    world.update();
+    let _ = world.render_frame().expect("readback settles after resize");
     world.update();
     let after = world
         .render_frame()
         .expect("readback stays live after resize")
         .pixels()
         .to_vec();
-    assert_ne!(frame.pixels(), after.as_slice());
+    world.update();
+    let steady_after = world
+        .render_frame()
+        .expect("readback stays live")
+        .pixels()
+        .to_vec();
+    assert_eq!(after.as_slice(), steady_after.as_slice());
 
     // Brightest-pixel achromatic pin, re-checked at the new size.
     let brightest = after
@@ -214,7 +226,7 @@ fn frames_hold_still_without_a_cube() {
     world.update();
     // Exact bit comparison: the cubeless path returns the `0.0` constant
     // with no float arithmetic in between.
-    assert_eq!(world.spin_angle().to_bits(), 0.0f32.to_bits());
+    assert_eq!(world.cube_angle_y().to_bits(), 0.0f32.to_bits());
     let before = world
         .render_frame()
         .expect("readback works with no demo scene")
@@ -230,9 +242,9 @@ fn frames_hold_still_without_a_cube() {
 }
 
 /// Frame-all visibly reframes through the readback seam: fitting moves the
-/// camera nearer, so the lit cube covers substantially more pixels. Lit-area
-/// ratio is spin-proof — one turntable step reshuffles edges but barely
-/// changes the lit count, while the 4.7→2.6 distance fit grows it ~3×.
+/// camera nearer, so the lit cube covers substantially more pixels. The
+/// scene is static, so the before/after pair isolates the refit exactly —
+/// the 4.7→2.6 distance fit grows the lit area ~3×.
 #[test]
 fn frame_all_reframes_the_published_image() {
     /// Pixels brighter than a lit face threshold (sum over B+G+R).

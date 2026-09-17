@@ -490,6 +490,12 @@ struct ViewportView: View {
             .font(.caption)
             .foregroundStyle(.white.opacity(0.85))
             .padding(8)
+            // Click-through: every pane point must reach the nav view's
+            // `mouseDown` (first-responder claim for `F`, drag start).
+            // Without this the overlay is a dead zone where clicks neither
+            // focus nor orbit (issue #46). Read-only text needs no hits;
+            // accessibility labels are unaffected by hit testing.
+            .allowsHitTesting(false)
             .accessibilityElement(children: .contain)
             .accessibilityLabel("Viewport stats")
         }

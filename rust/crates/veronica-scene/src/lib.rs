@@ -175,9 +175,9 @@ pub struct DemoCamera;
 #[derive(Debug, Clone, Copy, Default, Component)]
 pub struct DemoLight;
 
-/// Marker for the demo cube. Its [`Transform`] is rotated a fixed step every
-/// [`SceneWorld::update`] by [`spin_demo_cubes`], so successive ticks are
-/// observably different even before pixels exist.
+/// Marker for the demo cube. Its [`Transform`] is the static identity: the
+/// scene holds still until a nav op moves the camera, so pixel oracles are
+/// deterministic (no auto-spin; issue #46).
 #[derive(Debug, Clone, Copy, Default, Component)]
 pub struct DemoCube;
 
@@ -188,17 +188,13 @@ pub struct DemoSceneIds {
     pub camera: Entity,
     /// Light entity.
     pub light: Entity,
-    /// Spinning cube entity.
+    /// Cube entity.
     pub cube: Entity,
 }
 
 /// Ticks elapsed since creation. Incremented by [`count_ticks`] each update.
 #[derive(Debug, Default, Resource)]
 struct TickCount(u64);
-
-/// Fixed per-tick rotation step (radians) for [`spin_demo_cubes`].
-/// Deterministic on purpose: tests assert rotation advances without a clock.
-const DEMO_SPIN_STEP: f32 = 0.02;
 
 /// Edge length of the demo cuboid in world units.
 const DEMO_CUBE_SIZE: f32 = 1.0;
@@ -219,13 +215,6 @@ const DEMO_LIGHT_OFFSET_Z: f32 = 3.0;
 /// Advance [`TickCount`] once per schedule run.
 fn count_ticks(mut count: ResMut<TickCount>) {
     count.0 = count.0.saturating_add(1);
-}
-
-/// Rotate every [`DemoCube`] one fixed step around Y.
-fn spin_demo_cubes(mut cubes: Query<&mut Transform, With<DemoCube>>) {
-    for mut transform in &mut cubes {
-        transform.rotate_y(DEMO_SPIN_STEP);
-    }
 }
 
 /// Headless scene world. Owns the Bevy [`App`] plus id lookup tables.
@@ -266,7 +255,7 @@ impl SceneWorld {
             PbrPlugin::default(),
         ));
         app.init_resource::<TickCount>()
-            .add_systems(Update, (count_ticks, spin_demo_cubes));
+            .add_systems(Update, count_ticks);
         app.finish();
         app.cleanup();
         let target = {
@@ -282,7 +271,7 @@ impl SceneWorld {
         Self { app }
     }
 
-    /// Spawn the Rust-owned demo scene: camera, light, and a spinning cube,
+    /// Spawn the Rust-owned demo scene: camera, light, and a static cube,
     /// all carrying [`DemoScene`] so [`SceneWorld::entity_count`] sees
     /// exactly them.
     ///
@@ -292,8 +281,8 @@ impl SceneWorld {
     /// light a [`DirectionalLight`](bevy_light::DirectionalLight), and the
     /// cube a cuboid [`Mesh`](bevy_mesh::Mesh) with a default
     /// [`StandardMaterial`](bevy_pbr::StandardMaterial). The cube keeps its
-    /// [`MeshTag`] and identity [`Transform`], which
-    /// [`spin_demo_cubes`] rotates every [`SceneWorld::update`].
+    /// [`MeshTag`] and identity [`Transform`], which stays fixed until an
+    /// op moves it (no auto-spin).
     #[must_use]
     pub fn spawn_demo_scene(&mut self) -> DemoSceneIds {
         let cube_mesh = {
@@ -372,16 +361,16 @@ impl SceneWorld {
         self.app.world().resource::<TickCount>().0
     }
 
-    /// Current turntable angle in radians, read from the demo cube's live
+    /// Current demo-cube Y angle in radians, read from the cube's live
     /// [`Transform`].
     ///
-    /// The angle is ECS state, not a tick multiple: [`spin_demo_cubes`]
-    /// rotates the cube each update, and the published pixels derive from
-    /// this reading — so a world with no cube publishes identical frames.
-    /// Deterministic on purpose, so tests assert frame differences without
-    /// a clock. `0.0` when no [`DemoCube`] is alive.
+    /// The angle is ECS state: the scene holds still (no auto-spin since
+    /// #46), so this reads the spawn orientation until an op moves the cube
+    /// — and the published pixels derive from this reading, so identical
+    /// ECS state publishes identical frames. `0.0` when no [`DemoCube`] is
+    /// alive.
     #[must_use]
-    pub fn spin_angle(&mut self) -> f32 {
+    pub fn cube_angle_y(&mut self) -> f32 {
         let world = self.app.world_mut();
         let mut cubes = world.query_filtered::<&Transform, With<DemoCube>>();
         cubes.iter(world).next().map_or(0.0, |transform| {
@@ -457,9 +446,9 @@ impl SceneWorld {
     ///
     /// The frame-publish seam: Swift presents whatever this returns without
     /// interpreting scene content. Pixels come off the GPU
-    /// (`gpu::readback_frame`): the turntable still drives visible change
-    /// because [`spin_demo_cubes`] rotates the cube's live [`Transform`]
-    /// every tick, so consecutive ticks publish observably different frames.
+    /// (`gpu::readback_frame`); the scene is static unless a nav op moves
+    /// the camera, so identical ECS state publishes identical frames and
+    /// every nav op is pixel-observable.
     ///
     /// # Errors
     ///
@@ -635,7 +624,7 @@ mod tests {
     }
 
     #[test]
-    fn ticks_advance_count_and_cube_rotation() {
+    fn ticks_advance_count_while_cube_holds_still() {
         let mut world = SceneWorld::new_headless();
         let ids = world.spawn_demo_scene();
         assert_eq!(world.tick_count(), 0);
@@ -643,7 +632,7 @@ mod tests {
         world.update();
         assert_eq!(world.tick_count(), 1);
         let after = *world.app.world().get::<Transform>(ids.cube).unwrap();
-        assert_ne!(before.rotation, after.rotation);
+        assert_eq!(before.rotation, after.rotation);
     }
 
     #[test]

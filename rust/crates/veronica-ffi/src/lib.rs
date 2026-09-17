@@ -1344,9 +1344,10 @@ mod frame_tests {
                 VrnResult::Ok
             );
             assert_eq!(surface, second);
-            // Past pipeline warm-up, each presented front advances the
-            // turntable, so consecutive fronts differ pixel-for-pixel.
-            // (Early frames may be clear-only while shaders compile.)
+            // Past pipeline warm-up, the static scene publishes identical
+            // bytes on alternating fronts: handles flip every tick while
+            // content holds still. (Early frames may be clear-only while
+            // shaders compile.)
             let bytes_first = front_bytes_when_ready(context);
             assert_eq!(
                 vrn_frame_surface(context, &raw mut surface, &raw mut width, &raw mut height),
@@ -1361,7 +1362,7 @@ mod frame_tests {
             assert_ne!(surface, ready_handle);
             let bytes_second = front_bytes(context);
             assert!(!bytes_second.is_empty());
-            assert_ne!(bytes_second, bytes_first);
+            assert_eq!(bytes_second, bytes_first);
             assert_eq!(vrn_tick(context), VrnResult::Ok);
             assert_eq!(
                 vrn_frame_surface(context, &raw mut surface, &raw mut width, &raw mut height),
@@ -1369,7 +1370,7 @@ mod frame_tests {
             );
             assert_eq!(surface, ready_handle);
             let bytes_third = front_bytes(context);
-            assert_ne!(bytes_third, bytes_second);
+            assert_eq!(bytes_third, bytes_second);
             // Null slots and null context are safe.
             assert_eq!(
                 vrn_frame_surface(context, ptr::null_mut(), &raw mut width, &raw mut height),
@@ -1393,6 +1394,66 @@ mod frame_tests {
                 VrnResult::NullArgument
             );
             vrn_context_destroy(context);
+        }
+    }
+
+    /// Count of BGRA8 pixels differing between two same-length frames.
+    fn differing_pixels(first: &[u8], second: &[u8]) -> usize {
+        assert_eq!(first.len(), second.len());
+        first
+            .chunks_exact(4)
+            .zip(second.chunks_exact(4))
+            .filter(|(a, b)| a != b)
+            .count()
+    }
+
+    /// Count of BGRA8 pixels with relative luminance above 0.5.
+    ///
+    /// Integer math only: the threshold scales by `10_000` so the Rec. 709
+    /// weights stay exact without float casts.
+    fn bright_pixels(pixels: &[u8]) -> usize {
+        pixels
+            .chunks_exact(4)
+            .filter(|pixel| {
+                2126 * u32::from(pixel[2]) + 7152 * u32::from(pixel[1]) + 722 * u32::from(pixel[0])
+                    > 1_275_000
+            })
+            .count()
+    }
+
+    #[test]
+    fn frame_all_moves_published_gpu_pixels() {
+        let context = vrn_context_create();
+        assert!(!context.is_null());
+        // SAFETY: just created, alive, single-threaded test.
+        unsafe {
+            // Arrange: warmed-up front carrying the lit cube, plus one
+            // static tick as the no-motion baseline. The scene holds still
+            // (no auto-spin since #46), so consecutive ticks publish
+            // near-identical bytes.
+            let settled = front_bytes_when_ready(context);
+            assert_eq!(vrn_tick(context), VrnResult::Ok);
+            let still = front_bytes(context);
+            let baseline_pixels = differing_pixels(&settled, &still);
+            // Act: frame-all, then the tick that renders it.
+            assert_eq!(vrn_viewport_frame_all(context), VrnResult::Ok);
+            assert_eq!(vrn_tick(context), VrnResult::Ok);
+            let framed = front_bytes(context);
+            let frame_pixels = differing_pixels(&still, &framed);
+            let still_bright = bright_pixels(&still);
+            let frame_bright = bright_pixels(&framed);
+            vrn_context_destroy(context);
+            // Assert: the refit (spawn ~4.74 to fit ~2.6) must dwarf static
+            // tick-to-tick noise in both raw churn and lit area — otherwise
+            // F is a visual no-op (issue #46).
+            assert!(
+                frame_pixels > 100 * baseline_pixels.max(1),
+                "frame-all moved {frame_pixels}px vs static baseline {baseline_pixels}px"
+            );
+            assert!(
+                frame_bright > 2 * still_bright,
+                "frame-all lit {frame_bright}px vs static {still_bright}px"
+            );
         }
     }
 }
