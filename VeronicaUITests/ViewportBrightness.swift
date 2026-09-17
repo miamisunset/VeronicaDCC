@@ -42,12 +42,12 @@ func waitForViewportWarmUp(
 /// luminance exceeds 0.5, sampled from `shot` (device pixels, top-left
 /// origin, spans the main display).
 ///
-/// Window-wide (not pane-sampled) by necessity and by choice: the MTKView
-/// never surfaces in the AX tree (proven at #46 — neither AppKit opt-in
-/// nor a representable-level identifier exposes it), so no queryable
-/// element carries pane geometry; and the metric is layout-independent
-/// while still separating lit geometry (~10%) from a clear-only viewport
-/// plus overlay text (~0.3%) by over an order of magnitude. For
+/// Window-wide (not pane-sampled) by choice: the metric is
+/// layout-independent while still separating lit geometry (~10%) from a
+/// clear-only viewport plus overlay text (~0.3%) by over an order of
+/// magnitude. (The MTKView itself never surfaces in the AX tree — proven
+/// at #46 — but a full-pane `Color.clear` proxy now carries the pane
+/// identifier for position-sensitive gestures; see `ViewportView`.) For
 /// before/after ratios the static side chrome dilutes but cannot erase the
 /// change, since only pane pixels move.
 func viewportBrightPixelFraction(of shot: XCUIScreenshot, in windowFrame: CGRect) -> Double? {
@@ -69,6 +69,40 @@ func viewportBrightPixelFraction(of shot: XCUIScreenshot, in windowFrame: CGRect
     }
     guard count > 0 else { return nil }
     return Double(bright) / Double(count)
+}
+
+/// Fraction of `windowFrame` pixels reading as selection-warm (the
+/// primvar highlight tint, issue #64), sampled like `viewportBrightPixelFraction`.
+///
+/// Warm means red-dominant over blue (`R-B > 40`, `G-B > 20`): the tint is
+/// a light peach whose blue channel reaches ~190, so an absolute blue cap
+/// would reject the very pixels it must catch, while lit gray geometry
+/// reads near-equal channels and the dark chrome reads near-zero. Window
+/// chrome contributes only the traffic lights (~1e-4); a picked face
+/// covers ~7% window-wide, so the oracle thresholds sit orders of
+/// magnitude clear on both sides. Window-wide by the same AX-tree
+/// necessity as the bright oracle.
+func viewportOrangePixelFraction(of shot: XCUIScreenshot, in windowFrame: CGRect) -> Double? {
+    guard let crop = croppedWindowPixels(of: shot, in: windowFrame) else {
+        return nil
+    }
+    // Stride-sample: every 8th pixel is plenty for a fraction.
+    var orange = 0
+    var count = 0
+    let stride = 8
+    for index in 0..<(crop.width * crop.height) where index % stride == 0 {
+        // `Int` before any arithmetic: `UInt8 + 40` traps on bright pixels.
+        let base = index * 4
+        let red = Int(crop.pixels[base])
+        let green = Int(crop.pixels[base + 1])
+        let blue = Int(crop.pixels[base + 2])
+        if red > 150, red - blue > 40, green - blue > 20 {
+            orange += 1
+        }
+        count += 1
+    }
+    guard count > 0 else { return nil }
+    return Double(orange) / Double(count)
 }
 
 /// Fraction of `windowFrame` pixels whose RGB differs between two

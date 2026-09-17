@@ -463,6 +463,18 @@ struct ViewportView: View {
                 onAction: { action in store.send(action) },
                 frame: store.frame
             )
+            // Full-pane accessibility proxy (issue #64): the MTKView never
+            // surfaces in the AX tree (proven at #46), and without this the
+            // pane identifier resolves to the stats overlay's frame — so
+            // `viewport.click()` taps the pane's bottom-left instead of its
+            // center and every position-sensitive gesture lands wrong.
+            // Hit-testing stays off so clicks reach the nav view; XCTest
+            // dispatches by coordinate, which this proxy now reports truly.
+            Color.clear
+                .accessibilityElement()
+                .accessibilityIdentifier("viewportPane")
+                .accessibilityLabel("Viewport")
+                .allowsHitTesting(false)
             VStack(alignment: .leading, spacing: 2) {
                 Text("tick \(store.tickCount)")
                     .monospacedDigit()
@@ -499,7 +511,6 @@ struct ViewportView: View {
             .accessibilityElement(children: .contain)
             .accessibilityLabel("Viewport stats")
         }
-        .accessibilityIdentifier("viewportPane")
     }
 }
 
