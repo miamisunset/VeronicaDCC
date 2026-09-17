@@ -38,11 +38,21 @@
 //! write); linear-exact `k/255` colors (the unorm8 quantize rounds back to
 //! `k`); transparent-black clear (background reads as the T2 miss pixel).
 //!
-//! **MSAA rule.** The target is multisampled (Bevy default), so silhouette
-//! pixels blend ID color with clear — including a partial alpha. A hit
-//! requires full-coverage alpha ([`HIT_ALPHA`][veronica_geometry::HIT_ALPHA]);
-//! anything else is a miss. An edge tap can therefore deselect, but it can
-//! never mis-highlight: unattributable pixels are always misses.
+//! **MSAA rule and its limit.** The target is multisampled (Bevy default),
+//! so silhouette pixels blend ID color with clear — including a partial
+//! alpha. A hit requires full-coverage alpha
+//! ([`HIT_ALPHA`][veronica_geometry::HIT_ALPHA]); anything else is a miss,
+//! so a silhouette-edge tap deselects instead of mis-highlighting.
+//!
+//! The gate does not cover texels straddling two opaque faces: MSAA resolve
+//! averages their RGB while alpha stays full, and the blended triple can
+//! decode to a third ordinal. Out-of-range blends deselect (the entity slot
+//! lookup and [`face_in_range`] admit only attributable identities), but an
+//! in-range blend aliases to a real — wrong — face. Pixel-perfect seam taps
+//! are rare at MVP mesh sizes, and per-target single-sample rendering is not
+//! available in Bevy (sample count is a global resource; toggling it would
+//! rebuild every pipeline including beauty's), so this stays a documented
+//! limitation until dense-mesh picking earns its own design.
 
 use crate::{SceneError, SceneWorld, gpu, render::FRAME_BYTES_PER_PIXEL};
 use bevy_asset::{Assets, Handle, RenderAssetUsages};
@@ -128,21 +138,35 @@ fn linear_channel(byte: u8) -> f32 {
     f32::from(byte) / 255.0
 }
 
-/// Narrow an item count into the 24-bit ID space, failing loudly past it.
+/// Largest triangle total the ID space addresses.
 ///
-/// Counts come from live mesh data (triangle totals, entity slots), so an
-/// overflow means geometry the ID buffer cannot address — a loud error,
-/// never a truncating encode.
+/// Ordinals run `0..=MAX_FACE_ORDINAL`, so a mesh holds one more triangle
+/// than the max ordinal. Counts and ordinals differ by one — [`u24_checked`]
+/// below bounds ordinals, this bounds totals.
+const MAX_PICK_TRIANGLES: usize = MAX_FACE_ORDINAL as usize + 1;
+
+/// Narrow an ordinal into the 24-bit ID space, failing loudly past it.
+///
+/// Ordinal-bound, not count-bound: entity slots are indices (`0..=MAX` is
+/// valid), while triangle totals allow one more (see
+/// [`MAX_PICK_TRIANGLES`]).
 ///
 /// # Errors
 ///
-/// Returns [`SceneError::PickSpaceExhausted`] when `count` exceeds
+/// Returns [`SceneError::PickSpaceExhausted`] when `ordinal` exceeds
 /// [`MAX_FACE_ORDINAL`].
-fn u24_checked(count: usize) -> Result<u32, SceneError> {
-    u32::try_from(count)
+fn u24_checked(ordinal: usize) -> Result<u32, SceneError> {
+    u32::try_from(ordinal)
         .ok()
         .filter(|value| *value <= MAX_FACE_ORDINAL)
-        .ok_or(SceneError::PickSpaceExhausted { count })
+        .ok_or(SceneError::PickSpaceExhausted { count: ordinal })
+}
+
+/// Whether a triangle total fits the ID space: `0..=MAX_PICK_TRIANGLES`
+/// triangles carry encodable ordinals.
+#[must_use]
+fn triangle_total_fits(count: usize) -> bool {
+    count <= MAX_PICK_TRIANGLES
 }
 
 /// Exact linear color for one entity slot.
@@ -238,7 +262,11 @@ fn id_mesh_from_cooked(mesh: &Mesh) -> Result<Mesh, SceneError> {
                 .collect()
         }
     };
-    let triangle_total = u24_checked(triangles.len())?;
+    if !triangle_total_fits(triangles.len()) {
+        return Err(SceneError::PickSpaceExhausted {
+            count: triangles.len(),
+        });
+    }
     let vertex_count = triangles.len() * 3;
     let mut id_positions = Vec::with_capacity(vertex_count);
     let mut id_colors = Vec::with_capacity(vertex_count);
@@ -247,8 +275,8 @@ fn id_mesh_from_cooked(mesh: &Mesh) -> Result<Mesh, SceneError> {
             count: triangles.len(),
         })?;
         debug_assert!(
-            ordinal < triangle_total,
-            "pre-checked count bounds every ordinal"
+            ordinal <= MAX_FACE_ORDINAL,
+            "count pre-check bounds every ordinal"
         );
         let rgb = encode_face_ordinal(ordinal).map_err(|_| SceneError::PickSpaceExhausted {
             count: triangles.len(),
@@ -316,6 +344,20 @@ fn pick_pixel(frame: &[u8], pixel_x: u32, pixel_y: u32, width: u32) -> Option<[u
     frame.get(row_start..end)?.try_into().ok()
 }
 
+/// Whether a decoded face ordinal names a real triangle of a mesh with
+/// `triangle_total` triangles.
+///
+/// Backstop against MSAA seam blends (see the module docs): a texel
+/// straddling two opaque faces resolves both at full alpha, and the blended
+/// triple can decode outside the mesh. That pixel must deselect — never mint
+/// an impossible identity for the selection slice to choke on. (A blend that
+/// lands inside the range still aliases to a nearby face; see the module
+/// docs for why that stays a documented limitation.)
+#[must_use]
+fn face_in_range(face: u32, triangle_total: usize) -> bool {
+    (face as usize) < triangle_total
+}
+
 /// One cooked mesh eligible for the entity pass: everything the transient
 /// overlays need, snapshotted up front so the pass never re-queries live
 /// entities mid-flight.
@@ -368,9 +410,10 @@ impl SceneWorld {
     /// orbiting then tapping hits the face now under the tap.
     ///
     /// Non-finite or out-of-range NDC, an empty scene, a background pixel,
-    /// and a partial-coverage (MSAA edge) pixel all resolve to `Ok(None)`: a
-    /// tap that cannot be attributed to a face is a deselect, never a
-    /// mis-highlight.
+    /// a partial-coverage (MSAA edge) pixel, and an out-of-range blend all
+    /// resolve to `Ok(None)`: a tap that cannot be attributed to a face is
+    /// a deselect. (The one exception is an in-range MSAA seam blend, which
+    /// aliases to a nearby face — documented limitation, see module docs.)
     ///
     /// Runs [`SceneWorld::update`] internally — call off the Swift
     /// `MainActor` thread like every tick (the FFI slice owns this rule).
@@ -572,6 +615,17 @@ impl SceneWorld {
             };
             id_mesh_from_cooked(cpu_mesh)?
         };
+        // Triangle total for the range backstop below: the ID mesh is
+        // non-indexed soup by construction, so positions come in triples.
+        // Read before the upload moves the mesh.
+        let Some(VertexAttributeValues::Float32x3(positions)) =
+            id_mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            // Unreachable by construction; the safe direction on the
+            // impossible path is to bail to a miss.
+            return Ok(None);
+        };
+        let face_total = positions.len() / 3;
         let id_handle = self
             .app
             .world_mut()
@@ -611,6 +665,10 @@ impl SceneWorld {
             return Ok(None);
         }
         let face = decode_face_ordinal([face_pixel[0], face_pixel[1], face_pixel[2]]);
+        // Range backstop: a seam-blended triple can decode past the mesh.
+        if !face_in_range(face, face_total) {
+            return Ok(None);
+        }
         Ok(Some(Pick {
             node: pickable.node,
             face,
@@ -823,6 +881,37 @@ mod tests {
             assert_f32_bits_eq(color.blue, f32::from(rgb[2]) / 255.0);
             assert_f32_bits_eq(color.alpha, 1.0);
         }
+    }
+
+    #[test]
+    fn count_and_ordinal_bounds_differ_by_one() {
+        // Ordinals run `0..=MAX` (slot indices); totals run one further —
+        // `MAX + 1` triangles carry exactly the encodable ordinals.
+        assert!(triangle_total_fits(0));
+        assert!(triangle_total_fits(12));
+        assert!(triangle_total_fits(MAX_FACE_ORDINAL as usize + 1));
+        assert!(!triangle_total_fits(MAX_FACE_ORDINAL as usize + 2));
+        assert_eq!(
+            u24_checked(MAX_FACE_ORDINAL as usize).unwrap(),
+            MAX_FACE_ORDINAL
+        );
+        assert_eq!(
+            u24_checked(MAX_FACE_ORDINAL as usize + 1),
+            Err(SceneError::PickSpaceExhausted {
+                count: MAX_FACE_ORDINAL as usize + 1
+            })
+        );
+    }
+
+    #[test]
+    fn face_range_backstop_admits_only_real_triangles() {
+        // A 12-triangle mesh: ordinals 0–11 resolve, 12+ deselect (MSAA
+        // seam blends decoding past the mesh must never mint identities).
+        assert!(face_in_range(0, 12));
+        assert!(face_in_range(11, 12));
+        assert!(!face_in_range(12, 12));
+        assert!(!face_in_range(u32::MAX, 12));
+        assert!(!face_in_range(0, 0));
     }
 
     #[test]
@@ -1176,7 +1265,14 @@ mod tests {
         let offset = ((height / 2 * width + width / 2) * 4) as usize;
         for _ in 0..30 {
             world.update();
-            let frame = world.render_frame().unwrap();
+            // Same discipline as the production readiness loop: a missing
+            // GPU image means "not uploaded yet" (wait), anything else
+            // failing is loud, never swallowed.
+            let frame = match world.render_frame() {
+                Ok(frame) => frame,
+                Err(SceneError::NoGpuImage) => continue,
+                Err(error) => panic!("beauty warmup copy-back failed: {error}"),
+            };
             if frame.pixels().get(offset..offset + 4) != Some(&BEAUTY_CLEAR_BG[..]) {
                 return frame;
             }
