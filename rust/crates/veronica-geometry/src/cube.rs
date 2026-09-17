@@ -50,8 +50,13 @@ impl CubeParams {
     /// [`ParamValue::Vec3`].
     pub fn parse(parameters: &BTreeMap<String, ParamValue>) -> Result<Self, CookError> {
         Ok(Self {
-            size: take_vec3(parameters, CUBE_SIZE_KEY, DEFAULT_CUBE_SIZE)?,
-            center: take_vec3(parameters, CUBE_CENTER_KEY, DEFAULT_CUBE_CENTER)?,
+            size: take_vec3(parameters, CUBE_SIZE_KEY, DEFAULT_CUBE_SIZE, EXPECTED_VEC3)?,
+            center: take_vec3(
+                parameters,
+                CUBE_CENTER_KEY,
+                DEFAULT_CUBE_CENTER,
+                EXPECTED_VEC3,
+            )?,
         })
     }
 }
@@ -68,17 +73,22 @@ impl Default for CubeParams {
 
 /// Read one optional triple, defaulting when absent and failing loudly when
 /// present-but-mistyped (never coerce, never silently substitute).
-fn take_vec3(
+///
+/// Shared with the sphere's center key: one helper, one verbatim-carry
+/// semantic for every vec3 in the crate. Each caller names its own
+/// expected shape so errors point at the offending key's domain.
+pub(crate) fn take_vec3(
     parameters: &BTreeMap<String, ParamValue>,
     key: &str,
     default: [f64; 3],
+    expected: &'static str,
 ) -> Result<[f64; 3], CookError> {
     match parameters.get(key) {
         None => Ok(default),
         Some(ParamValue::Vec3(triple)) => Ok(*triple),
         Some(_) => Err(CookError::InvalidParameter {
             key: key.to_owned(),
-            expected: EXPECTED_VEC3,
+            expected,
         }),
     }
 }
