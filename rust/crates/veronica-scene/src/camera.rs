@@ -23,7 +23,9 @@ use bevy_transform::prelude::Transform;
 
 use super::{DemoCamera, SceneError, SceneWorld};
 use crate::gpu;
-use crate::render::f32_from_extent;
+use crate::render::{
+    OracleCamera, RenderFrame, f32_from_extent, render_demo_frame_with_camera, spawn_elevation,
+};
 
 /// Turntable speed: radians of azimuth/elevation per pixel of drag.
 const ORBIT_SPEED_RAD_PER_PX: f32 = 0.005;
@@ -100,6 +102,17 @@ pub(crate) fn fit_distance(radius: f32, fov_y: f32, aspect: f32) -> f32 {
     let half_horizontal = (half_vertical.tan() * aspect).atan();
     let half_min = half_vertical.min(half_horizontal);
     radius.max(1e-4) / half_min.sin() * FRAME_MARGIN
+}
+
+/// Elevation of `offset` above the pivot plane, in radians.
+///
+/// Degenerate offsets (camera sitting on the pivot — the orbit op no-ops
+/// those instead of producing them) read as level rather than NaN.
+#[must_use]
+pub(crate) fn elevation_of(offset: Vec3, distance: f32) -> f32 {
+    (offset.y / distance.max(f32::EPSILON))
+        .clamp(-1.0, 1.0)
+        .asin()
 }
 
 impl SceneWorld {
@@ -331,6 +344,40 @@ impl SceneWorld {
         transform.look_at(center, Vec3::Y);
         world.resource_mut::<ViewportPivot>().0 = center;
         Ok(())
+    }
+
+    /// Render the CPU oracle through the live viewport camera.
+    ///
+    /// Same cube as [`render_demo_frame`](crate::render::render_demo_frame),
+    /// but the projection derives from the camera the orbit/pan/dolly ops
+    /// move: distance drives the scale, orbit the view angles, the pivot's
+    /// camera-space position the screen center — so every nav op is
+    /// pixel-observable without warming up the GPU path. Reads the turntable
+    /// angle and viewport extents live, so consecutive ticks still differ.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SceneError::NoViewportCamera`] when the demo camera is gone.
+    pub fn render_camera_frame(&mut self) -> Result<RenderFrame, SceneError> {
+        let camera = self.viewport_camera()?;
+        let world = self.app.world();
+        let transform = world
+            .get::<Transform>(camera)
+            .ok_or(SceneError::NoViewportCamera)?;
+        let pivot = self.pivot();
+        let offset = transform.translation - pivot;
+        let distance = offset.length();
+        let view = OracleCamera {
+            distance,
+            // The spawn pose sits on +Z, so its azimuth is exactly 0 and the
+            // live azimuth already is the orbit delta.
+            yaw_offset: offset.x.atan2(offset.z),
+            pitch_offset: elevation_of(offset, distance) - spawn_elevation(),
+            pan_right: pivot.dot(transform.rotation * Vec3::X),
+            pan_up: pivot.dot(transform.rotation * Vec3::Y),
+        };
+        let (width, height) = self.viewport_size();
+        render_demo_frame_with_camera(self.spin_angle(), &view, width, height)
     }
 }
 
