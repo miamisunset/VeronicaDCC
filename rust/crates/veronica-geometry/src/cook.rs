@@ -3,14 +3,14 @@
 use veronica_core::NodeId;
 use veronica_graph::{OperatorGraph, OperatorKind};
 
-use crate::{CookError, CubeParams, GeometryPayload, ImplicitGeometry};
+use crate::{CookError, CubeParams, GeometryPayload, ImplicitGeometry, SphereParams};
 
 /// Cook every geometry operator in dependency-first evaluation order.
 ///
 /// Returns `(operator, payload)` pairs in the order they were cooked, so
 /// callers observe topological order without re-sorting. Containers
 /// organize subnetworks and produce nothing: they are skipped by design,
-/// not by omission. Every cube becomes
+/// not by omission. Every cube or sphere becomes
 /// [`GeometryPayload::Implicit`] carrying its parsed parameters.
 ///
 /// The `match` on [`OperatorKind`] is exhaustive on purpose: adding an
@@ -22,7 +22,8 @@ use crate::{CookError, CubeParams, GeometryPayload, ImplicitGeometry};
 /// Returns [`CookError::Cycle`] when the graph has no evaluation order,
 /// [`CookError::UnknownOperator`] when evaluation order names an operator
 /// the graph does not hold (broken invariant, never user input), or
-/// [`CookError::InvalidParameter`] when a cube's parameters are mistyped.
+/// [`CookError::InvalidParameter`] when a cube's or sphere's parameters
+/// are mistyped or out of domain.
 #[must_use = "cooked payloads are returned, not applied — feed them to realization or the handoff"]
 pub fn cook(graph: &OperatorGraph) -> Result<Vec<(NodeId, GeometryPayload)>, CookError> {
     let order = graph
@@ -41,6 +42,13 @@ pub fn cook(graph: &OperatorGraph) -> Result<Vec<(NodeId, GeometryPayload)>, Coo
                 cooked.push((
                     id,
                     GeometryPayload::Implicit(ImplicitGeometry::Cube(params)),
+                ));
+            }
+            OperatorKind::Sphere => {
+                let params = SphereParams::parse(&operator.parameters)?;
+                cooked.push((
+                    id,
+                    GeometryPayload::Implicit(ImplicitGeometry::Sphere(params)),
                 ));
             }
         }
