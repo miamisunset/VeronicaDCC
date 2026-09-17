@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::CubeParams;
+use crate::{CubeParams, SphereParams};
 
 /// Standard per-vertex normal channel in the attribute map.
 pub const PRIMVAR_NORMAL: &str = "normal";
@@ -30,6 +30,11 @@ pub enum GeometryPayload {
 pub enum ImplicitGeometry {
     /// A cube described by size and center; realization is downstream's job.
     Cube(CubeParams),
+    /// A sphere described by resolution, radius, and center; realization is
+    /// downstream's job. No operator cooks this yet (graph kind lands in
+    /// the S2 slice); the variant exists so realization and its contract
+    /// tests pin the ordinal layout first.
+    Sphere(SphereParams),
 }
 
 /// Realized mesh in pipeline precision: positions plus indexed topology and

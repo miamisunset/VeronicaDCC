@@ -17,6 +17,7 @@ mod error;
 mod face_id;
 mod payload;
 mod realize;
+mod sphere;
 
 pub use cook::cook;
 pub use cube::{
@@ -31,3 +32,8 @@ pub use payload::{
     AttributeData, EvaluatedMesh, GeometryPayload, ImplicitGeometry, PRIMVAR_NORMAL, PRIMVAR_UV,
 };
 pub use realize::realize;
+pub use sphere::{
+    DEFAULT_SPHERE_CENTER, DEFAULT_SPHERE_RADIUS, DEFAULT_SPHERE_RINGS, DEFAULT_SPHERE_SEGMENTS,
+    MAX_SPHERE_RINGS, MAX_SPHERE_SEGMENTS, MIN_SPHERE_RINGS, MIN_SPHERE_SEGMENTS,
+    SPHERE_CENTER_KEY, SPHERE_RADIUS_KEY, SPHERE_RINGS_KEY, SPHERE_SEGMENTS_KEY, SphereParams,
+};
