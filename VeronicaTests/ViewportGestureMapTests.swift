@@ -143,8 +143,23 @@ struct ViewportGestureMapTests {
         let cursor = CursorNDC(x: 0, y: 0)
         // Plain two-finger-drag ≡ Command+left-drag pan.
         #expect(
-            ViewportGestureMap.trackpadDragAction(dx: 8, dy: -5, option: false, cursor: cursor)
+            ViewportGestureMap.trackpadDragAction(dx: 8, dy: -5, option: false, inverted: false, cursor: cursor)
                 == .panDelta(dx: 8, dy: -5)
+        )
+    }
+
+    @Test func trackpadDragNormalizesNaturalScrollSense() {
+        let cursor = CursorNDC(x: 0, y: 0)
+        // Scroll-sense deltas under natural scrolling are inverted vs finger
+        // motion: fingers moving (-10, 6) arrive as (10, -6).
+        #expect(
+            ViewportGestureMap.trackpadDragAction(dx: 10, dy: -6, option: false, inverted: true, cursor: cursor)
+                == .panDelta(dx: -10, dy: 6)
+        )
+        // Option orbits through the same normalization.
+        #expect(
+            ViewportGestureMap.trackpadDragAction(dx: 10, dy: -6, option: true, inverted: true, cursor: cursor)
+                == .orbitDelta(dx: -10, dy: 6)
         )
     }
 
@@ -152,7 +167,7 @@ struct ViewportGestureMapTests {
         let cursor = CursorNDC(x: 0.1, y: 0.2)
         // Option+two-finger-drag ≡ plain left-drag orbit.
         #expect(
-            ViewportGestureMap.trackpadDragAction(dx: 8, dy: -5, option: true, cursor: cursor)
+            ViewportGestureMap.trackpadDragAction(dx: 8, dy: -5, option: true, inverted: false, cursor: cursor)
                 == .orbitDelta(dx: 8, dy: -5)
         )
     }

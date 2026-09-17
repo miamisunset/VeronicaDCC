@@ -108,17 +108,21 @@ nonisolated enum ViewportGestureMap {
         option ? .orbit : .pan
     }
 
-    /// Action for one trackpad two-finger-drag step with finger-motion pixel
-    /// deltas (already negated from `scrollingDeltaX/Y`, whose scroll sense
-    /// is inverted vs finger motion). Flows through `dragAction`, so the
-    /// gesture equals the matching mouse drag.
+    /// Action for one trackpad two-finger-drag step with scroll-sense pixel
+    /// deltas (`scrollingDeltaX/Y`). `inverted` is the event's
+    /// `isDirectionInvertedFromDevice` (true under natural scrolling, whose
+    /// scroll sense is inverted vs finger motion); the deltas are normalized
+    /// to finger-motion pixels so the gesture equals the matching mouse drag.
+    /// Flows through `dragAction`.
     static func trackpadDragAction(
         dx: Double,
         dy: Double,
         option: Bool,
+        inverted: Bool,
         cursor: CursorNDC
     ) -> ViewportFeature.Action {
-        dragAction(kind: trackpadDragKind(option: option), dx: dx, dy: dy, cursor: cursor)
+        let sign = inverted ? -1.0 : 1.0
+        return dragAction(kind: trackpadDragKind(option: option), dx: sign * dx, dy: sign * dy, cursor: cursor)
     }
 
     /// Action for one pinch step: exponential dolly pivoted on the cursor,

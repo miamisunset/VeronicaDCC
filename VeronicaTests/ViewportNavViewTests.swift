@@ -158,10 +158,11 @@ struct ViewportNavViewTests {
     @Test func preciseTrackpadDragPans() {
         let (nav, recorded) = makeView()
         nav.frame = NSRect(x: 0, y: 0, width: 400, height: 300)
-        // Scroll-sense deltas (inverted vs finger motion): the view negates
-        // to finger-motion pixels, so this is fingers moving (-10, 6).
+        // Synthesized events report non-inverted scroll sense, so deltas
+        // pass straight through to finger-motion pixels here; the inverted
+        // (natural scrolling) path is covered in ViewportGestureMapTests.
         nav.scrollWheel(with: wheelEvent(deltaX: 10, deltaY: -6, precise: true, scrollPhase: .changed))
-        #expect(recorded.actions == [.panDelta(dx: -10, dy: 6)])
+        #expect(recorded.actions == [.panDelta(dx: 10, dy: -6)])
     }
 
     @Test func optionPreciseTrackpadDragOrbits() {
@@ -170,7 +171,7 @@ struct ViewportNavViewTests {
         nav.scrollWheel(
             with: wheelEvent(deltaX: 0, deltaY: 8, precise: true, modifiers: .maskAlternate, scrollPhase: .changed)
         )
-        #expect(recorded.actions == [.orbitDelta(dx: 0, dy: -8)])
+        #expect(recorded.actions == [.orbitDelta(dx: 0, dy: 8)])
     }
 
     @Test func trackpadMomentumScrollIsIgnored() {

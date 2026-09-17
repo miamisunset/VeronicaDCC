@@ -161,19 +161,21 @@ final class ViewportNavView: MTKView {
     /// (Option: orbit); momentum after the fingers lift is ignored so the
     /// camera stops dead instead of drifting.
     ///
-    /// `scrollingDelta*` carry scroll sense — inverted vs finger motion under
-    /// natural scrolling — so they are negated to match drag feel: finger
-    /// motion here equals cursor motion in the matching mouse drag.
+    /// `scrollingDelta*` carry scroll sense, which follows the user's
+    /// natural-scrolling setting; `isDirectionInvertedFromDevice` normalizes
+    /// them to finger-motion pixels (matching drag feel: finger motion here
+    /// equals cursor motion in the matching mouse drag, in either setting).
     private func trackpadScroll(_ event: NSEvent) {
         guard !event.phase.isEmpty else { return }
-        let dx = -Double(event.scrollingDeltaX)
-        let dy = -Double(event.scrollingDeltaY)
+        let dx = Double(event.scrollingDeltaX)
+        let dy = Double(event.scrollingDeltaY)
         guard dx != 0 || dy != 0 else { return }
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         onAction?(ViewportGestureMap.trackpadDragAction(
             dx: dx,
             dy: dy,
             option: flags.contains(.option),
+            inverted: event.isDirectionInvertedFromDevice,
             cursor: cursorNDC(event)
         ))
     }
