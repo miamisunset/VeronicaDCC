@@ -85,6 +85,12 @@ nonisolated struct EngineClient: Sendable {
     /// Set one string parameter on a known operator id. The `"name"` key
     /// carries rename semantics (trimmed, blank rejected, old value kept).
     var setParameter: @Sendable (UInt64, String, String) async throws(GraphEngineError) -> Void
+    /// Set one typed parameter value on a known operator id. Numeric
+    /// commits travel here (issue #54): the value crosses as its
+    /// `ParamValue` wire JSON, so the cook sees exactly what a restore
+    /// would have written — no read-modify-write, no interleave window.
+    /// The `"name"` key is reserved; Rust rejects it.
+    var setParameterTyped: @Sendable (UInt64, String, ParameterValue) async throws(GraphEngineError) -> Void
     /// Delete an operator id, cascading its subtree.
     var deleteOperator: @Sendable (UInt64) async throws(GraphEngineError) -> Void
     /// Fetch the whole-graph mirror. Owns the allocate/free boundary — the
@@ -138,6 +144,12 @@ extension EngineClient: DependencyKey {
                 }
                 return try await EngineBridge.setParameter(id: id, key: key, value: value)
             },
+            setParameterTyped: { (id: UInt64, key: String, value: ParameterValue) async throws(GraphEngineError) in
+                if GraphLaunchOptions.isMockEngineEnabled {
+                    return try await mock.setParameterTyped(id: id, key: key, value: value)
+                }
+                return try await EngineBridge.setParameterTyped(id: id, key: key, value: value)
+            },
             deleteOperator: { (id: UInt64) async throws(GraphEngineError) in
                 if GraphLaunchOptions.isMockEngineEnabled {
                     return try await mock.delete(id: id)
@@ -179,6 +191,7 @@ extension EngineClient: DependencyKey {
         moveOperator: { _, _ in },
         renameOperator: { _, _ in },
         setParameter: { _, _, _ in },
+        setParameterTyped: { _, _, _ in },
         deleteOperator: { _ in },
         requestSnapshot: { GraphSnapshot(operators: []) },
         restoreSnapshot: { _ in },

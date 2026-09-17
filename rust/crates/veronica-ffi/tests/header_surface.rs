@@ -6,7 +6,7 @@
 //! this test fails the gate if a Rust export lacks a header declaration.
 
 /// Every symbol the Swift track links against must be declared.
-const EXPORTS: [&str; 17] = [
+const EXPORTS: [&str; 18] = [
     "vrn_context_create",
     "vrn_context_destroy",
     "vrn_validate_mesh",
@@ -20,6 +20,7 @@ const EXPORTS: [&str; 17] = [
     "vrn_graph_move_operator",
     "vrn_graph_rename_operator",
     "vrn_graph_set_parameter",
+    "vrn_graph_set_parameter_typed",
     "vrn_graph_delete_operator",
     "vrn_graph_snapshot",
     "vrn_graph_restore",

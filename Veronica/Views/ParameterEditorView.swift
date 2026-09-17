@@ -9,9 +9,9 @@ import SwiftUI
 /// `.float`/`.vec3` parameter (schema defaults cover absent keys, so a fresh
 /// cube's `size`/`center` stay editable), and read-only rows for the rest.
 /// Name commits travel as `setParameter(id, "name", draft)`; numeric commits
-/// travel as snapshot restores carrying typed values (`setParameter` stores
-/// `Text` verbatim, which the cook would reject). Failures surface in-pane
-/// via `lastError` so a failed commit is never silent.
+/// travel as `setParameterTyped` carrying the `ParamValue` wire value (the
+/// text setter stores `Text` verbatim, which the cook would reject).
+/// Failures surface in-pane via `lastError` so a failed commit is never silent.
 struct ParameterEditorView: View {
     /// Shared feature store.
     @Bindable var store: StoreOf<NodeGraphFeature>
