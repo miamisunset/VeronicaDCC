@@ -16,6 +16,8 @@
 
 use crate::SceneError;
 
+use super::{DEMO_CAMERA_DISTANCE, DEMO_CAMERA_HEIGHT};
+
 /// Fixed initial frame width in pixels (see [`MAX_VIEWPORT_EDGE`]).
 pub const FRAME_WIDTH: u32 = 512;
 /// Fixed initial frame height in pixels (see [`MAX_VIEWPORT_EDGE`]).
@@ -111,18 +113,161 @@ pub fn render_demo_frame(
     Ok(rasterize_cube(angle_radians, width, height))
 }
 
+/// Live viewport camera reduced to what the demo oracle consumes.
+///
+/// Built by [`SceneWorld::render_camera_frame`](crate::SceneWorld::render_camera_frame)
+/// from the camera [`Transform`](bevy_transform::prelude::Transform) the #40
+/// ops move plus the [`ViewportPivot`](crate::SceneWorld::pivot): distance
+/// drives the projection scale, orbit deltas the view angles, the pivot's
+/// camera-space position the screen center — so every nav op is
+/// pixel-observable in the oracle without warming up the GPU path.
+#[derive(Debug, Clone, Copy)]
+pub struct OracleCamera {
+    /// Camera-to-pivot distance in world units.
+    pub distance: f32,
+    /// Orbit azimuth delta from the spawn pose, in radians.
+    pub yaw_offset: f32,
+    /// Orbit elevation delta from the spawn pose, in radians.
+    pub pitch_offset: f32,
+    /// Pivot position along the camera-right axis, in world units.
+    pub pan_right: f32,
+    /// Pivot position along the camera-up axis, in world units.
+    pub pan_up: f32,
+}
+
+impl OracleCamera {
+    /// Spawn-pose view: [`render_demo_frame_with_camera`] with this input
+    /// reproduces [`render_demo_frame`] byte-for-byte.
+    #[must_use]
+    pub fn spawn_default() -> Self {
+        Self {
+            distance: spawn_distance(),
+            yaw_offset: 0.0,
+            pitch_offset: 0.0,
+            pan_right: 0.0,
+            pan_up: 0.0,
+        }
+    }
+}
+
+impl Default for OracleCamera {
+    fn default() -> Self {
+        Self::spawn_default()
+    }
+}
+
+/// Pixel-space projection resolved from an [`OracleCamera`]: what the
+/// rasterizer consumes per frame.
+#[derive(Debug, Clone, Copy)]
+pub struct OracleProjection {
+    /// World-units-to-pixels scale.
+    pub scale: f32,
+    /// Screen center x in pixels (pan-shifted).
+    pub center_x: f32,
+    /// Screen center y in pixels (pan-shifted).
+    pub center_y: f32,
+    /// Extra Y rotation from orbit, in radians.
+    pub yaw_offset: f32,
+    /// Absolute X tilt: [`TILT_X`] plus the orbit elevation delta, in radians.
+    pub tilt: f32,
+}
+
+/// Resolve camera inputs to a pixel-space projection at `width` x `height`.
+///
+/// Pure and total: degenerate distances (zero, negative, non-finite — never
+/// produced by the camera ops, which no-op those inputs) clamp to a tiny
+/// positive range instead of dividing by zero or emitting NaN pixels.
+#[must_use]
+pub fn oracle_projection(camera: &OracleCamera, width: u32, height: u32) -> OracleProjection {
+    let distance = if camera.distance.is_finite() && camera.distance > 0.0 {
+        camera.distance
+    } else {
+        f32::EPSILON
+    };
+    // Calibrated so the spawn pose reproduces the legacy fixed scale:
+    // `spawn_distance() / distance` is exactly 1.0 there, and `x * 1.0 == x`.
+    let scale = f32_from_extent(width.min(height)) * 0.30 * (spawn_distance() / distance);
+    OracleProjection {
+        scale,
+        center_x: f32_from_extent(width) * 0.5 - camera.pan_right * scale,
+        center_y: f32_from_extent(height) * 0.5 + camera.pan_up * scale,
+        yaw_offset: camera.yaw_offset,
+        tilt: TILT_X + camera.pitch_offset,
+    }
+}
+
+/// Render the demo scene at `angle_radians` through the live `camera`.
+///
+/// Same cube and gradient as [`render_demo_frame`], but the projection
+/// derives from the viewport camera via [`oracle_projection`]: dolly changes
+/// the scale, orbit the view angles, pan the screen center. Deterministic:
+/// the same angle and camera always yield the same bytes.
+///
+/// # Errors
+///
+/// Returns [`SceneError::InvalidFrameSize`] when `width` or `height` is zero.
+pub fn render_demo_frame_with_camera(
+    angle_radians: f32,
+    camera: &OracleCamera,
+    width: u32,
+    height: u32,
+) -> Result<RenderFrame, SceneError> {
+    if width == 0 || height == 0 {
+        return Err(SceneError::InvalidFrameSize { width, height });
+    }
+    Ok(rasterize_cube_with(
+        angle_radians,
+        &oracle_projection(camera, width, height),
+        width,
+        height,
+    ))
+}
+
+/// Spawn-pose camera-to-pivot distance, derived from the demo spawn constants
+/// so the oracle calibration tracks them (single source of truth).
+pub(crate) fn spawn_distance() -> f32 {
+    DEMO_CAMERA_DISTANCE.hypot(DEMO_CAMERA_HEIGHT)
+}
+
+/// Spawn-pose camera elevation, from the same constants.
+pub(crate) fn spawn_elevation() -> f32 {
+    (DEMO_CAMERA_HEIGHT / DEMO_CAMERA_DISTANCE).atan()
+}
+
 /// Infallible core: `width` and `height` are nonzero by construction
 /// (checked by [`render_demo_frame`]).
 fn rasterize_cube(angle: f32, width: u32, height: u32) -> RenderFrame {
+    // Legacy fixed projection, arithmetic preserved exactly so the spawn
+    // pose (and every long-pinned threshold measured against it) never
+    // drifts: `angle + 0.0 == angle`, `TILT_X + 0.0 == TILT_X`.
+    let projection = OracleProjection {
+        scale: f32_from_extent(width.min(height)) * 0.30,
+        center_x: f32_from_extent(width) * 0.5,
+        center_y: f32_from_extent(height) * 0.5,
+        yaw_offset: 0.0,
+        tilt: TILT_X,
+    };
+    rasterize_cube_with(angle, &projection, width, height)
+}
+
+/// Infallible core: `width` and `height` are nonzero by construction
+/// (checked by [`render_demo_frame`] and [`render_demo_frame_with_camera`]).
+fn rasterize_cube_with(
+    angle: f32,
+    projection: &OracleProjection,
+    width: u32,
+    height: u32,
+) -> RenderFrame {
     let w = width as usize;
     let h = height as usize;
     let mut pixels = vec![0u8; w * h * FRAME_BYTES_PER_PIXEL];
     paint_background(&mut pixels, w, h);
 
-    // Unit cube corners, rotated around Y by the turntable angle plus a
-    // fixed X tilt so top faces stay visible.
-    let (sin_y, cos_y) = angle.sin_cos();
-    let (sin_x, cos_x) = TILT_X.sin_cos();
+    // Unit cube corners, rotated around Y by the turntable angle plus the
+    // orbit yaw, tilted around X by the orbit-aware tilt so top faces stay
+    // visible.
+    let (sin_y, cos_y) = (angle + projection.yaw_offset).sin_cos();
+    let (sin_x, cos_x) = projection.tilt.sin_cos();
     let mut projected = [[0.0f32; 2]; 8];
     let mut depths = [0.0f32; 8];
     for (index, corner) in CUBE_CORNERS.iter().enumerate() {
@@ -132,10 +277,10 @@ fn rasterize_cube(angle: f32, width: u32, height: u32) -> RenderFrame {
         let y1 = cos_x * y0 - sin_x * z1;
         let z2 = sin_x * y0 + cos_x * z1;
         depths[index] = z2;
-        let scale = f32_from_extent(width.min(height)) * 0.30;
+        let scale = projection.scale;
         projected[index] = [
-            f32_from_extent(width) * 0.5 + x1 * scale,
-            f32_from_extent(height) * 0.5 - y1 * scale,
+            projection.center_x + x1 * scale,
+            projection.center_y - y1 * scale,
         ];
     }
 
@@ -400,5 +545,135 @@ mod tests {
         assert_eq!(pixel[3], 255);
         // Lit cube face is far brighter than the dark background gradient.
         assert!(pixel[0] > 40 || pixel[1] > 40 || pixel[2] > 40);
+    }
+
+    #[test]
+    fn spawn_default_reproduces_legacy_bytes() {
+        let legacy = render_demo_frame(0.35, 128, 96).unwrap();
+        let through_camera =
+            render_demo_frame_with_camera(0.35, &OracleCamera::spawn_default(), 128, 96).unwrap();
+        assert_eq!(legacy.pixels(), through_camera.pixels());
+    }
+
+    #[test]
+    fn with_camera_zero_extents_are_an_error() {
+        assert!(matches!(
+            render_demo_frame_with_camera(0.0, &OracleCamera::spawn_default(), 0, FRAME_HEIGHT),
+            Err(SceneError::InvalidFrameSize { width: 0, .. })
+        ));
+        assert!(matches!(
+            render_demo_frame_with_camera(0.0, &OracleCamera::spawn_default(), FRAME_WIDTH, 0),
+            Err(SceneError::InvalidFrameSize { height: 0, .. })
+        ));
+    }
+
+    #[test]
+    fn halving_distance_doubles_projection_scale() {
+        let near = oracle_projection(
+            &OracleCamera {
+                distance: spawn_distance() * 0.5,
+                ..OracleCamera::spawn_default()
+            },
+            128,
+            96,
+        );
+        let far = oracle_projection(&OracleCamera::spawn_default(), 128, 96);
+        assert!(
+            (near.scale - far.scale * 2.0).abs() < 1e-3,
+            "a 2x dolly-in must double the scale, went {} -> {}",
+            far.scale,
+            near.scale
+        );
+    }
+
+    #[test]
+    fn degenerate_distances_clamp_to_finite_scale() {
+        for distance in [0.0, -2.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let projection = oracle_projection(
+                &OracleCamera {
+                    distance,
+                    ..OracleCamera::spawn_default()
+                },
+                128,
+                96,
+            );
+            assert!(
+                projection.scale.is_finite() && projection.scale > 0.0,
+                "distance {distance} must clamp to a finite positive scale"
+            );
+            assert!(
+                projection.center_x.is_finite() && projection.center_y.is_finite(),
+                "distance {distance} must keep a finite center"
+            );
+        }
+    }
+
+    #[test]
+    fn distance_change_moves_oracle_pixels() {
+        let spawn = OracleCamera::spawn_default();
+        let before = render_demo_frame_with_camera(0.35, &spawn, 128, 96).unwrap();
+        let after = render_demo_frame_with_camera(
+            0.35,
+            &OracleCamera {
+                distance: spawn.distance * 0.5,
+                ..spawn
+            },
+            128,
+            96,
+        )
+        .unwrap();
+        assert_ne!(before.pixels(), after.pixels());
+    }
+
+    #[test]
+    fn yaw_offset_moves_oracle_pixels() {
+        let spawn = OracleCamera::spawn_default();
+        let before = render_demo_frame_with_camera(0.35, &spawn, 128, 96).unwrap();
+        let after = render_demo_frame_with_camera(
+            0.35,
+            &OracleCamera {
+                yaw_offset: 0.6,
+                ..spawn
+            },
+            128,
+            96,
+        )
+        .unwrap();
+        assert_ne!(before.pixels(), after.pixels());
+    }
+
+    #[test]
+    fn pitch_offset_moves_oracle_pixels() {
+        let spawn = OracleCamera::spawn_default();
+        let before = render_demo_frame_with_camera(0.35, &spawn, 128, 96).unwrap();
+        let after = render_demo_frame_with_camera(
+            0.35,
+            &OracleCamera {
+                pitch_offset: 0.2,
+                ..spawn
+            },
+            128,
+            96,
+        )
+        .unwrap();
+        assert_ne!(before.pixels(), after.pixels());
+    }
+
+    #[test]
+    fn pan_shift_moves_oracle_pixels() {
+        let spawn = OracleCamera::spawn_default();
+        let before = render_demo_frame_with_camera(0.35, &spawn, 128, 96).unwrap();
+        let after = render_demo_frame_with_camera(
+            0.35,
+            &OracleCamera {
+                pan_right: 0.75,
+                pan_up: -0.5,
+                ..spawn
+            },
+            128,
+            96,
+        )
+        .unwrap();
+        assert_ne!(before.pixels(), after.pixels());
     }
 }

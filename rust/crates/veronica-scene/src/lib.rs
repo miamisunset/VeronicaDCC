@@ -36,8 +36,9 @@ mod render;
 pub use cook::{CookedMesh, SourceOperator};
 pub use mesh::render_mesh_from_evaluated;
 pub use render::{
-    FRAME_BYTES_PER_PIXEL, FRAME_HEIGHT, FRAME_WIDTH, MAX_VIEWPORT_EDGE, RenderFrame,
-    render_demo_frame,
+    FRAME_BYTES_PER_PIXEL, FRAME_HEIGHT, FRAME_WIDTH, MAX_VIEWPORT_EDGE, OracleCamera,
+    OracleProjection, RenderFrame, oracle_projection, render_demo_frame,
+    render_demo_frame_with_camera,
 };
 
 /// Errors for scene operations.
