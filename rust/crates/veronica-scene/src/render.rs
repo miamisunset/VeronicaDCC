@@ -265,8 +265,10 @@ fn rasterize_cube_with(
 
     // Unit cube corners, rotated around Y by the turntable angle plus the
     // orbit yaw, tilted around X by the orbit-aware tilt so top faces stay
-    // visible.
+    // visible. Shading uses the object angle alone: orbiting the camera
+    // changes which faces are visible, not how the fixed light hits them.
     let (sin_y, cos_y) = (angle + projection.yaw_offset).sin_cos();
+    let (obj_sin_y, obj_cos_y) = angle.sin_cos();
     let (sin_x, cos_x) = projection.tilt.sin_cos();
     let mut projected = [[0.0f32; 2]; 8];
     let mut depths = [0.0f32; 8];
@@ -296,7 +298,7 @@ fn rasterize_cube_with(
     faces.sort_by(|a, b| a.1.total_cmp(&b.1));
 
     for (face, _) in faces {
-        let shade = shade_for_face(face, sin_y, cos_y);
+        let shade = shade_for_face(face, obj_sin_y, obj_cos_y);
         let quad = CUBE_QUADS[face];
         let corners = [
             projected[quad[0]],
