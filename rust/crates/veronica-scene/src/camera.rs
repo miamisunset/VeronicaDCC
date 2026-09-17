@@ -21,11 +21,9 @@ use bevy_math::prelude::{Mat4, Vec3};
 use bevy_mesh::{Mesh, Mesh3d};
 use bevy_transform::prelude::Transform;
 
-use super::{DemoCamera, SceneError, SceneWorld};
+use super::{SceneError, SceneWorld, ViewportCamera};
 use crate::gpu;
-use crate::render::{
-    OracleCamera, RenderFrame, f32_from_extent, render_demo_frame_with_camera, spawn_elevation,
-};
+use crate::render::f32_from_extent;
 
 /// Turntable speed: radians of azimuth/elevation per pixel of drag.
 const ORBIT_SPEED_RAD_PER_PX: f32 = 0.005;
@@ -104,17 +102,6 @@ pub(crate) fn fit_distance(radius: f32, fov_y: f32, aspect: f32) -> f32 {
     radius.max(1e-4) / half_min.sin() * FRAME_MARGIN
 }
 
-/// Elevation of `offset` above the pivot plane, in radians.
-///
-/// Degenerate offsets (camera sitting on the pivot — the orbit op no-ops
-/// those instead of producing them) read as level rather than NaN.
-#[must_use]
-pub(crate) fn elevation_of(offset: Vec3, distance: f32) -> f32 {
-    (offset.y / distance.max(f32::EPSILON))
-        .clamp(-1.0, 1.0)
-        .asin()
-}
-
 impl SceneWorld {
     /// Axis-aligned bounds of all meshed entities in world space, or `None`
     /// when no mesh contributes a vertex.
@@ -153,7 +140,7 @@ impl SceneWorld {
         extents.map(|(min, max)| Aabb3d::from_min_max(min, max))
     }
 
-    /// Live pivot point. `Vec3::ZERO` before the demo scene spawns.
+    /// Live pivot point. `Vec3::ZERO` before the base scene spawns.
     #[must_use]
     pub fn pivot(&self) -> Vec3 {
         self.app
@@ -162,13 +149,13 @@ impl SceneWorld {
             .map_or(Vec3::ZERO, |pivot| pivot.0)
     }
 
-    /// Demo-camera translation in world units, or `None` when the camera is
+    /// Viewport-camera translation in world units, or `None` when the camera is
     /// gone. The FFI navigate tests observe motion through this; future
     /// Swift readouts (framing overlays, cursor mapping) can reuse it.
     #[must_use]
     pub fn camera_translation(&mut self) -> Option<[f32; 3]> {
         let world = self.app.world_mut();
-        let mut cameras = world.query_filtered::<&Transform, With<DemoCamera>>();
+        let mut cameras = world.query_filtered::<&Transform, With<ViewportCamera>>();
         cameras
             .iter(world)
             .next()
@@ -179,10 +166,10 @@ impl SceneWorld {
     ///
     /// # Errors
     ///
-    /// Returns [`SceneError::NoViewportCamera`] when the demo camera is gone.
+    /// Returns [`SceneError::NoViewportCamera`] when the viewport camera is gone.
     fn viewport_camera(&mut self) -> Result<Entity, SceneError> {
         let world = self.app.world_mut();
-        let mut cameras = world.query_filtered::<Entity, With<DemoCamera>>();
+        let mut cameras = world.query_filtered::<Entity, With<ViewportCamera>>();
         cameras
             .iter(world)
             .next()
@@ -196,7 +183,7 @@ impl SceneWorld {
     ///
     /// # Errors
     ///
-    /// Returns [`SceneError::NoViewportCamera`] when the demo camera is gone.
+    /// Returns [`SceneError::NoViewportCamera`] when the viewport camera is gone.
     pub fn orbit_camera(&mut self, horizontal_px: f32, vertical_px: f32) -> Result<(), SceneError> {
         if !horizontal_px.is_finite() || !vertical_px.is_finite() {
             return Ok(());
@@ -224,7 +211,7 @@ impl SceneWorld {
     ///
     /// # Errors
     ///
-    /// Returns [`SceneError::NoViewportCamera`] when the demo camera is gone.
+    /// Returns [`SceneError::NoViewportCamera`] when the viewport camera is gone.
     pub fn pan_camera(&mut self, horizontal_px: f32, vertical_px: f32) -> Result<(), SceneError> {
         if !horizontal_px.is_finite() || !vertical_px.is_finite() {
             return Ok(());
@@ -255,7 +242,7 @@ impl SceneWorld {
     ///
     /// # Errors
     ///
-    /// Returns [`SceneError::NoViewportCamera`] when the demo camera is gone.
+    /// Returns [`SceneError::NoViewportCamera`] when the viewport camera is gone.
     pub fn dolly_camera(
         &mut self,
         log_factor: f32,
@@ -318,7 +305,7 @@ impl SceneWorld {
     ///
     /// # Errors
     ///
-    /// Returns [`SceneError::NoViewportCamera`] when the demo camera is gone.
+    /// Returns [`SceneError::NoViewportCamera`] when the viewport camera is gone.
     pub fn frame_all(&mut self) -> Result<(), SceneError> {
         let camera = self.viewport_camera()?;
         let Some(bounds) = self.scene_bounds() else {
@@ -345,50 +332,34 @@ impl SceneWorld {
         world.resource_mut::<ViewportPivot>().0 = center;
         Ok(())
     }
-
-    /// Render the CPU oracle through the live viewport camera.
-    ///
-    /// Same cube as [`render_demo_frame`](crate::render::render_demo_frame),
-    /// but the projection derives from the camera the orbit/pan/dolly ops
-    /// move: distance drives the scale, orbit the view angles, the pivot's
-    /// camera-space position the screen center — so every nav op is
-    /// pixel-observable without warming up the GPU path. Reads the cube
-    /// angle and viewport extents live, so the oracle tracks ECS state.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SceneError::NoViewportCamera`] when the demo camera is gone.
-    pub fn render_camera_frame(&mut self) -> Result<RenderFrame, SceneError> {
-        let camera = self.viewport_camera()?;
-        let world = self.app.world();
-        let transform = world
-            .get::<Transform>(camera)
-            .ok_or(SceneError::NoViewportCamera)?;
-        let pivot = self.pivot();
-        let offset = transform.translation - pivot;
-        let distance = offset.length();
-        let view = OracleCamera {
-            distance,
-            // The spawn pose sits on +Z, so its azimuth is exactly 0 and the
-            // live azimuth already is the orbit delta.
-            yaw_offset: offset.x.atan2(offset.z),
-            pitch_offset: elevation_of(offset, distance) - spawn_elevation(),
-            pan_right: pivot.dot(transform.rotation * Vec3::X),
-            pan_up: pivot.dot(transform.rotation * Vec3::Y),
-        };
-        let (width, height) = self.viewport_size();
-        render_demo_frame_with_camera(self.cube_angle_y(), &view, width, height)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::render::{FRAME_HEIGHT, FRAME_WIDTH};
+    use bevy_asset::Assets;
+    use bevy_math::primitives::Cuboid;
+
+    /// Spawn a unit cuboid with an identity transform: direct [`Mesh3d`]
+    /// geometry for bounds and framing tests now that the scene ships
+    /// without built-in geometry.
+    fn spawn_test_box(world: &mut SceneWorld) -> Entity {
+        let handle = world
+            .app
+            .world_mut()
+            .resource_mut::<Assets<Mesh>>()
+            .add(Mesh::from(Cuboid::new(1.0, 1.0, 1.0)));
+        world
+            .app
+            .world_mut()
+            .spawn((Mesh3d(handle), Transform::default()))
+            .id()
+    }
 
     /// Camera-to-pivot distance in a spawned world.
     fn camera_distance(world: &mut SceneWorld) -> f32 {
-        let camera = world.viewport_camera().expect("demo camera exists");
+        let camera = world.viewport_camera().expect("viewport camera exists");
         let translation = world
             .app
             .world()
@@ -401,7 +372,7 @@ mod tests {
     #[test]
     fn orbit_keeps_distance_and_moves_position() {
         let mut world = SceneWorld::new_headless();
-        let _ = world.spawn_demo_scene();
+        let _ = world.spawn_base_scene();
         let before = camera_distance(&mut world);
         world.orbit_camera(120.0, 40.0).expect("orbit works");
         let after = camera_distance(&mut world);
@@ -409,7 +380,7 @@ mod tests {
             (before - after).abs() < 1e-4,
             "orbit must preserve radius, went {before} -> {after}"
         );
-        let camera = world.viewport_camera().expect("demo camera exists");
+        let camera = world.viewport_camera().expect("viewport camera exists");
         let translation = world
             .app
             .world()
@@ -425,7 +396,7 @@ mod tests {
     #[test]
     fn orbit_leaves_pivot_fixed() {
         let mut world = SceneWorld::new_headless();
-        let _ = world.spawn_demo_scene();
+        let _ = world.spawn_base_scene();
         let pivot = world.pivot();
         world.orbit_camera(200.0, 100.0).expect("orbit works");
         assert_eq!(world.pivot(), pivot);
@@ -434,10 +405,10 @@ mod tests {
     #[test]
     fn orbit_clamps_elevation_before_the_pole() {
         let mut world = SceneWorld::new_headless();
-        let _ = world.spawn_demo_scene();
+        let _ = world.spawn_base_scene();
         for vertical_px in [100_000.0, -100_000.0] {
             world.orbit_camera(0.0, vertical_px).expect("orbit works");
-            let camera = world.viewport_camera().expect("demo camera exists");
+            let camera = world.viewport_camera().expect("viewport camera exists");
             let translation = world
                 .app
                 .world()
@@ -477,8 +448,8 @@ mod tests {
     #[test]
     fn non_finite_deltas_are_noops() {
         let mut world = SceneWorld::new_headless();
-        let _ = world.spawn_demo_scene();
-        let camera = world.viewport_camera().expect("demo camera exists");
+        let _ = world.spawn_base_scene();
+        let camera = world.viewport_camera().expect("viewport camera exists");
         let before = *world
             .app
             .world()
@@ -503,8 +474,8 @@ mod tests {
     #[test]
     fn pan_translates_camera_and_pivot_rigidly() {
         let mut world = SceneWorld::new_headless();
-        let _ = world.spawn_demo_scene();
-        let camera = world.viewport_camera().expect("demo camera exists");
+        let _ = world.spawn_base_scene();
+        let camera = world.viewport_camera().expect("viewport camera exists");
         let before_t = world
             .app
             .world()
@@ -530,7 +501,7 @@ mod tests {
     #[test]
     fn centered_dolly_halves_distance_and_holds_pivot() {
         let mut world = SceneWorld::new_headless();
-        let _ = world.spawn_demo_scene();
+        let _ = world.spawn_base_scene();
         let before = camera_distance(&mut world);
         let pivot = world.pivot();
         world
@@ -551,7 +522,7 @@ mod tests {
     #[test]
     fn off_center_dolly_pulls_pivot_toward_cursor() {
         let mut world = SceneWorld::new_headless();
-        let _ = world.spawn_demo_scene();
+        let _ = world.spawn_base_scene();
         let pivot = world.pivot();
         world.dolly_camera(1.0, (1.0, 0.0)).expect("dolly works");
         assert!(
@@ -564,11 +535,12 @@ mod tests {
     #[test]
     fn dolly_clamps_to_scene_scale() {
         let mut world = SceneWorld::new_headless();
-        let _ = world.spawn_demo_scene();
+        let _ = world.spawn_base_scene();
+        let _ = spawn_test_box(&mut world);
         let diagonal = world
             .scene_bounds()
             .map(|bounds| (bounds.max - bounds.min).length())
-            .expect("demo cube has bounds");
+            .expect("test box has bounds");
         world.dolly_camera(100.0, (0.0, 0.0)).expect("dolly works");
         assert!((camera_distance(&mut world) - 0.05 * diagonal).abs() < 1e-3);
         world.dolly_camera(-200.0, (0.0, 0.0)).expect("dolly works");
@@ -576,11 +548,12 @@ mod tests {
     }
 
     #[test]
-    fn frame_all_fits_the_cube() {
+    fn frame_all_fits_spawned_geometry() {
         let mut world = SceneWorld::new_headless();
-        let _ = world.spawn_demo_scene();
+        let _ = world.spawn_base_scene();
+        let _ = spawn_test_box(&mut world);
         world.frame_all().expect("frame-all works");
-        // Assert: pivot back at the cube center, distance at the analytic fit
+        // Assert: pivot back at the box center, distance at the analytic fit
         // (r = sqrt(3)/2, fov 45 deg, aspect 512/320, margin 1.15 ~= 2.60).
         assert!((world.pivot() - Vec3::ZERO).length() < 1e-4);
         let distance = camera_distance(&mut world);
@@ -590,9 +563,9 @@ mod tests {
             (distance - expected).abs() < 0.05,
             "framed distance {distance} must match the analytic fit {expected}"
         );
-        // Assert: the cube actually projects inside the frame — NDC of its
+        // Assert: the box actually projects inside the frame — NDC of its
         // center within [-1, 1] on both axes.
-        let camera = world.viewport_camera().expect("demo camera exists");
+        let camera = world.viewport_camera().expect("viewport camera exists");
         let translation = world
             .app
             .world()
@@ -612,16 +585,20 @@ mod tests {
 
     #[test]
     fn frame_all_without_geometry_is_a_noop() {
+        // Arrange: base scene only — no meshed entities anywhere.
         let mut world = SceneWorld::new_headless();
-        let ids = world.spawn_demo_scene();
+        let _ = world.spawn_base_scene();
+        assert!(world.scene_bounds().is_none());
         world.update();
-        world.app.world_mut().despawn(ids.cube);
-        let camera = world.viewport_camera().expect("demo camera exists");
+        let camera = world.viewport_camera().expect("viewport camera exists");
         let before = *world
             .app
             .world()
             .get::<Transform>(camera)
             .expect("camera has a transform");
+        let pivot = world.pivot();
+
+        // Act + assert: a successful no-op preserving camera and pivot.
         world.frame_all().expect("empty frame-all is Ok");
         let after = *world
             .app
@@ -629,6 +606,8 @@ mod tests {
             .get::<Transform>(camera)
             .expect("camera has a transform");
         assert_eq!(before.translation, after.translation);
+        assert_eq!(before.rotation, after.rotation);
+        assert_eq!(world.pivot(), pivot);
     }
 
     #[test]
@@ -650,18 +629,19 @@ mod tests {
     }
 
     #[test]
-    fn spawn_seats_pivot_at_bounds_center() {
+    fn empty_spawn_leaves_pivot_at_origin() {
+        // No geometry ships with the base scene, so the pivot starts — and
+        // stays, until a frame-all — at the origin.
         let mut world = SceneWorld::new_headless();
-        let _ = world.spawn_demo_scene();
-        let bounds = world.scene_bounds().expect("demo cube has bounds");
-        let center = Vec3::from((bounds.min + bounds.max) * 0.5);
-        assert_eq!(world.pivot(), center);
+        let _ = world.spawn_base_scene();
+        assert!(world.scene_bounds().is_none());
+        assert_eq!(world.pivot(), Vec3::ZERO);
     }
 
     #[test]
     fn ticks_never_recenter_the_pivot() {
         let mut world = SceneWorld::new_headless();
-        let _ = world.spawn_demo_scene();
+        let _ = world.spawn_base_scene();
         world.pan_camera(50.0, 25.0).expect("pan works");
         let pivot = world.pivot();
         for _ in 0..5 {
@@ -671,10 +651,11 @@ mod tests {
     }
 
     #[test]
-    fn scene_bounds_cover_the_demo_cube() {
+    fn scene_bounds_cover_a_spawned_box() {
         let mut world = SceneWorld::new_headless();
-        let _ = world.spawn_demo_scene();
-        let bounds = world.scene_bounds().expect("cube has bounds");
+        let _ = world.spawn_base_scene();
+        let _ = spawn_test_box(&mut world);
+        let bounds = world.scene_bounds().expect("box has bounds");
         assert!((bounds.min.x + 0.5).abs() < 1e-4, "got {bounds:?}");
         assert!((bounds.max.x - 0.5).abs() < 1e-4, "got {bounds:?}");
     }

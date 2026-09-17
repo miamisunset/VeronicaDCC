@@ -1,25 +1,66 @@
 //! GPU slice: ticks publish GPU-rendered frames behind the same seam.
 //!
 //! A valid published frame has the fixed nonzero extents and a full BGRA8
-//! payload. The scene is static (no auto-spin since #46), so consecutive
-//! ticks publish identical bytes — pixels follow ECS state, and only nav
-//! ops move them. The CPU rasterizer (`render_demo_frame`) is kept only as
-//! the deterministic test oracle: GPU frames must be non-uniform and
-//! visibly beyond flat rasterization.
+//! payload. The scene is static (no auto-spin), so consecutive ticks publish
+//! identical bytes — pixels follow ECS state, and only nav ops and recooks
+//! move them. Graph content reaches the pixels through the tick recook loop:
+//! tests cook a cube from its wire snapshot, so every lit-pixel assertion
+//! below observes real cooked geometry, never built-in demo content.
 //!
 //! Pipeline warm-up: early frames may be clear-only while shaders compile on
 //! first use, so tests pre-roll bounded ticks (poll-until-non-uniform with a
 //! hard cap) before asserting pixel properties.
 
-use veronica_scene::{
-    FRAME_HEIGHT, FRAME_WIDTH, MAX_VIEWPORT_EDGE, SceneError, SceneWorld, render_demo_frame,
-};
+use veronica_graph::{GraphSnapshot, OperatorGraph};
+use veronica_scene::{FRAME_HEIGHT, FRAME_WIDTH, MAX_VIEWPORT_EDGE, SceneError, SceneWorld};
+
+/// One-cube v2 snapshot: the same JSON Swift persists, so the GPU assertions
+/// below pin the full graph-to-pixels path with no step skipped.
+const CUBE_JSON: &str = r#"{"version":2,"operators":[
+    {"id":1,"kind":"cube","name":"Box","parent":null,
+     "position":{"x":0.0,"y":0.0},
+     "parameters":{"size":{"vec3":[2.0,1.0,4.0]},"center":{"vec3":[0.5,-1.0,2.0]}}}
+],"edges":[]}"#;
+
+/// Small centered cube: the frame-all subject. It starts far from the spawn
+/// camera, so the refit zooms in and the lit area must grow substantially —
+/// the large offset box above already fills the frame, which would hide the
+/// refit instead of proving it.
+const SMALL_CUBE_JSON: &str = r#"{"version":2,"operators":[
+    {"id":1,"kind":"cube","name":"Pebble","parent":null,
+     "position":{"x":0.0,"y":0.0},
+     "parameters":{"size":{"vec3":[0.5,0.5,0.5]},"center":{"vec3":[0.0,0.0,0.0]}}}
+],"edges":[]}"#;
 
 /// Ticks before a test gives up waiting for the lit cube to appear.
 ///
 /// Shader compilation happens on first use; every tick re-renders, so the
 /// first non-uniform frame proves the GPU path is live.
 const MAX_WARMUP_TICKS: u32 = 240;
+
+/// Base scene plus the cooked cube from `json`: the lit subject every pixel
+/// test observes.
+///
+/// Returns `None` instead of panicking so the lint-clean helper stays
+/// honest; callers unwrap in the test body, where the failure surfaces as
+/// a named test failure.
+fn lit_world_with(json: &str) -> Option<SceneWorld> {
+    let snapshot: GraphSnapshot = serde_json::from_str(json).ok()?;
+    let mut graph = OperatorGraph::new();
+    graph.restore(snapshot).ok()?;
+    let mut world = SceneWorld::new_headless();
+    let _ = world.spawn_base_scene();
+    let spawned = world.recook_graph(&graph).ok()?;
+    if spawned.len() != 1 {
+        return None;
+    }
+    Some(world)
+}
+
+/// Base scene plus one cooked cube: the lit subject every pixel test observes.
+fn lit_world() -> Option<SceneWorld> {
+    lit_world_with(CUBE_JSON)
+}
 
 /// True when at least one pixel differs from the first: a clear-only frame is
 /// perfectly uniform, so this proves scene content reached the pixels.
@@ -58,24 +99,16 @@ fn render_when_ready(world: &mut SceneWorld) -> Vec<u8> {
 }
 
 /// Fixed extents are nonzero with a full BGRA8 payload after a tick, and the
-/// pixels are GPU-rendered scene content: non-uniform and different from the
-/// CPU oracle's flat rasterization at the same cube angle.
+/// pixels are GPU-rendered cooked content: non-uniform once warmed up.
 #[test]
 fn published_frame_is_valid_after_tick() {
-    let mut world = SceneWorld::new_headless();
-    let _ = world.spawn_demo_scene();
+    let mut world = lit_world().unwrap();
     let pixels = render_when_ready(&mut world);
     assert_eq!(
         pixels.len(),
         FRAME_WIDTH as usize * FRAME_HEIGHT as usize * 4
     );
     assert!(is_non_uniform(&pixels));
-    let oracle = render_demo_frame(world.cube_angle_y(), FRAME_WIDTH, FRAME_HEIGHT).unwrap();
-    assert_ne!(
-        pixels,
-        oracle.pixels(),
-        "GPU frame must be visibly beyond the flat CPU rasterization"
-    );
 }
 
 /// The lit cube reads achromatic: white material under a white key light
@@ -85,8 +118,7 @@ fn published_frame_is_valid_after_tick() {
 /// cube publishes `(255, 0, 255)`.
 #[test]
 fn lit_cube_is_achromatic_not_magenta() {
-    let mut world = SceneWorld::new_headless();
-    let _ = world.spawn_demo_scene();
+    let mut world = lit_world().unwrap();
     let pixels = render_when_ready(&mut world);
     // Brightest pixel: the lit cube face is far brighter than the dark clear
     // color, whatever the cube angle.
@@ -112,8 +144,7 @@ fn lit_cube_is_achromatic_not_magenta() {
 /// so pixels follow ECS state and only nav ops move them.
 #[test]
 fn consecutive_ticks_publish_identical_pixels() {
-    let mut world = SceneWorld::new_headless();
-    let _ = world.spawn_demo_scene();
+    let mut world = lit_world().unwrap();
     let before = render_when_ready(&mut world);
     world.update();
     let after = world
@@ -124,15 +155,13 @@ fn consecutive_ticks_publish_identical_pixels() {
     assert_eq!(before, after);
 }
 
-/// The pixel source tracks the world tick counter, not wall time: ticks
-/// advance while the cube angle holds at its spawn orientation.
+/// The pixel source tracks the world tick counter, not wall time.
 #[test]
-fn cube_angle_holds_still_while_ticks_advance() {
+fn ticks_advance_counter() {
     let mut world = SceneWorld::new_headless();
-    let _ = world.spawn_demo_scene();
+    let _ = world.spawn_base_scene();
     assert_eq!(world.tick_count(), 0);
     world.update();
-    assert_eq!(world.cube_angle_y().to_bits(), 0.0f32.to_bits());
     assert_eq!(world.tick_count(), 1);
 }
 
@@ -142,8 +171,7 @@ fn cube_angle_holds_still_while_ticks_advance() {
 #[test]
 fn viewport_resize_propagates_mid_life() {
     use veronica_scene::FRAME_BYTES_PER_PIXEL;
-    let mut world = SceneWorld::new_headless();
-    let _ = world.spawn_demo_scene();
+    let mut world = lit_world().unwrap();
     let _ = render_when_ready(&mut world);
     assert_eq!(world.viewport_size(), (FRAME_WIDTH, FRAME_HEIGHT));
 
@@ -218,33 +246,32 @@ fn viewport_resize_propagates_mid_life() {
     assert_eq!((steady.width(), steady.height()), (384, 256));
 }
 
-/// No cube, no motion: with no `DemoCube` alive the published angle is zero
-/// and consecutive ticks publish identical frames. Pixels follow ECS state.
+/// No geometry, no content: the empty base scene still reads back — a
+/// uniform clear frame — and consecutive ticks publish identical frames.
+/// Pixels follow ECS state.
 #[test]
-fn frames_hold_still_without_a_cube() {
+fn empty_scene_readback_is_stable() {
     let mut world = SceneWorld::new_headless();
+    let _ = world.spawn_base_scene();
+    assert!(world.cooked_entities().is_empty());
     world.update();
-    // Exact bit comparison: the cubeless path returns the `0.0` constant
-    // with no float arithmetic in between.
-    assert_eq!(world.cube_angle_y().to_bits(), 0.0f32.to_bits());
     let before = world
         .render_frame()
-        .expect("readback works with no demo scene")
+        .expect("readback works with no cooked geometry")
         .pixels()
         .to_vec();
     world.update();
     let after = world
         .render_frame()
-        .expect("readback works with no demo scene")
+        .expect("readback works with no cooked geometry")
         .pixels()
         .to_vec();
     assert_eq!(before, after);
 }
 
 /// Frame-all visibly reframes through the readback seam: fitting moves the
-/// camera nearer, so the lit cube covers substantially more pixels. The
-/// scene is static, so the before/after pair isolates the refit exactly —
-/// the 4.7→2.6 distance fit grows the lit area ~3×.
+/// camera nearer the cooked cube, so the lit area grows substantially. The
+/// scene is static, so the before/after pair isolates the refit exactly.
 #[test]
 fn frame_all_reframes_the_published_image() {
     /// Pixels brighter than a lit face threshold (sum over B+G+R).
@@ -255,8 +282,7 @@ fn frame_all_reframes_the_published_image() {
             .count()
     }
 
-    let mut world = SceneWorld::new_headless();
-    let _ = world.spawn_demo_scene();
+    let mut world = lit_world_with(SMALL_CUBE_JSON).unwrap();
     let before = render_when_ready(&mut world);
     world.frame_all().expect("frame-all works");
     world.update();
@@ -271,6 +297,6 @@ fn frame_all_reframes_the_published_image() {
     let reframed_lit = lit_pixel_count(reframed.pixels());
     assert!(
         reframed_lit >= before_lit + before_lit / 2,
-        "fitting must grow the lit area ~3x, went {before_lit} -> {reframed_lit} lit pixels"
+        "fitting must grow the lit area, went {before_lit} -> {reframed_lit} lit pixels"
     );
 }
