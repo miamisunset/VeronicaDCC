@@ -98,6 +98,12 @@ impl Selection {
 
 /// Triangles in an indexed engine mesh, or `None` when the mesh carries no
 /// `U32` index run to map ordinals through.
+///
+/// `U32`-only is deliberate but narrower than the pick slice (which also
+/// unwelds `U16`/non-indexed soup): the handoff always emits `U32`
+/// (`mesh.rs:53`), so anything else here is a future source whose picks
+/// could never highlight — loud [`SceneError::UnpickableMesh`] at the
+/// boundary, not silent support.
 #[must_use]
 pub fn cooked_triangle_count(mesh: &Mesh) -> Option<usize> {
     match mesh.indices() {
@@ -196,6 +202,7 @@ impl SceneWorld {
     /// [`SceneError::SelectionFaceOutOfRange`] when `pick.face` names no
     /// triangle of the target.
     pub fn set_selection(&mut self, pick: Pick) -> Result<(), SceneError> {
+        let previous = self.app.world().resource::<Selection>().pick;
         let entity = self
             .selection_target_entity(pick.node)
             .ok_or(SceneError::NoCookedSelectionTarget { node: pick.node })?;
@@ -208,6 +215,20 @@ impl SceneWorld {
             write_selection_mask(&mut cooked.0, pick.face)?
         };
         self.refresh_gpu_mesh(entity);
+        // Single-pick replace across nodes: the new target paints first (so
+        // a failure above leaves the old highlight untouched), then the
+        // previous node's mesh returns to base. Same-node replace needs no
+        // extra work — the mask rewrite above already repainted the whole
+        // mesh. A despawned previous target released its assets with it.
+        if let Some(old) = previous
+            && old.node != pick.node
+            && let Some(old_entity) = self.selection_target_entity(old.node)
+        {
+            if let Some(mut cooked) = self.app.world_mut().get_mut::<CookedMesh>(old_entity) {
+                paint_base_mesh(&mut cooked.0);
+            }
+            self.refresh_gpu_mesh(old_entity);
+        }
         self.app.world_mut().resource_mut::<Selection>().pick = Some(StoredPick {
             node: pick.node,
             face: pick.face,
@@ -282,6 +303,14 @@ impl SceneWorld {
             .get::<CookedMesh>(entity)
             .and_then(|cooked| cooked.0.attribute(Mesh::ATTRIBUTE_COLOR).cloned());
         let handle = world.get::<Mesh3d>(entity).map(|mesh| mesh.0.clone());
+        // Every paint path runs before its refresh on a live cooked entity,
+        // so a missing channel or handle names a broken invariant — loud in
+        // debug, pixel-proven in release (the clear/highlight tests fail on
+        // any desync).
+        debug_assert!(
+            mask.is_some() && colors.is_some() && handle.is_some(),
+            "refresh ran on an entity without painted channels or a GPU handle"
+        );
         if let (Some(mask), Some(colors), Some(handle)) = (mask, colors, handle)
             && let Some(mut gpu) = self
                 .app
@@ -315,6 +344,23 @@ mod tests {
 
     fn cube_graph() -> OperatorGraph {
         let snapshot: GraphSnapshot = serde_json::from_str(CUBE_JSON).unwrap();
+        let mut graph = OperatorGraph::new();
+        graph.restore(snapshot).unwrap();
+        graph
+    }
+
+    /// Two cubes side by side: node 1 left, node 2 right.
+    const TWO_CUBE_JSON: &str = r#"{"version":2,"operators":[
+        {"id":1,"kind":"cube","name":"Left","parent":null,
+         "position":{"x":0.0,"y":0.0},
+         "parameters":{"center":{"vec3":[-1.5,0.0,0.0]}}},
+        {"id":2,"kind":"cube","name":"Right","parent":null,
+         "position":{"x":0.0,"y":0.0},
+         "parameters":{"center":{"vec3":[1.5,0.0,0.0]}}}
+    ],"edges":[]}"#;
+
+    fn two_cube_graph() -> OperatorGraph {
+        let snapshot: GraphSnapshot = serde_json::from_str(TWO_CUBE_JSON).unwrap();
         let mut graph = OperatorGraph::new();
         graph.restore(snapshot).unwrap();
         graph
@@ -762,5 +808,131 @@ mod tests {
             highlighted.pixels(),
             "same-topology recook must keep the highlight pixel-identical"
         );
+    }
+
+    #[test]
+    fn cross_node_replace_clears_previous_highlight() {
+        // Arrange: two cubes cooked, face 0 of node 1 selected.
+        let graph = two_cube_graph();
+        let mut world = SceneWorld::new_headless();
+        let _ = world.spawn_base_scene();
+        world.recook_graph(&graph).unwrap();
+        world
+            .set_selection(Pick {
+                node: NodeId(1),
+                face: 0,
+            })
+            .unwrap();
+
+        // Act: move the pick to node 2.
+        world
+            .set_selection(Pick {
+                node: NodeId(2),
+                face: 1,
+            })
+            .unwrap();
+
+        // Assert: single-pick replace — node 1's mesh is fully base again,
+        // node 2 carries exactly one face of mask, resource reports node 2.
+        assert_eq!(
+            world.selection(),
+            Some(Pick {
+                node: NodeId(2),
+                face: 1
+            })
+        );
+        let mut masks = world
+            .cooked_entities()
+            .into_iter()
+            .map(|(id, entity)| {
+                (
+                    id,
+                    mask_of(world.cooked_mesh(entity).unwrap())
+                        .into_iter()
+                        .filter(|v| *v == 1f32.to_bits())
+                        .count(),
+                )
+            })
+            .collect::<Vec<_>>();
+        masks.sort_by_key(|(id, _)| id.0);
+        assert_eq!(masks, vec![(NodeId(1), 0), (NodeId(2), 3)]);
+    }
+
+    #[test]
+    fn re_tap_highlighted_face_resolves_same_pick() {
+        // Arrange: warm pipeline, front face selected (tint live on the
+        // cooked mesh and its GPU upload).
+        let mut world = cube_world();
+        warm_beauty_until_cube(&mut world);
+        world
+            .set_selection(Pick {
+                node: NodeId(1),
+                face: 0,
+            })
+            .unwrap();
+
+        // Act: tap the frame center again — the highlighted face's pixels
+        // must still decode to their slot, not `slot × tint`.
+        let pick = world.resolve_pick(0.0, 0.0).unwrap();
+
+        // Assert: same node; face 0 or its quad sibling 1 (the center texel
+        // lands on either front triangle).
+        let pick = pick.expect("center tap on the cube must hit");
+        assert_eq!(pick.node, NodeId(1));
+        assert!(
+            pick.face <= 1,
+            "center tap must resolve to a front face, got {}",
+            pick.face
+        );
+    }
+
+    #[test]
+    fn changed_count_clears_selection_on_recook() {
+        // Arrange: face 0 selected, then the stored total is forged stale
+        // (same-module plant: the fixed-topology Cube operator cannot
+        // produce a real count change, so the predicate is pinned directly).
+        let mut world = cube_world();
+        world
+            .set_selection(Pick {
+                node: NodeId(1),
+                face: 0,
+            })
+            .unwrap();
+        world.app.world_mut().resource_mut::<Selection>().pick = Some(StoredPick {
+            node: NodeId(1),
+            face: 0,
+            triangles: 999,
+        });
+
+        // Act: reconcile against the unchanged graph.
+        world.recook_graph(&cube_graph()).unwrap();
+
+        // Assert: the stale pick clears rather than surviving on a mesh
+        // whose topology it no longer describes.
+        assert_eq!(world.selection(), None);
+    }
+
+    #[test]
+    fn unrestorable_face_clears_selection_on_recook() {
+        // Arrange: stored face forged past the mesh (retention re-resolves
+        // through `set_selection`, which must reject it).
+        let mut world = cube_world();
+        world
+            .set_selection(Pick {
+                node: NodeId(1),
+                face: 0,
+            })
+            .unwrap();
+        world.app.world_mut().resource_mut::<Selection>().pick = Some(StoredPick {
+            node: NodeId(1),
+            face: 40,
+            triangles: 12,
+        });
+
+        // Act.
+        world.recook_graph(&cube_graph()).unwrap();
+
+        // Assert: cleared — retention restores, never invents.
+        assert_eq!(world.selection(), None);
     }
 }
