@@ -118,6 +118,16 @@ pub(crate) fn ndc_to_pixel(ndc_x: f32, ndc_y: f32, width: u32, height: u32) -> O
     Some((column, row))
 }
 
+/// Linear-exact channel value for one ID-buffer byte.
+///
+/// `byte/255` in `f32` needs ~16 significant bits against the 24-bit
+/// mantissa, so the unorm8 quantize on write rounds back to `byte` exactly —
+/// the property the center-tap GPU test pins end to end.
+#[must_use]
+fn linear_channel(byte: u8) -> f32 {
+    f32::from(byte) / 255.0
+}
+
 /// Narrow an item count into the 24-bit ID space, failing loudly past it.
 ///
 /// Counts come from live mesh data (triangle totals, entity slots), so an
@@ -137,9 +147,7 @@ fn u24_checked(count: usize) -> Result<u32, SceneError> {
 
 /// Exact linear color for one entity slot.
 ///
-/// `k/255` in `f32` needs ~16 significant bits against the 24-bit mantissa,
-/// so the unorm8 quantize on write rounds back to `k` exactly — the property
-/// the center-tap GPU test pins end to end. Alpha is always full coverage
+/// Channels go through [`linear_channel`]; alpha is always full coverage
 /// (see the module-level MSAA rule).
 ///
 /// # Errors
@@ -151,9 +159,9 @@ fn slot_color(slot: usize) -> Result<Color, SceneError> {
     let rgb =
         encode_face_ordinal(ordinal).map_err(|_| SceneError::PickSpaceExhausted { count: slot })?;
     Ok(Color::LinearRgba(LinearRgba::new(
-        f32::from(rgb[0]) / 255.0,
-        f32::from(rgb[1]) / 255.0,
-        f32::from(rgb[2]) / 255.0,
+        linear_channel(rgb[0]),
+        linear_channel(rgb[1]),
+        linear_channel(rgb[2]),
         1.0,
     )))
 }
@@ -246,9 +254,9 @@ fn id_mesh_from_cooked(mesh: &Mesh) -> Result<Mesh, SceneError> {
             count: triangles.len(),
         })?;
         let color = [
-            f32::from(rgb[0]) / 255.0,
-            f32::from(rgb[1]) / 255.0,
-            f32::from(rgb[2]) / 255.0,
+            linear_channel(rgb[0]),
+            linear_channel(rgb[1]),
+            linear_channel(rgb[2]),
             1.0,
         ];
         for index in triangle {
@@ -288,6 +296,7 @@ fn is_full_coverage_hit(pixel: [u8; 4]) -> bool {
 /// The readiness signal for a pick pass: a non-empty scene always paints
 /// somewhere once its pipelines are compiled, so an all-clear frame means
 /// "not rendered yet", never "background tap".
+#[must_use]
 fn frame_painted(frame: &[u8]) -> bool {
     const PICK_CLEAR: [u8; 4] = [0, 0, 0, 0];
     frame.chunks_exact(4).any(|pixel| pixel != PICK_CLEAR)
