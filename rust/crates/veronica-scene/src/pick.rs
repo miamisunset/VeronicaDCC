@@ -365,7 +365,9 @@ fn face_in_range(face: u32, triangle_total: usize) -> bool {
 struct PickableMesh {
     /// Source operator: the identity half of a resolved pick.
     node: NodeId,
-    /// Cooked GPU mesh, reused by the entity-pass overlay (no re-upload).
+    /// Cooked GPU mesh: template for the entity-pass overlay plus the face
+    /// pass's position source. The overlay uploads a COLOR-stripped clone
+    /// (see `begin_pick_pass`), never this handle directly.
     mesh: Handle<Mesh>,
     /// World transform, copied so overlays cover the beauty mesh exactly.
     transform: Transform,
@@ -464,6 +466,27 @@ impl SceneWorld {
         pickables
     }
 
+    /// Clone a cooked mesh minus its COLOR binding for the entity-pass
+    /// overlay: cooked meshes carry the selection COLOR channel, and the
+    /// stock shader multiplies slot base by vertex color, so the overlay
+    /// must not inherit it (a highlighted face would decode `slot × tint`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SceneError::UnpickableMesh`] when the handle resolves to
+    /// no uploaded mesh. Unreachable single-threaded — the handle came
+    /// from a live entity in this same call stack, and nothing despawns or
+    /// evicts between — but loud rather than a guess.
+    fn stripped_overlay_mesh(&self, handle: &Handle<Mesh>) -> Result<Mesh, SceneError> {
+        let assets = self.app.world().resource::<Assets<Mesh>>();
+        let Some(source) = assets.get(handle) else {
+            return Err(SceneError::UnpickableMesh);
+        };
+        let mut clone = source.clone();
+        clone.remove_attribute(Mesh::ATTRIBUTE_COLOR);
+        Ok(clone)
+    }
+
     /// Spawn the transient entity pass: ID target, ID camera cloning the
     /// live camera, one flat overlay per pickable.
     ///
@@ -536,15 +559,27 @@ impl SceneWorld {
             camera,
             overlays: Vec::with_capacity(pickables.len()),
             target,
-            assets: Vec::with_capacity(pickables.len() + 2),
+            assets: Vec::with_capacity(pickables.len() * 2 + 2),
             pickables,
         };
-        let overlays: Vec<(Handle<Mesh>, Transform, Color)> = pass
-            .pickables
-            .iter()
-            .zip(colors)
-            .map(|(pickable, color)| (pickable.mesh.clone(), pickable.transform, color))
-            .collect();
+        // One flat overlay per pickable. The overlay mesh is a COLOR-stripped
+        // clone of the cooked mesh, never the cooked handle itself: cooked
+        // meshes carry the selection COLOR binding (white base, orange on a
+        // picked face), and the stock shader multiplies slot base by vertex
+        // color — reusing the handle would decode `slot × tint` on a
+        // highlighted face instead of the slot. Stripping keeps slot pixels
+        // exact regardless of highlight state.
+        let mut overlays = Vec::with_capacity(pass.pickables.len());
+        for (pickable, color) in pass.pickables.iter().zip(colors) {
+            let stripped = self.stripped_overlay_mesh(&pickable.mesh)?;
+            let handle = self
+                .app
+                .world_mut()
+                .resource_mut::<Assets<Mesh>>()
+                .add(stripped);
+            pass.assets.push(PickAsset::Mesh(handle.clone()));
+            overlays.push((handle, pickable.transform, color));
+        }
         for (mesh, transform, color) in overlays {
             let material = self
                 .app

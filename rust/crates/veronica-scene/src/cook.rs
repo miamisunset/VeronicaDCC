@@ -22,7 +22,9 @@ use veronica_core::NodeId;
 use veronica_geometry::{GeometryPayload, cook, realize};
 use veronica_graph::OperatorGraph;
 
-use crate::{SceneError, SceneTag, SceneWorld, render_mesh_from_evaluated};
+use crate::{
+    SceneError, SceneTag, SceneWorld, render_mesh_from_evaluated, selection::paint_base_mesh,
+};
 
 /// One stale cooked entity plus its render-bundle handles for cleanup.
 ///
@@ -92,7 +94,12 @@ impl SceneWorld {
                 GeometryPayload::Implicit(implicit) => realize(&implicit),
                 GeometryPayload::Evaluated(mesh) => mesh,
             };
-            meshes.push((id, render_mesh_from_evaluated(&evaluated)?));
+            let mut mesh = render_mesh_from_evaluated(&evaluated)?;
+            // Every cooked mesh enters the world highlight-ready: zero mask
+            // plus white binding, so the VERTEX_COLORS pipeline is uniform
+            // across cooks and clearing is a return to this exact state.
+            paint_base_mesh(&mut mesh);
+            meshes.push((id, mesh));
         }
         // Nothing to upload or spawn: return before touching the asset
         // store, so an empty cook (container-only or empty graph) creates
@@ -192,6 +199,9 @@ impl SceneWorld {
                 world.despawn(entity);
             }
         }
+        // Fresh entities, fresh uploads: re-apply the stored pick onto the
+        // new cook (kept on unchanged topology, cleared otherwise).
+        self.retain_selection_across_recook();
         Ok(spawned)
     }
 
