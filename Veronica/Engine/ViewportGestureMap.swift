@@ -42,7 +42,7 @@ nonisolated enum ViewportDragKind: Equatable, Sendable {
 /// orbits, pinch dollies. Momentum scroll (fingers lifted) is ignored — the
 /// camera stops dead instead of drifting. A two-finger-drag step is defined
 /// to equal the matching mouse drag (plain ≡ Command+left-drag pan,
-/// Option ≡ Option+left-drag orbit), so finger motion and cursor motion
+/// Option ≡ plain left-drag orbit), so finger motion and cursor motion
 /// agree.
 nonisolated enum ViewportGestureMap {
     /// Drag pixels → dolly log-factor scale. Dragging up (positive view-space
