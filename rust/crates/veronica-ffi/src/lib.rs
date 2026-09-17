@@ -736,9 +736,9 @@ pub unsafe extern "C" fn vrn_selection_clear(context: *mut VrnContextHandle) -> 
 
 /// Parse a strict operator-kind string from the FFI boundary.
 ///
-/// Only `"container"` and `"cube"` are accepted; anything else is
+/// `"container"`, `"cube"`, and `"sphere"` are accepted; anything else is
 /// [`VrnResult::InvalidArgument`]. The graph core only ever sees the parsed
-/// [`OperatorKind`], so operator #3 extends here without touching it.
+/// [`OperatorKind`], so new kinds extend here without touching it.
 fn parse_operator_kind(kind: *const c_char) -> Result<OperatorKind, VrnResult> {
     if kind.is_null() {
         return Err(VrnResult::NullArgument);
@@ -749,6 +749,7 @@ fn parse_operator_kind(kind: *const c_char) -> Result<OperatorKind, VrnResult> {
     match text.to_str() {
         Ok("container") => Ok(OperatorKind::Container),
         Ok("cube") => Ok(OperatorKind::Cube),
+        Ok("sphere") => Ok(OperatorKind::Sphere),
         Ok(_) | Err(_) => Err(VrnResult::InvalidArgument),
     }
 }
@@ -2122,6 +2123,67 @@ mod graph_tests {
                 json.contains(r#""kind":"cube""#),
                 "snapshot must carry the cube kind, got: {json}"
             );
+            vrn_context_destroy(context);
+        }
+    }
+
+    #[test]
+    fn sphere_kind_is_accepted_and_visible_in_snapshots() {
+        let context = vrn_context_create();
+        assert!(!context.is_null());
+        let kind = cstring("sphere");
+        let unknown = cstring("pyramid");
+        let key = cstring("segments");
+        let value = cstring(r#"{"integer":8}"#);
+        let mut id = 0u64;
+        // SAFETY: just created, alive, single-threaded test; strings outlive calls.
+        unsafe {
+            assert_eq!(
+                vrn_graph_create_operator(
+                    context,
+                    kind.as_ptr().cast_mut(),
+                    0,
+                    0.0,
+                    0.0,
+                    &raw mut id
+                ),
+                VrnResult::Ok
+            );
+            assert_eq!(id, 1);
+            let json = snapshot_json(context);
+            assert!(
+                json.contains(r#""kind":"sphere""#),
+                "snapshot must carry the sphere kind, got: {json}"
+            );
+            // Unknown kinds still reject at the boundary.
+            let mut rejected = 0u64;
+            assert_eq!(
+                vrn_graph_create_operator(
+                    context,
+                    unknown.as_ptr().cast_mut(),
+                    0,
+                    0.0,
+                    0.0,
+                    &raw mut rejected
+                ),
+                VrnResult::InvalidArgument
+            );
+            // Typed resolution writes land in the snapshot and cook on tick.
+            assert_eq!(
+                vrn_graph_set_parameter_typed(
+                    context,
+                    id,
+                    key.as_ptr().cast_mut(),
+                    value.as_ptr().cast_mut()
+                ),
+                VrnResult::Ok
+            );
+            let json = snapshot_json(context);
+            assert!(
+                json.contains(r#""segments":{"integer":8}"#),
+                "snapshot must carry sphere resolution, got: {json}"
+            );
+            assert_eq!(vrn_tick(context), VrnResult::Ok);
             vrn_context_destroy(context);
         }
     }

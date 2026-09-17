@@ -152,8 +152,8 @@ pub struct GraphTopology {
 
 /// Kind of operator in the procedural graph.
 ///
-/// Containers organize; cubes cook (see `veronica-geometry`). Strict kind
-/// validation lives at the FFI boundary, not here.
+/// Containers organize; cubes and spheres cook (see `veronica-geometry`).
+/// Strict kind validation lives at the FFI boundary, not here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OperatorKind {
@@ -162,6 +162,10 @@ pub enum OperatorKind {
     /// First geometry operator: per-axis size plus center, cooks to implicit
     /// geometry (no inputs; downstream wiring belongs to the editing work).
     Cube,
+    /// Second geometry operator: resolution-driven sphere (segments, rings,
+    /// radius, center), cooks to implicit geometry. Topology-varying: the
+    /// same node cooks different triangle counts across recooks.
+    Sphere,
 }
 
 /// Canvas position in unbounded `f64` coordinates.

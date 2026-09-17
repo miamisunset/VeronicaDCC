@@ -10,7 +10,7 @@ use bevy_math::primitives::Cuboid;
 use bevy_mesh::{Indices, Mesh, VertexAttributeValues};
 use veronica_core::NodeId;
 use veronica_graph::{GraphSnapshot, OperatorGraph};
-use veronica_scene::SceneWorld;
+use veronica_scene::{SceneWorld, cooked_triangle_count};
 
 /// One-cube v2 snapshot: non-trivial size plus an offset center, so the
 /// oracle comparison must account for the center explicitly.
@@ -100,4 +100,31 @@ fn graph_cube_cooks_into_scene_mesh_matching_engine_oracle() {
     assert_eq!(normals, oracle_normals);
     assert_eq!(uvs, oracle_uvs);
     assert_eq!(indices, oracle_indices);
+}
+
+/// One-sphere v2 snapshot: 8 segments by 4 rings, so the cooked mesh must
+/// hold exactly 2 * 8 * (4 - 1) = 48 triangles.
+const SPHERE_JSON: &str = r#"{"version":2,"operators":[
+    {"id":1,"kind":"sphere","name":"Ball","parent":null,
+     "position":{"x":0.0,"y":0.0},
+     "parameters":{"segments":{"integer":8},"rings":{"integer":4},
+                   "radius":{"float":1.0},"center":{"vec3":[0.0,0.0,0.0]}}}
+],"edges":[]}"#;
+
+#[test]
+fn graph_sphere_recooks_into_scene_mesh_with_budgeted_triangles() {
+    // Arrange: restore the sphere snapshot the same JSON Swift persists.
+    let snapshot: GraphSnapshot = serde_json::from_str(SPHERE_JSON).unwrap();
+    let mut graph = OperatorGraph::new();
+    graph.restore(snapshot).unwrap();
+
+    // Act: reconcile the scene with the graph — the path every tick takes.
+    let mut world = SceneWorld::new_headless();
+    let spawned = world.recook_graph(&graph).unwrap();
+
+    // Assert: cooked presence plus the resolution-budgeted triangle count.
+    assert_eq!(spawned.len(), 1);
+    assert_eq!(spawned[0].0, NodeId(1));
+    let mesh = world.cooked_mesh(spawned[0].1).unwrap();
+    assert_eq!(cooked_triangle_count(mesh), Some(48));
 }
