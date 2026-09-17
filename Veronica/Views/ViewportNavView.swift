@@ -217,8 +217,10 @@ final class ViewportNavView: MTKView {
     /// Right/middle releases never tap — those buttons are navigation-only.
     private func emitTapIfPressWithoutDrag(_ event: NSEvent) {
         guard !dragEmitted else { return }
+        // No press on record (an unmatched release from event forwarding
+        // or a synthetic driver) is ignored, never a zero-distance tap.
+        guard let press = pressPoint else { return }
         let release = convert(event.locationInWindow, from: nil)
-        let press = pressPoint ?? release
         guard let tap = ViewportGestureMap.tapAction(
             pressPoint: press,
             releasePoint: release,
