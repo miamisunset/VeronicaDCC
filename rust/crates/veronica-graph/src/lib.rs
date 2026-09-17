@@ -273,6 +273,12 @@ pub struct OperatorGraph {
     topology: NodeGraph,
     operators: HashMap<NodeId, Operator>,
     next_id: u64,
+    /// Mutation stamp for the tick recook loop: bumped once by every
+    /// successful mutating op (create, move, rename, set-parameter, delete,
+    /// restore). Runtime-only — snapshots never carry it, so the wire v2
+    /// format is unchanged and a restore counts as a fresh mutation of the
+    /// receiving graph rather than preserving the source stamp.
+    epoch: u64,
 }
 
 impl OperatorGraph {
@@ -283,7 +289,22 @@ impl OperatorGraph {
             topology: NodeGraph::new(),
             operators: HashMap::new(),
             next_id: 1,
+            epoch: 0,
         }
+    }
+
+    /// Mutation stamp: the tick loop recooks only while this differs from
+    /// the last-cooked value it tracks.
+    #[must_use]
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// Record one successful mutation. Saturating rather than wrapping: a
+    /// graph mutated `u64::MAX` times keeps reporting dirty instead of
+    /// aliasing a previously cooked stamp.
+    fn bump_epoch(&mut self) {
+        self.epoch = self.epoch.saturating_add(1);
     }
 
     /// Number of operators in the graph.
@@ -336,6 +357,7 @@ impl OperatorGraph {
             id,
             Operator::new(id, kind, DEFAULT_OPERATOR_NAME, parent, position),
         );
+        self.bump_epoch();
         Ok(id)
     }
 
@@ -350,6 +372,7 @@ impl OperatorGraph {
             .get_mut(&id)
             .ok_or(GraphError::UnknownNode(id))?;
         operator.position = position;
+        self.bump_epoch();
         Ok(())
     }
 
@@ -368,6 +391,7 @@ impl OperatorGraph {
             return Err(GraphError::EmptyName);
         }
         name.clone_into(&mut operator.name);
+        self.bump_epoch();
         Ok(())
     }
 
@@ -398,6 +422,7 @@ impl OperatorGraph {
         operator
             .parameters
             .insert(trimmed.to_owned(), ParamValue::Text(value.to_owned()));
+        self.bump_epoch();
         Ok(())
     }
 
@@ -430,6 +455,7 @@ impl OperatorGraph {
             // Presence was checked up front; the flag carries no news here.
             let _ = self.topology.remove_node(current);
         }
+        self.bump_epoch();
         Ok(())
     }
 
@@ -508,6 +534,9 @@ impl OperatorGraph {
             .map(|id| id.0)
             .max()
             .map_or(1, |max| max.saturating_add(1).max(1));
+        // Restoring a valid snapshot is itself a mutation of the receiving
+        // graph; failed restores return above with the stamp untouched.
+        self.bump_epoch();
         Ok(())
     }
 }
@@ -1049,5 +1078,95 @@ mod operator_tests {
         let mut graph = OperatorGraph::new();
         graph.restore(snapshot).unwrap();
         assert!(graph.operator(NodeId(7)).unwrap().parameters.is_empty());
+    }
+
+    #[test]
+    fn new_graph_starts_at_epoch_zero() {
+        assert_eq!(OperatorGraph::new().epoch(), 0);
+    }
+
+    #[test]
+    fn every_successful_mutation_bumps_epoch_once() {
+        let mut graph = OperatorGraph::new();
+        let id = graph
+            .create_operator(OperatorKind::Container, None, position(0.0, 0.0))
+            .unwrap();
+        assert_eq!(graph.epoch(), 1);
+        graph.move_operator(id, position(1.0, 1.0)).unwrap();
+        assert_eq!(graph.epoch(), 2);
+        graph.rename_operator(id, "Hero").unwrap();
+        assert_eq!(graph.epoch(), 3);
+        graph.set_parameter(id, "label", "v").unwrap();
+        assert_eq!(graph.epoch(), 4);
+        // The `name` key delegates to the rename path: still exactly one bump.
+        graph.set_parameter(id, "name", "Villain").unwrap();
+        assert_eq!(graph.epoch(), 5);
+        graph.delete_operator(id).unwrap();
+        assert_eq!(graph.epoch(), 6);
+    }
+
+    #[test]
+    fn failed_mutations_leave_epoch_untouched() {
+        let mut graph = OperatorGraph::new();
+        assert_eq!(
+            graph.create_operator(OperatorKind::Container, Some(NodeId(9)), position(0.0, 0.0)),
+            Err(GraphError::UnknownNode(NodeId(9)))
+        );
+        assert_eq!(graph.epoch(), 0);
+        let id = graph
+            .create_operator(OperatorKind::Container, None, position(0.0, 0.0))
+            .unwrap();
+        assert_eq!(graph.epoch(), 1);
+        assert_eq!(
+            graph.move_operator(NodeId(99), position(0.0, 0.0)),
+            Err(GraphError::UnknownNode(NodeId(99)))
+        );
+        assert_eq!(graph.rename_operator(id, "   "), Err(GraphError::EmptyName));
+        assert_eq!(
+            graph.set_parameter(id, "   ", "v"),
+            Err(GraphError::EmptyParameterKey)
+        );
+        assert_eq!(
+            graph.delete_operator(NodeId(99)),
+            Err(GraphError::UnknownNode(NodeId(99)))
+        );
+        assert_eq!(graph.epoch(), 1);
+        // Failed restores are not mutations either.
+        let stale = GraphSnapshot {
+            version: GRAPH_SNAPSHOT_VERSION + 1,
+            ..GraphSnapshot::default()
+        };
+        assert!(graph.restore(stale).is_err());
+        assert_eq!(graph.epoch(), 1);
+    }
+
+    #[test]
+    fn restore_counts_as_mutation_of_the_receiving_graph() {
+        let mut graph = OperatorGraph::new();
+        graph
+            .create_operator(OperatorKind::Container, None, position(0.0, 0.0))
+            .unwrap();
+        let snapshot = graph.snapshot();
+        // Restoring over a live graph bumps; the epoch is runtime state,
+        // never copied out of the snapshot.
+        graph.restore(snapshot.clone()).unwrap();
+        assert_eq!(graph.epoch(), 2);
+        // Restoring into a fresh graph bumps from zero, not from the source.
+        let mut fresh = OperatorGraph::new();
+        fresh.restore(snapshot).unwrap();
+        assert_eq!(fresh.epoch(), 1);
+    }
+
+    #[test]
+    fn epoch_never_rides_the_wire() {
+        let mut graph = OperatorGraph::new();
+        graph
+            .create_operator(OperatorKind::Container, None, position(1.0, 2.0))
+            .unwrap();
+        let json = serde_json::to_string(&graph.snapshot()).unwrap();
+        assert!(
+            !json.contains("epoch"),
+            "wire v2 is unchanged by the runtime stamp, got: {json}"
+        );
     }
 }

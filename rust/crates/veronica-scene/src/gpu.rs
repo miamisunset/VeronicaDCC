@@ -12,7 +12,7 @@
 //! (`App::update` never finalizes plugins; `RenderPlugin::finish` must unpack
 //! the `RenderDevice`).
 //!
-//! The demo camera renders into an offscreen [`Image`](bevy_image::Image)
+//! The viewport camera renders into an offscreen [`Image`](bevy_image::Image)
 //! target (`Bgra8UnormSrgb`, matching the BGRA8 seam straight into the
 //! `IOSurface`; `COPY_SRC` added for readback). [`readback_frame`] copies that GPU texture into a persistent
 //! `MAP_READ | COPY_DST` staging buffer, submits, then maps synchronously
@@ -63,10 +63,10 @@ pub(crate) struct GpuViewportSize {
     pub height: u32,
 }
 
-/// Handle of the offscreen target the demo camera renders into.
+/// Handle of the offscreen target the viewport camera renders into.
 ///
 /// Created once in [`SceneWorld::new_headless`](crate::SceneWorld::new_headless);
-/// [`SceneWorld::spawn_demo_scene`](crate::SceneWorld::spawn_demo_scene) points
+/// [`SceneWorld::spawn_base_scene`](crate::SceneWorld::spawn_base_scene) points
 /// the camera at it. Always present, so a world with no camera reads back the
 /// untouched (zeroed) texture deterministically.
 #[derive(Debug, Clone, Resource)]

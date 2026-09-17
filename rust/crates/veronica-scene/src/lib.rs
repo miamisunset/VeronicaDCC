@@ -5,21 +5,23 @@
 //! `App::run()` on the Swift `MainActor` thread — drive via
 //! [`SceneWorld::update`] from a background thread or a Swift-driven tick.
 //!
-//! The world owns a small Rust-built demo scene (camera, light, spinning
-//! cube with real render components) so the frame loop publishes observable
-//! GPU pixels before the graph cook path binds real content (ADR 0001).
+//! The world owns a small Rust-built base scene (viewport camera plus key
+//! light). Graph content arrives through the tick recook loop: the FFI
+//! context cooks its [`OperatorGraph`](veronica_graph::OperatorGraph) into
+//! render-bound entities (see `cook`) whenever the graph epoch moved since
+//! the last cook, so an empty graph renders camera plus light only.
 
 use bevy_app::{App, Update};
 use bevy_asset::Assets;
-use bevy_camera::{Camera, Camera3d, RenderTarget, visibility::Visibility};
+use bevy_camera::{Camera, Camera3d, RenderTarget};
 use bevy_core_pipeline::CorePipelinePlugin;
 use bevy_diagnostic::FrameCountPlugin;
 use bevy_ecs::prelude::*;
 use bevy_image::{Image, ImagePlugin};
 use bevy_light::{DirectionalLight, LightPlugin};
-use bevy_math::prelude::{EulerRot, Vec3};
-use bevy_mesh::{Mesh, Mesh3d, MeshPlugin};
-use bevy_pbr::{MeshMaterial3d, PbrPlugin, StandardMaterial};
+use bevy_math::prelude::Vec3;
+use bevy_mesh::MeshPlugin;
+use bevy_pbr::PbrPlugin;
 use bevy_render::RenderPlugin;
 use bevy_time::TimePlugin;
 use bevy_transform::prelude::Transform;
@@ -36,9 +38,7 @@ mod render;
 pub use cook::{CookedMesh, SourceOperator};
 pub use mesh::render_mesh_from_evaluated;
 pub use render::{
-    FRAME_BYTES_PER_PIXEL, FRAME_HEIGHT, FRAME_WIDTH, MAX_VIEWPORT_EDGE, OracleCamera,
-    OracleProjection, RenderFrame, oracle_projection, render_demo_frame,
-    render_demo_frame_with_camera,
+    FRAME_BYTES_PER_PIXEL, FRAME_HEIGHT, FRAME_WIDTH, MAX_VIEWPORT_EDGE, RenderFrame,
 };
 
 /// Errors for scene operations.
@@ -82,20 +82,11 @@ pub enum SceneError {
     /// The graph failed to cook before any mesh reached the scene.
     #[error(transparent)]
     Cook(#[from] veronica_geometry::CookError),
-    /// A frame was requested with a zero width or height.
-    #[error("frame extents must be nonzero, got {width}x{height}")]
-    InvalidFrameSize {
-        /// Requested width in pixels.
-        width: u32,
-        /// Requested height in pixels.
-        height: u32,
-    },
     /// The requested viewport size is zero or exceeds the
     /// [`MAX_VIEWPORT_EDGE`](crate::render::MAX_VIEWPORT_EDGE) long-edge cap.
     ///
-    /// Separate from [`SceneError::InvalidFrameSize`]: that guards the
-    /// deterministic CPU oracle's arbitrary extents, while this guards the
-    /// live GPU target (staging-buffer memory is bounded by the cap).
+    /// This guards the live GPU target (staging-buffer memory is bounded
+    /// by the cap).
     #[error(
         "invalid viewport size {width}x{height}: extents must be nonzero with longest edge <= 2048"
     )]
@@ -108,7 +99,7 @@ pub enum SceneError {
     /// The GPU render target has no uploaded image yet; tick the world first.
     #[error("render target has no GPU image yet")]
     NoGpuImage,
-    /// The viewport camera is missing; the demo scene was never spawned or
+    /// The viewport camera is missing; the base scene was never spawned or
     /// its camera was despawned. Navigation ops need it alive.
     #[error("viewport camera is missing")]
     NoViewportCamera,
@@ -153,64 +144,54 @@ pub struct BoneTransformComponent {
 #[derive(Debug, Clone, Copy, Component)]
 pub struct MeshTag(pub MeshId);
 
-/// Tags every entity belonging to the Rust-owned demo scene.
+/// Tags every entity belonging to the Rust-owned scene.
 ///
 /// Bevy itself owns internal entities (schedules and friends), so raw world
 /// counts are meaningless to Swift. [`SceneWorld::entity_count`] counts only
-/// entities carrying this marker: the demo camera, light, and cube.
+/// entities carrying this marker: the viewport camera, the light, and the
+/// cooked graph meshes.
 #[derive(Debug, Clone, Copy, Default, Component)]
-pub struct DemoScene;
+pub struct SceneTag;
 
-/// Marker for the demo camera. Carries the real render components
+/// Marker for the viewport camera. Carries the real render components
 /// ([`Camera3d`](bevy_camera::Camera3d), [`Camera`](bevy_camera::Camera),
 /// [`RenderTarget`](bevy_camera::RenderTarget), [`Transform`]) pointed at the
 /// offscreen target; the marker preserves the
 /// [`SceneWorld::entity_count`] semantics.
 #[derive(Debug, Clone, Copy, Default, Component)]
-pub struct DemoCamera;
+pub struct ViewportCamera;
 
-/// Marker for the demo light. Carries a real
+/// Marker for the scene key light. Carries a real
 /// [`DirectionalLight`](bevy_light::DirectionalLight) plus [`Transform`].
-/// See [`DemoCamera`].
+/// See [`ViewportCamera`].
 #[derive(Debug, Clone, Copy, Default, Component)]
-pub struct DemoLight;
+pub struct SceneLight;
 
-/// Marker for the demo cube. Its [`Transform`] is the static identity: the
-/// scene holds still until a nav op moves the camera, so pixel oracles are
-/// deterministic (no auto-spin; issue #46).
-#[derive(Debug, Clone, Copy, Default, Component)]
-pub struct DemoCube;
-
-/// Entity ids of the Rust-owned demo scene, for future render wiring.
+/// Entity ids of the Rust-owned base scene, for future render wiring.
 #[derive(Debug, Clone, Copy)]
-pub struct DemoSceneIds {
+pub struct SceneIds {
     /// Camera entity.
     pub camera: Entity,
     /// Light entity.
     pub light: Entity,
-    /// Cube entity.
-    pub cube: Entity,
 }
 
 /// Ticks elapsed since creation. Incremented by [`count_ticks`] each update.
 #[derive(Debug, Default, Resource)]
 struct TickCount(u64);
 
-/// Edge length of the demo cuboid in world units.
-const DEMO_CUBE_SIZE: f32 = 1.0;
+/// Viewport camera height above the ground plane, looking at the origin.
+const VIEWPORT_CAMERA_HEIGHT: f32 = 1.5;
 
-/// Demo camera height above the ground plane, looking at the origin.
-const DEMO_CAMERA_HEIGHT: f32 = 1.5;
+/// Viewport camera distance from the origin along +Z.
+const VIEWPORT_CAMERA_DISTANCE: f32 = 4.5;
 
-/// Demo camera distance from the origin along +Z.
-const DEMO_CAMERA_DISTANCE: f32 = 4.5;
-
-/// Demo directional-light position; the light shines toward the origin.
-const DEMO_LIGHT_OFFSET_X: f32 = 2.0;
-/// Demo directional-light position; the light shines toward the origin.
-const DEMO_LIGHT_OFFSET_Y: f32 = 4.0;
-/// Demo directional-light position; the light shines toward the origin.
-const DEMO_LIGHT_OFFSET_Z: f32 = 3.0;
+/// Scene directional-light position; the light shines toward the origin.
+const SCENE_LIGHT_OFFSET_X: f32 = 2.0;
+/// Scene directional-light position; the light shines toward the origin.
+const SCENE_LIGHT_OFFSET_Y: f32 = 4.0;
+/// Scene directional-light position; the light shines toward the origin.
+const SCENE_LIGHT_OFFSET_Z: f32 = 3.0;
 
 /// Advance [`TickCount`] once per schedule run.
 fn count_ticks(mut count: ResMut<TickCount>) {
@@ -271,35 +252,19 @@ impl SceneWorld {
         Self { app }
     }
 
-    /// Spawn the Rust-owned demo scene: camera, light, and a static cube,
-    /// all carrying [`DemoScene`] so [`SceneWorld::entity_count`] sees
+    /// Spawn the Rust-owned base scene: viewport camera plus key light,
+    /// both carrying [`SceneTag`] so [`SceneWorld::entity_count`] sees
     /// exactly them.
     ///
     /// Alongside the markers each entity carries real render components: the
     /// camera gets [`Camera3d`](bevy_camera::Camera3d) plus a
-    /// [`Camera`](bevy_camera::Camera) pointed at the offscreen target, the
-    /// light a [`DirectionalLight`](bevy_light::DirectionalLight), and the
-    /// cube a cuboid [`Mesh`](bevy_mesh::Mesh) with a default
-    /// [`StandardMaterial`](bevy_pbr::StandardMaterial). The cube keeps its
-    /// [`MeshTag`] and identity [`Transform`], which stays fixed until an
-    /// op moves it (no auto-spin).
+    /// [`Camera`](bevy_camera::Camera) pointed at the offscreen target, and
+    /// the light a [`DirectionalLight`](bevy_light::DirectionalLight).
+    /// Graph content is not spawned here — it arrives through the tick
+    /// recook loop (see `cook`), so an empty graph renders camera plus
+    /// light only.
     #[must_use]
-    pub fn spawn_demo_scene(&mut self) -> DemoSceneIds {
-        let cube_mesh = {
-            let mut meshes = self.app.world_mut().resource_mut::<Assets<Mesh>>();
-            meshes.add(Mesh::from(bevy_math::primitives::Cuboid::new(
-                DEMO_CUBE_SIZE,
-                DEMO_CUBE_SIZE,
-                DEMO_CUBE_SIZE,
-            )))
-        };
-        let cube_material = {
-            let mut materials = self
-                .app
-                .world_mut()
-                .resource_mut::<Assets<StandardMaterial>>();
-            materials.add(StandardMaterial::default())
-        };
+    pub fn spawn_base_scene(&mut self) -> SceneIds {
         let target = self
             .app
             .world()
@@ -309,37 +274,26 @@ impl SceneWorld {
         let world = self.app.world_mut();
         let camera = world
             .spawn((
-                DemoScene,
-                DemoCamera,
+                SceneTag,
+                ViewportCamera,
                 Camera3d::default(),
                 Camera::default(),
                 RenderTarget::from(target),
-                Transform::from_xyz(0.0, DEMO_CAMERA_HEIGHT, DEMO_CAMERA_DISTANCE)
+                Transform::from_xyz(0.0, VIEWPORT_CAMERA_HEIGHT, VIEWPORT_CAMERA_DISTANCE)
                     .looking_at(Vec3::ZERO, Vec3::Y),
             ))
             .id();
         let light = world
             .spawn((
-                DemoScene,
-                DemoLight,
+                SceneTag,
+                SceneLight,
                 DirectionalLight::default(),
                 Transform::from_xyz(
-                    DEMO_LIGHT_OFFSET_X,
-                    DEMO_LIGHT_OFFSET_Y,
-                    DEMO_LIGHT_OFFSET_Z,
+                    SCENE_LIGHT_OFFSET_X,
+                    SCENE_LIGHT_OFFSET_Y,
+                    SCENE_LIGHT_OFFSET_Z,
                 )
                 .looking_at(Vec3::ZERO, Vec3::Y),
-            ))
-            .id();
-        let cube = world
-            .spawn((
-                DemoScene,
-                DemoCube,
-                MeshTag(MeshId(0)),
-                Transform::default(),
-                Mesh3d(cube_mesh),
-                MeshMaterial3d(cube_material),
-                Visibility::default(),
             ))
             .id();
         let pivot = self.scene_bounds().map_or(Vec3::ZERO, |bounds| {
@@ -348,34 +302,13 @@ impl SceneWorld {
         self.app
             .world_mut()
             .insert_resource(camera::ViewportPivot(pivot));
-        DemoSceneIds {
-            camera,
-            light,
-            cube,
-        }
+        SceneIds { camera, light }
     }
 
     /// Ticks elapsed since creation.
     #[must_use]
     pub fn tick_count(&self) -> u64 {
         self.app.world().resource::<TickCount>().0
-    }
-
-    /// Current demo-cube Y angle in radians, read from the cube's live
-    /// [`Transform`].
-    ///
-    /// The angle is ECS state: the scene holds still (no auto-spin since
-    /// #46), so this reads the spawn orientation until an op moves the cube
-    /// — and the published pixels derive from this reading, so identical
-    /// ECS state publishes identical frames. `0.0` when no [`DemoCube`] is
-    /// alive.
-    #[must_use]
-    pub fn cube_angle_y(&mut self) -> f32 {
-        let world = self.app.world_mut();
-        let mut cubes = world.query_filtered::<&Transform, With<DemoCube>>();
-        cubes.iter(world).next().map_or(0.0, |transform| {
-            transform.rotation.to_euler(EulerRot::YXZ).0
-        })
     }
 
     /// Live viewport extents in pixels (initially `FRAME_WIDTH` x
@@ -388,7 +321,7 @@ impl SceneWorld {
 
     /// Re-target the offscreen viewport to `width` x `height` pixels.
     ///
-    /// Recreates the offscreen [`Image`] target, re-points the demo camera
+    /// Recreates the offscreen [`Image`] target, re-points the viewport camera
     /// at it, and drops the staging buffer (lazily rebuilt at the new size
     /// on the next [`SceneWorld::render_frame`]). Idempotent: requesting
     /// the current size is a no-op that touches neither the target nor the
@@ -432,7 +365,7 @@ impl SceneWorld {
             let mut cameras = self
                 .app
                 .world_mut()
-                .query_filtered::<&mut RenderTarget, With<DemoCamera>>();
+                .query_filtered::<&mut RenderTarget, With<ViewportCamera>>();
             let world = self.app.world_mut();
             for mut target in cameras.iter_mut(world) {
                 *target = RenderTarget::from(new_handle.clone());
@@ -441,14 +374,14 @@ impl SceneWorld {
         Ok(())
     }
 
-    /// Render the current demo-scene state into a frame at the live viewport
+    /// Render the current scene state into a frame at the live viewport
     /// extents.
     ///
     /// The frame-publish seam: Swift presents whatever this returns without
     /// interpreting scene content. Pixels come off the GPU
     /// (`gpu::readback_frame`); the scene is static unless a nav op moves
-    /// the camera, so identical ECS state publishes identical frames and
-    /// every nav op is pixel-observable.
+    /// the camera or a recook swaps the cooked meshes, so identical ECS
+    /// state publishes identical frames and every nav op is pixel-observable.
     ///
     /// # Errors
     ///
@@ -459,7 +392,8 @@ impl SceneWorld {
         gpu::readback_frame(&mut self.app)
     }
 
-    /// Number of live demo-scene entities (those tagged [`DemoScene`]).
+    /// Number of live scene entities (those tagged [`SceneTag`]): the
+    /// viewport camera, the light, and the currently cooked graph meshes.
     ///
     /// Takes `&mut self` because some Bevy versions require mutable world
     /// access to construct a query, even though nothing is mutated.
@@ -468,7 +402,7 @@ impl SceneWorld {
         let mut state = self
             .app
             .world_mut()
-            .query_filtered::<Entity, With<DemoScene>>();
+            .query_filtered::<Entity, With<SceneTag>>();
         state.iter(self.app.world()).count()
     }
 
@@ -564,75 +498,27 @@ mod tests {
     }
 
     #[test]
-    fn demo_scene_spawns_three_entities() {
+    fn base_scene_spawns_camera_and_light_only() {
         let mut world = SceneWorld::new_headless();
-        let ids = world.spawn_demo_scene();
-        assert_eq!(world.entity_count(), 3);
-        assert!(world.app.world().get::<DemoCamera>(ids.camera).is_some());
-        assert!(world.app.world().get::<DemoLight>(ids.light).is_some());
-        assert!(world.app.world().get::<DemoCube>(ids.cube).is_some());
-    }
-
-    /// A red key light reads R-dominant in the published BGRA8 bytes: red
-    /// lives at byte 2. A reverted texture format or a reintroduced swizzle
-    /// would park red at byte 0 instead, so this is the end-to-end
-    /// channel-order pin the achromatic oracle (swap-invariant by design)
-    /// cannot be. Regression pin for #34.
-    #[test]
-    fn red_key_light_reads_r_dominant_in_bgra_order() {
-        // Arrange: white cube under a pure-red key light.
-        let mut world = SceneWorld::new_headless();
-        let ids = world.spawn_demo_scene();
-        world
-            .app
-            .world_mut()
-            .get_mut::<DirectionalLight>(ids.light)
-            .expect("demo light exists")
-            .color = bevy_color::Color::srgb(1.0, 0.0, 0.0);
-        // Act: pre-roll bounded ticks; early frames may be clear-only while
-        // shaders compile on first use.
-        let mut pixels = Vec::new();
-        for _ in 0..240 {
-            world.update();
-            if let Ok(frame) = world.render_frame() {
-                pixels = frame.pixels().to_vec();
-                let first = frame.pixels().chunks_exact(4).next();
-                let non_uniform = frame
-                    .pixels()
-                    .chunks_exact(4)
-                    .any(|pixel| Some(pixel) != first);
-                if non_uniform {
-                    break;
-                }
-            }
-        }
-        // Assert on the brightest pixel: the lit face under red light.
-        let brightest = pixels
-            .chunks_exact(4)
-            .max_by_key(|pixel| u16::from(pixel[0]) + u16::from(pixel[1]) + u16::from(pixel[2]))
-            .expect("warmed-up frame holds pixels");
-        let [b, g, r, a] = [brightest[0], brightest[1], brightest[2], brightest[3]];
-        assert_eq!(a, 255, "opaque PBR output, got {brightest:?}");
+        let ids = world.spawn_base_scene();
+        assert_eq!(world.entity_count(), 2);
         assert!(
-            r > 150 && b < 120,
-            "red light must read R-dominant, got [{b}, {g}, {r}]"
+            world
+                .app
+                .world()
+                .get::<ViewportCamera>(ids.camera)
+                .is_some()
         );
-        assert!(
-            u16::from(r) > u16::from(b) + 60,
-            "red channel must dominate blue, got [{b}, {g}, {r}]"
-        );
+        assert!(world.app.world().get::<SceneLight>(ids.light).is_some());
     }
 
     #[test]
-    fn ticks_advance_count_while_cube_holds_still() {
+    fn ticks_advance_count_on_a_static_scene() {
         let mut world = SceneWorld::new_headless();
-        let ids = world.spawn_demo_scene();
+        let _ = world.spawn_base_scene();
         assert_eq!(world.tick_count(), 0);
-        let before = *world.app.world().get::<Transform>(ids.cube).unwrap();
         world.update();
         assert_eq!(world.tick_count(), 1);
-        let after = *world.app.world().get::<Transform>(ids.cube).unwrap();
-        assert_eq!(before.rotation, after.rotation);
     }
 
     #[test]

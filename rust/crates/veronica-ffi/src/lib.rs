@@ -14,7 +14,7 @@ use veronica_core::{
 use veronica_graph::{
     GRAPH_SNAPSHOT_VERSION, GraphSnapshot, NodeGraph, OperatorGraph, OperatorKind, Position,
 };
-use veronica_scene::{DemoSceneIds, MAX_VIEWPORT_EDGE, SceneWorld};
+use veronica_scene::{MAX_VIEWPORT_EDGE, SceneIds, SceneWorld};
 
 mod surface;
 
@@ -38,14 +38,19 @@ pub enum VrnResult {
 #[derive(Debug)]
 #[allow(
     dead_code,
-    reason = "`graph` + `demo` wire up as the FFI surface grows; `mesh_history` awaits its intents"
+    reason = "`graph` + `base` wire up as the FFI surface grows; `mesh_history` awaits its intents"
 )]
 pub struct VrnContext {
     graph: NodeGraph,
     operator_graph: OperatorGraph,
     graph_history: UndoHistory<GraphSnapshot>,
     scene: SceneWorld,
-    demo: DemoSceneIds,
+    base: SceneIds,
+    /// Graph epoch last cooked into the scene. [`vrn_tick`] recooks via
+    /// [`SceneWorld::recook_graph`] whenever the live graph epoch differs,
+    /// then records it here — so a quiet tick never respawns, and a failed
+    /// cook stays dirty and retries on the next tick.
+    last_cooked_epoch: u64,
     mesh_history: UndoHistory<MeshTopology>,
     /// Ping-pong `IOSurface` pair. Each tick uploads into the back slot and
     /// publishes the front slot, so Swift's `draw` blit never reads a
@@ -116,13 +121,16 @@ fn micros_saturating(elapsed: Duration) -> u64 {
 impl VrnContext {
     fn new() -> Self {
         let mut scene = SceneWorld::new_headless();
-        let demo = scene.spawn_demo_scene();
+        let base = scene.spawn_base_scene();
+        let operator_graph = OperatorGraph::new();
+        let last_cooked_epoch = operator_graph.epoch();
         Self {
             graph: NodeGraph::new(),
-            operator_graph: OperatorGraph::new(),
+            operator_graph,
             graph_history: UndoHistory::new(64),
             scene,
-            demo,
+            base,
+            last_cooked_epoch,
             mesh_history: UndoHistory::new(64),
             surfaces: [None, None],
             front: 0,
@@ -267,6 +275,11 @@ pub extern "C" fn vrn_validate_mesh(positions_len: usize, indices_len: usize) ->
 /// Tick the headless scene once, publishing the new frame. Must be called
 /// off the Swift `MainActor`.
 ///
+/// Recooks first when the operator graph moved since the last cook
+/// (clear-and-respawn through [`SceneWorld::recook_graph`]); a failed cook
+/// reports [`VrnResult::Internal`] without publishing, and the epoch stays
+/// dirty so the next tick retries.
+///
 /// # Safety
 ///
 /// `context` must be a live pointer previously returned by
@@ -288,6 +301,23 @@ pub unsafe extern "C" fn vrn_tick(context: *mut VrnContextHandle) -> VrnResult {
             if size_result != VrnResult::Ok {
                 return size_result;
             }
+            if ctx.operator_graph.epoch() != ctx.last_cooked_epoch {
+                // Disjoint field borrows: the recook reads the graph while
+                // mutating the scene, never the whole context at once (the
+                // guard deref forbids mixing those borrows in one call).
+                let recook_failed = {
+                    let VrnContext {
+                        scene,
+                        operator_graph,
+                        ..
+                    } = &mut *ctx;
+                    scene.recook_graph(operator_graph).is_err()
+                };
+                if recook_failed {
+                    return VrnResult::Internal;
+                }
+            }
+            ctx.last_cooked_epoch = ctx.operator_graph.epoch();
             let update_start = Instant::now();
             ctx.scene.update();
             let update_us = micros_saturating(update_start.elapsed());
@@ -949,6 +979,29 @@ fn morph_weights_ffi_layout(weights: &MorphWeights) -> usize {
     weights.weights.len()
 }
 
+/// Create a default cube operator at the root, returning its fresh id.
+///
+/// Test-only helper: several tick/frame tests need real cooked geometry now
+/// that the scene ships without built-in content.
+///
+/// # Panics
+///
+/// Panics when the create call fails; that means the FFI graph path is
+/// broken, not the test input.
+#[cfg(test)]
+fn test_create_cube(context: *mut VrnContextHandle) -> u64 {
+    let kind = CString::new("cube").unwrap();
+    let mut id = 0u64;
+    // SAFETY: live context, single-threaded test; string outlives the call.
+    unsafe {
+        assert_eq!(
+            vrn_graph_create_operator(context, kind.as_ptr().cast_mut(), 0, 0.0, 0.0, &raw mut id),
+            VrnResult::Ok
+        );
+    }
+    id
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1008,7 +1061,7 @@ mod stats_tests {
     use std::ptr;
 
     #[test]
-    fn demo_stats_advance_with_ticks() {
+    fn base_stats_advance_with_ticks() {
         let context = vrn_context_create();
         assert!(!context.is_null());
         let mut ticks = 0u64;
@@ -1016,7 +1069,7 @@ mod stats_tests {
         // SAFETY: just created, alive, single-threaded test.
         unsafe {
             assert_eq!(vrn_entity_count(context, &raw mut entities), VrnResult::Ok);
-            assert_eq!(entities, 3);
+            assert_eq!(entities, 2);
             assert_eq!(vrn_tick_count(context, &raw mut ticks), VrnResult::Ok);
             assert_eq!(ticks, 0);
             assert_eq!(vrn_tick(context), VrnResult::Ok);
@@ -1053,7 +1106,7 @@ mod viewport_tests {
         ctx.scene.camera_translation().unwrap()
     }
 
-    /// Euclidean distance of a translation from the demo pivot (origin).
+    /// Euclidean distance of a translation from the viewport pivot (origin).
     fn distance_from_origin(translation: [f32; 3]) -> f32 {
         (translation[0].powi(2) + translation[1].powi(2) + translation[2].powi(2)).sqrt()
     }
@@ -1082,7 +1135,7 @@ mod viewport_tests {
     }
 
     #[test]
-    fn orbit_round_trip_moves_the_demo_camera() {
+    fn orbit_round_trip_moves_the_viewport_camera() {
         let context = vrn_context_create();
         let before = camera_translation(context);
         // SAFETY: just created, alive, single-threaded test.
@@ -1121,7 +1174,7 @@ mod viewport_tests {
     }
 
     #[test]
-    fn pan_round_trip_moves_the_demo_camera() {
+    fn pan_round_trip_moves_the_viewport_camera() {
         let context = vrn_context_create();
         let before = camera_translation(context);
         // SAFETY: just created, alive, single-threaded test.
@@ -1141,8 +1194,15 @@ mod viewport_tests {
     }
 
     #[test]
-    fn frame_all_round_trip_succeeds() {
+    fn frame_all_round_trip_refits_cooked_geometry() {
         let context = vrn_context_create();
+        // Arrange: a cooked cube to fit — the empty base scene is a no-op
+        // by design (see `empty_frame_all_preserves_camera_and_pivot`).
+        let _ = test_create_cube(context);
+        // SAFETY: just created, alive, single-threaded test.
+        unsafe {
+            assert_eq!(vrn_tick(context), VrnResult::Ok);
+        }
         let before = distance_from_origin(camera_translation(context));
         // SAFETY: just created, alive, single-threaded test.
         unsafe {
@@ -1155,7 +1215,36 @@ mod viewport_tests {
         }
         assert!(
             (after - before).abs() > 0.1,
-            "frame-all must refit the demo distance, went {before} -> {after}"
+            "frame-all must refit the cooked distance, went {before} -> {after}"
+        );
+    }
+
+    #[test]
+    fn empty_frame_all_preserves_camera_and_pivot() {
+        let context = vrn_context_create();
+        let before = camera_translation(context);
+        // SAFETY: live context, single-threaded test; lock is unpoisoned.
+        let pivot = unsafe { (*context).0.lock().unwrap().scene.pivot() };
+        // SAFETY: just created, alive, single-threaded test.
+        unsafe {
+            assert_eq!(vrn_viewport_frame_all(context), VrnResult::Ok);
+        }
+        let after = camera_translation(context);
+        // SAFETY: live context, single-threaded test; lock is unpoisoned.
+        let pivot_after = unsafe { (*context).0.lock().unwrap().scene.pivot() };
+        // SAFETY: alive until this destroy; single-threaded test.
+        unsafe {
+            vrn_context_destroy(context);
+        }
+        assert_eq!(
+            before.map(f32::to_bits),
+            after.map(f32::to_bits),
+            "empty frame-all must not move the camera"
+        );
+        assert_eq!(
+            pivot.to_array().map(f32::to_bits),
+            pivot_after.to_array().map(f32::to_bits),
+            "empty frame-all must not move the pivot"
         );
     }
     #[test]
@@ -1296,6 +1385,34 @@ mod frame_tests {
         panic!("GPU frame never showed the lit cube after {MAX_WARMUP_TICKS} ticks");
     }
 
+    /// Tick once and return the newly published surface handle plus extents.
+    ///
+    /// The repeating two lines of every ping-pong assertion, so the tests
+    /// stay under the line-count lint.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the tick or the surface read fails; either means the
+    /// frame-publish seam is broken, not the test input.
+    ///
+    /// # Safety
+    ///
+    /// `context` must be a live context that is not accessed concurrently.
+    unsafe fn tick_and_read(context: *mut VrnContextHandle) -> (*mut c_void, u32, u32) {
+        let mut surface: *mut c_void = ptr::null_mut();
+        let mut width = 0u32;
+        let mut height = 0u32;
+        // SAFETY: live context with live slots, single-threaded test.
+        unsafe {
+            assert_eq!(vrn_tick(context), VrnResult::Ok);
+            assert_eq!(
+                vrn_frame_surface(context, &raw mut surface, &raw mut width, &raw mut height),
+                VrnResult::Ok
+            );
+        }
+        (surface, width, height)
+    }
+
     #[test]
     fn published_frame_is_valid_after_tick() {
         let context = vrn_context_create();
@@ -1310,67 +1427,30 @@ mod frame_tests {
                 vrn_frame_surface(context, &raw mut surface, &raw mut width, &raw mut height),
                 VrnResult::InvalidArgument
             );
-            assert_eq!(vrn_tick(context), VrnResult::Ok);
-            assert_eq!(
-                vrn_frame_surface(context, &raw mut surface, &raw mut width, &raw mut height),
-                VrnResult::Ok
-            );
-            assert!(!surface.is_null());
-            assert_eq!(width, FRAME_WIDTH);
-            assert_eq!(height, FRAME_HEIGHT);
-            assert!(width > 0 && height > 0);
             // Ping-pong contract: consecutive ticks strictly alternate
             // handles (h0, h1, h0, ...). Both handles stay valid and extents
             // follow the viewport size from the very first tick.
-            let first = surface;
-            assert_eq!(vrn_tick(context), VrnResult::Ok);
-            assert_eq!(
-                vrn_frame_surface(context, &raw mut surface, &raw mut width, &raw mut height),
-                VrnResult::Ok
-            );
-            assert!(!surface.is_null());
-            assert_ne!(surface, first);
-            assert_eq!((width, height), (FRAME_WIDTH, FRAME_HEIGHT));
-            let second = surface;
-            assert_eq!(vrn_tick(context), VrnResult::Ok);
-            assert_eq!(
-                vrn_frame_surface(context, &raw mut surface, &raw mut width, &raw mut height),
-                VrnResult::Ok
-            );
-            assert_eq!(surface, first);
-            assert_eq!(vrn_tick(context), VrnResult::Ok);
-            assert_eq!(
-                vrn_frame_surface(context, &raw mut surface, &raw mut width, &raw mut height),
-                VrnResult::Ok
-            );
-            assert_eq!(surface, second);
-            // Past pipeline warm-up, the static scene publishes identical
-            // bytes on alternating fronts: handles flip every tick while
-            // content holds still. (Early frames may be clear-only while
-            // shaders compile.)
-            let bytes_first = front_bytes_when_ready(context);
-            assert_eq!(
-                vrn_frame_surface(context, &raw mut surface, &raw mut width, &raw mut height),
-                VrnResult::Ok
-            );
-            let ready_handle = surface;
-            assert_eq!(vrn_tick(context), VrnResult::Ok);
-            assert_eq!(
-                vrn_frame_surface(context, &raw mut surface, &raw mut width, &raw mut height),
-                VrnResult::Ok
-            );
-            assert_ne!(surface, ready_handle);
-            let bytes_second = front_bytes(context);
-            assert!(!bytes_second.is_empty());
-            assert_eq!(bytes_second, bytes_first);
-            assert_eq!(vrn_tick(context), VrnResult::Ok);
-            assert_eq!(
-                vrn_frame_surface(context, &raw mut surface, &raw mut width, &raw mut height),
-                VrnResult::Ok
-            );
-            assert_eq!(surface, ready_handle);
-            let bytes_third = front_bytes(context);
-            assert_eq!(bytes_third, bytes_second);
+            let (first, w, h) = tick_and_read(context);
+            assert!(!first.is_null());
+            assert_eq!((w, h), (FRAME_WIDTH, FRAME_HEIGHT));
+            let (second, w, h) = tick_and_read(context);
+            assert!(!second.is_null());
+            assert_ne!(second, first);
+            assert_eq!((w, h), (FRAME_WIDTH, FRAME_HEIGHT));
+            let (third, _, _) = tick_and_read(context);
+            assert_eq!(third, first);
+            let (fourth, _, _) = tick_and_read(context);
+            assert_eq!(fourth, second);
+            // The empty base scene publishes identical bytes on alternating
+            // fronts: handles flip every tick while the clear color holds.
+            let bytes_before = front_bytes(context);
+            assert!(!bytes_before.is_empty());
+            let (flipped, _, _) = tick_and_read(context);
+            assert_ne!(flipped, fourth);
+            assert_eq!(front_bytes(context), bytes_before);
+            let (back, _, _) = tick_and_read(context);
+            assert_eq!(back, fourth);
+            assert_eq!(front_bytes(context), bytes_before);
             // Null slots and null context are safe.
             assert_eq!(
                 vrn_frame_surface(context, ptr::null_mut(), &raw mut width, &raw mut height),
@@ -1425,6 +1505,9 @@ mod frame_tests {
     fn frame_all_moves_published_gpu_pixels() {
         let context = vrn_context_create();
         assert!(!context.is_null());
+        // Arrange: one cooked cube to fit — the empty base scene is a
+        // frame-all no-op by design.
+        let _ = test_create_cube(context);
         // SAFETY: just created, alive, single-threaded test.
         unsafe {
             // Arrange: warmed-up front carrying the lit cube, plus one
@@ -1992,6 +2075,126 @@ mod graph_tests {
                     assert_eq!(text, first);
                 }
             }
+            vrn_context_destroy(context);
+        }
+    }
+}
+
+#[cfg(test)]
+mod recook_tests {
+    use super::*;
+    use veronica_core::NodeId;
+
+    /// Live `(operator, entity-bits)` cooked pairs through the context lock.
+    ///
+    /// Entities cross as `to_bits` so this module stays Bevy-free: identity
+    /// is all the churn assertions need.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the lock is poisoned; that indicates a broken test setup,
+    /// not fallible production input.
+    fn cooked_pairs(context: *mut VrnContextHandle) -> Vec<(NodeId, u64)> {
+        // SAFETY: live context, single-threaded test; lock is unpoisoned.
+        let mut ctx = unsafe { (*context).0.lock().unwrap() };
+        ctx.scene
+            .cooked_entities()
+            .into_iter()
+            .map(|(id, entity)| (id, entity.to_bits()))
+            .collect()
+    }
+
+    /// `(live graph epoch, last-cooked epoch)` through the context lock.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the lock is poisoned; that indicates a broken test setup.
+    fn epochs(context: *mut VrnContextHandle) -> (u64, u64) {
+        // SAFETY: live context, single-threaded test; lock is unpoisoned.
+        let ctx = unsafe { (*context).0.lock().unwrap() };
+        (ctx.operator_graph.epoch(), ctx.last_cooked_epoch)
+    }
+
+    /// Live scene entity count through the FFI boundary.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the count call fails; that means the FFI boundary is
+    /// broken, not the test input.
+    ///
+    /// # Safety
+    ///
+    /// `context` must be a live context that is not accessed concurrently.
+    unsafe fn entity_count(context: *mut VrnContextHandle) -> u64 {
+        let mut count = 0u64;
+        // SAFETY: live context with a live slot, single-threaded test.
+        unsafe {
+            assert_eq!(vrn_entity_count(context, &raw mut count), VrnResult::Ok);
+        }
+        count
+    }
+
+    #[test]
+    fn empty_graph_tick_cooks_nothing_and_stays_stable() {
+        let context = vrn_context_create();
+        assert!(!context.is_null());
+        // SAFETY: just created, alive, single-threaded test.
+        unsafe {
+            assert_eq!(vrn_tick(context), VrnResult::Ok);
+            assert_eq!(entity_count(context), 2);
+            assert!(cooked_pairs(context).is_empty());
+            // Second tick: epoch clean, nothing to reconcile.
+            assert_eq!(vrn_tick(context), VrnResult::Ok);
+            assert_eq!(entity_count(context), 2);
+            assert!(cooked_pairs(context).is_empty());
+            assert_eq!(epochs(context).0, epochs(context).1);
+            vrn_context_destroy(context);
+        }
+    }
+
+    #[test]
+    fn mutate_tick_cooks_and_second_tick_is_churn_free() {
+        let context = vrn_context_create();
+        assert!(!context.is_null());
+        let id = test_create_cube(context);
+        // SAFETY: just created, alive, single-threaded test.
+        unsafe {
+            // Mutate, then tick: the cooked cube appears and the epoch tracks.
+            assert_eq!(vrn_tick(context), VrnResult::Ok);
+            let first = cooked_pairs(context);
+            assert_eq!(first.len(), 1);
+            assert_eq!(first[0].0, NodeId(id));
+            assert_eq!(entity_count(context), 3);
+            assert_eq!(epochs(context).0, epochs(context).1);
+            // Second tick without mutation: the same live entity, no respawn.
+            assert_eq!(vrn_tick(context), VrnResult::Ok);
+            assert_eq!(cooked_pairs(context), first);
+            assert_eq!(entity_count(context), 3);
+            // A move bumps the epoch too, so the next tick respawns fresh.
+            assert_eq!(
+                vrn_graph_move_operator(context, id, 5.0, 5.0),
+                VrnResult::Ok
+            );
+            assert_eq!(vrn_tick(context), VrnResult::Ok);
+            assert_ne!(cooked_pairs(context), first);
+            assert_eq!(cooked_pairs(context).len(), 1);
+            vrn_context_destroy(context);
+        }
+    }
+
+    #[test]
+    fn delete_then_tick_clears_cooked() {
+        let context = vrn_context_create();
+        assert!(!context.is_null());
+        let id = test_create_cube(context);
+        // SAFETY: just created, alive, single-threaded test.
+        unsafe {
+            assert_eq!(vrn_tick(context), VrnResult::Ok);
+            assert_eq!(cooked_pairs(context).len(), 1);
+            assert_eq!(vrn_graph_delete_operator(context, id), VrnResult::Ok);
+            assert_eq!(vrn_tick(context), VrnResult::Ok);
+            assert!(cooked_pairs(context).is_empty());
+            assert_eq!(entity_count(context), 2);
             vrn_context_destroy(context);
         }
     }
