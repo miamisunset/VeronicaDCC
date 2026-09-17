@@ -239,6 +239,24 @@ nonisolated struct GraphSnapshot: Codable, Equatable, Sendable {
     }
 }
 
+/// Canvas-menu group for one creatable operator kind.
+///
+/// `nil` on the definition means the menu root (structural operators like
+/// `Container`); a group means a named submenu (operator families like
+/// `Geometry`). Menu labels never carry an "Add" prefix.
+nonisolated enum OperatorMenuGroup: String, Equatable, Sendable {
+    /// Geometry family submenu.
+    case geometry
+
+    /// Submenu title shown on the canvas menu.
+    var title: String {
+        switch self {
+        case .geometry:
+            "Geometry"
+        }
+    }
+}
+
 /// Registry entry describing one creatable operator kind.
 ///
 /// Explicitly `nonisolated`: read from background engine effects and views.
@@ -247,19 +265,144 @@ nonisolated struct OperatorTypeDef: Equatable, Sendable {
     var kind: String
     /// Human-readable menu label.
     var displayName: String
+    /// Menu placement: `nil` for the menu root, a group for a submenu.
+    var menuGroup: OperatorMenuGroup?
 }
 
-/// Static registry backing the canvas add menu (ADR-0002: Swift-static).
+/// One named canvas-menu submenu and the operator kinds it holds.
+nonisolated struct OperatorSubmenu: Equatable, Sendable {
+    /// Submenu title (for example `"Geometry"`).
+    var title: String
+    /// Operator kinds in this submenu, in registry order.
+    var items: [OperatorTypeDef]
+}
+
+/// Static registry backing the canvas menu (ADR-0002: Swift-static).
 ///
-/// Container-only for now: the engine accepts `"cube"` but cube creation UX
-/// belongs to the editing work, so the menu stays a single entry until then.
+/// `Container` stays at the menu root (structural); `Cube` lives in the
+/// `Geometry` submenu, establishing the family pattern for future operators.
 ///
 /// Explicitly `nonisolated`: read from background engine effects and views.
 nonisolated enum OperatorTypeRegistry {
     /// All creatable operator kinds.
     static let all: [OperatorTypeDef] = [
-        OperatorTypeDef(kind: "container", displayName: "Container")
+        OperatorTypeDef(kind: "container", displayName: "Container", menuGroup: nil),
+        OperatorTypeDef(kind: "cube", displayName: "Cube", menuGroup: .geometry)
     ]
+}
+
+/// Pure canvas-menu taxonomy derived from the registry (unit-tested; the
+/// view renders this model verbatim so menu structure never drifts).
+nonisolated enum OperatorMenuModel {
+    /// Operator kinds shown at the menu root, in registry order.
+    static var rootItems: [OperatorTypeDef] {
+        OperatorTypeRegistry.all.filter { $0.menuGroup == nil }
+    }
+
+    /// Named submenus and their kinds, in first-appearance registry order.
+    static var submenus: [OperatorSubmenu] {
+        var ordered: [OperatorMenuGroup] = []
+        for definition in OperatorTypeRegistry.all {
+            guard let group = definition.menuGroup, !ordered.contains(group) else {
+                continue
+            }
+            ordered.append(group)
+        }
+        return ordered.map { group in
+            OperatorSubmenu(
+                title: group.title,
+                items: OperatorTypeRegistry.all.filter { $0.menuGroup == group }
+            )
+        }
+    }
+}
+
+/// Schema defaults for user-editable numeric parameters, by operator kind.
+///
+/// A fresh cube carries no `size`/`center` keys (creation seeds only the
+/// name); the cook falls back to Rust's `DEFAULT_CUBE_SIZE`/`DEFAULT_CUBE_CENTER`
+/// (`[1, 1, 1]`/`[0, 0, 0]`). The editor seeds its triple-fields from these
+/// same values so absent keys stay editable. Mirrors `CubeParams` — any
+/// drift breaks the cook contract (see the schema tests).
+nonisolated enum OperatorParameterSchema {
+    /// Editable numeric defaults for `kind`: cube's `size`/`center`, empty
+    /// for kinds with no numeric schema (for example `container`).
+    static func editableNumericDefaults(for kind: String) -> [String: ParameterValue] {
+        guard kind == "cube" else {
+            return [:]
+        }
+        return [
+            "size": .vec3(1, 1, 1),
+            "center": .vec3(0, 0, 0)
+        ]
+    }
+
+    /// Editable numeric parameters for one mirror: schema defaults for
+    /// absent keys, mirror values where present, restricted to the
+    /// `.float`/`.vec3` cases the generic editor components commit.
+    /// Present-but-mistyped values (for example a text `size`) stay out:
+    /// they render as read-only rows, never as editors.
+    static func editableNumericParams(for mirrored: OperatorMirror?) -> [String: ParameterValue] {
+        guard let mirrored else {
+            return [:]
+        }
+        let merged = editableNumericDefaults(for: mirrored.kind)
+            .merging(mirrored.parameters) { _, mirror in mirror }
+        return merged.filter {
+            switch $1 {
+            case .float, .vec3:
+                true
+            case .text, .integer, .flag:
+                false
+            }
+        }
+    }
+}
+
+/// Parsed triple-field result: one double per axis.
+nonisolated struct Vec3Components: Equatable, Sendable {
+    /// X component.
+    var x: Double
+    /// Y component.
+    var y: Double
+    /// Z component.
+    var z: Double
+}
+
+/// Pure field-level validation for the generic numeric editor components.
+///
+/// Both helpers trim surrounding whitespace (like the name commit path) and
+/// accept finite doubles only: `Double` also parses `nan`/`inf`, but those
+/// are never meaningful parameter values, so they are rejected at the field
+/// and never committed. Anything else is rejected the same way, keeping
+/// bad values away from the cook's `InvalidParameter` backstop.
+nonisolated enum NumericDraftParsing {
+    /// Parses one float-field draft, or `nil` when it must not commit.
+    static func parseFloatDraft(_ draft: String) -> Double? {
+        let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let value = Double(trimmed), value.isFinite else {
+            return nil
+        }
+        return value
+    }
+
+    /// Parses one triple-field draft (exactly 3 components), or `nil` when
+    /// any component is non-numeric and the edit must not commit.
+    static func parseVec3Draft(_ drafts: [String]) -> Vec3Components? {
+        guard drafts.count == 3,
+              let x = parseFloatDraft(drafts[0]),
+              let y = parseFloatDraft(drafts[1]),
+              let z = parseFloatDraft(drafts[2])
+        else {
+            return nil
+        }
+        return Vec3Components(x: x, y: y, z: z)
+    }
+
+    /// Seed text for one float component. Round-trips through the parser.
+    static func seedText(for value: Double) -> String {
+        String(value)
+    }
 }
 
 /// Fallible domain boundary for every graph intent (AGENTS.md: typed throws).

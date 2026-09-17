@@ -82,6 +82,24 @@ struct NodeGraphFeature {
         /// True after the editor draft diverges from the mirror. A confirmed
         /// round-trip re-seeds only while clean, so typing is never clobbered.
         var editorDirty = false
+        /// Parameter-editor drafts of numeric (float) parameters, by key,
+        /// seeded from the mirror (or the kind schema for absent keys) on
+        /// selection and re-seeded from confirmed mirrors while clean.
+        var editorFloatDrafts: [String: String] = [:]
+        /// Parameter-editor drafts of triple (vec3) parameters, by key:
+        /// exactly 3 component strings each. Same seeding lifetime as
+        /// `editorFloatDrafts`.
+        var editorVec3Drafts: [String: [String]] = [:]
+        /// Numeric parameter keys whose drafts diverge from the mirror. A
+        /// confirmed round-trip re-seeds only clean keys, so typing in one
+        /// field survives commits from another.
+        var editorParamDirtyKeys: Set<String> = []
+        /// Epoch of the in-flight numeric-parameter commit, if any. Only
+        /// the matching response may restore the optimistically cleared
+        /// dirty key (same scoping as `editorCommitEpoch`).
+        var editorParamCommitEpoch: UInt64?
+        /// Numeric key of the in-flight commit, if any.
+        var editorParamCommitKey: String?
         /// Epoch of the in-flight editor commit, if any. Only the matching
         /// response may restore the optimistically cleared dirty flag, so
         /// unrelated intent failures never dirty a clean editor.
@@ -153,6 +171,16 @@ struct NodeGraphFeature {
         case editorNameCommitted
         /// Parameter-editor edit reverted (Escape).
         case editorNameReverted
+        /// Parameter-editor float draft changed for `key`.
+        case editorFloatChanged(key: String, draft: String)
+        /// Parameter-editor float committed for `key` (Enter or focus loss).
+        case editorFloatCommitted(key: String)
+        /// Parameter-editor triple component changed for `key` (`axis` 0-2).
+        case editorVec3Changed(key: String, axis: Int, draft: String)
+        /// Parameter-editor triple committed for `key` (Enter or focus loss).
+        case editorVec3Committed(key: String)
+        /// Parameter-editor numeric edit reverted for `key` (Escape).
+        case editorParamReverted(key: String)
         /// Delete key or menu requested deletion (cascades in Rust).
         case deleteRequested(UInt64)
         /// Explicit order swap of the Graph/Parameters panes (menu or
@@ -210,6 +238,10 @@ struct NodeGraphFeature {
                 // longer in flight, whatever any newer commit did after it.
                 let editorLanded = state.editorCommitEpoch == epoch
                 state.editorCommitEpoch = nil
+                let landedParamKey: String? =
+                    state.editorParamCommitEpoch == epoch ? state.editorParamCommitKey : nil
+                state.editorParamCommitEpoch = nil
+                state.editorParamCommitKey = nil
                 switch result {
                 case let .success(snapshot):
                     state.operators = snapshot.operators
@@ -219,6 +251,7 @@ struct NodeGraphFeature {
                     if !state.editorDirty {
                         state.editorNameDraft = state.operators.first { $0.id == state.selected }?.name ?? ""
                     }
+                    reseedCleanNumericParams(&state)
                 case let .failure(error):
                     state.lastError = error.message
                     // Only the failed editor commit restores the
@@ -227,6 +260,9 @@ struct NodeGraphFeature {
                     // unrelated failures leave a clean editor clean.
                     if editorLanded {
                         state.editorDirty = true
+                    }
+                    if let key = landedParamKey {
+                        state.editorParamDirtyKeys.insert(key)
                     }
                 }
                 return .none
@@ -238,14 +274,29 @@ struct NodeGraphFeature {
                     return .none
                 }
                 state.pendingCommit = nil
+                // Same landed-key capture as `snapshotResponse`: the engine
+                // committed, so the typed value is in the mirror — but the
+                // user's draft must still survive the reseed below.
+                let editorLanded = state.editorCommitEpoch == epoch
                 state.editorCommitEpoch = nil
+                let landedParamKey: String? =
+                    state.editorParamCommitEpoch == epoch ? state.editorParamCommitKey : nil
+                state.editorParamCommitEpoch = nil
+                state.editorParamCommitKey = nil
                 state.operators = snapshot.operators
                 state.lastError = error.message
+                if editorLanded {
+                    state.editorDirty = true
+                }
+                if let key = landedParamKey {
+                    state.editorParamDirtyKeys.insert(key)
+                }
                 // Same protection as the success path: only a clean editor
                 // follows the advanced mirror.
                 if !state.editorDirty {
                     state.editorNameDraft = state.operators.first { $0.id == state.selected }?.name ?? ""
                 }
+                reseedCleanNumericParams(&state)
                 return .none
 
             case let .operatorSelected(id):
@@ -380,9 +431,7 @@ struct NodeGraphFeature {
             case let .deleteRequested(id):
                 if state.selected == id {
                     state.selected = nil
-                    state.editorNameDraft = ""
-                    state.editorDirty = false
-                    state.editorCommitEpoch = nil
+                    seedEditor(&state)
                 }
                 state.snapshotEpoch += 1
                 return commit(
@@ -431,6 +480,73 @@ struct NodeGraphFeature {
                 seedEditor(&state)
                 return .none
 
+            case let .editorFloatChanged(key, draft):
+                state.editorFloatDrafts[key] = draft
+                state.editorParamDirtyKeys.insert(key)
+                return .none
+
+            case let .editorFloatCommitted(key):
+                // No-op unless the draft diverged, a selection exists, and
+                // the text parses: non-numeric input is rejected at the
+                // field and never commits (the cook's `InvalidParameter`
+                // stays a backend backstop, never a user-visible path).
+                guard let id = state.selected,
+                      state.editorParamDirtyKeys.contains(key),
+                      let draft = state.editorFloatDrafts[key],
+                      let value = NumericDraftParsing.parseFloatDraft(draft)
+                else {
+                    return .none
+                }
+                return commitNumericParam(
+                    state: &state,
+                    id: id,
+                    key: key,
+                    value: .float(value),
+                    engine: engine,
+                    persistence: persistence
+                )
+
+            case let .editorVec3Changed(key, axis, draft):
+                guard axis >= 0, axis < 3 else {
+                    return .none
+                }
+                var triple = state.editorVec3Drafts[key] ?? ["", "", ""]
+                while triple.count < 3 {
+                    triple.append("")
+                }
+                triple[axis] = draft
+                state.editorVec3Drafts[key] = triple
+                state.editorParamDirtyKeys.insert(key)
+                return .none
+
+            case let .editorVec3Committed(key):
+                // Same triple-or-nothing rule as the field: one bad
+                // component vetoes the whole commit.
+                guard let id = state.selected,
+                      state.editorParamDirtyKeys.contains(key),
+                      let drafts = state.editorVec3Drafts[key],
+                      let triple = NumericDraftParsing.parseVec3Draft(drafts)
+                else {
+                    return .none
+                }
+                return commitNumericParam(
+                    state: &state,
+                    id: id,
+                    key: key,
+                    value: .vec3(triple.x, triple.y, triple.z),
+                    engine: engine,
+                    persistence: persistence
+                )
+
+            case let .editorParamReverted(key):
+                state.editorParamDirtyKeys.remove(key)
+                if state.editorParamCommitKey == key {
+                    state.editorParamCommitEpoch = nil
+                    state.editorParamCommitKey = nil
+                }
+                reseedCleanNumericParams(&state)
+                return .none
+
             case let .paneOrderChanged(order):
                 state.paneOrder = order
                 return .none
@@ -459,6 +575,80 @@ struct NodeGraphFeature {
         state.editorNameDraft = state.operators.first { $0.id == state.selected }?.name ?? ""
         state.editorDirty = false
         state.editorCommitEpoch = nil
+        state.editorFloatDrafts = [:]
+        state.editorVec3Drafts = [:]
+        state.editorParamDirtyKeys = []
+        state.editorParamCommitEpoch = nil
+        state.editorParamCommitKey = nil
+        reseedCleanNumericParams(&state)
+    }
+
+    /// Re-seeds numeric drafts for clean keys from the current mirror
+    /// (schema defaults for absent keys); dirty keys keep the user's
+    /// typing, and drafts for keys that stopped being editable are dropped
+    /// unless dirty.
+    private func reseedCleanNumericParams(_ state: inout State) {
+        let mirrored = state.operators.first { $0.id == state.selected }
+        let editable = OperatorParameterSchema.editableNumericParams(for: mirrored)
+        let known = Set(state.editorFloatDrafts.keys)
+            .union(state.editorVec3Drafts.keys)
+            .union(editable.keys)
+        for key in known {
+            guard !state.editorParamDirtyKeys.contains(key) else {
+                continue
+            }
+            state.editorFloatDrafts.removeValue(forKey: key)
+            state.editorVec3Drafts.removeValue(forKey: key)
+            switch editable[key] {
+            case let .float(value):
+                state.editorFloatDrafts[key] = NumericDraftParsing.seedText(for: value)
+            case let .vec3(x, y, z):
+                state.editorVec3Drafts[key] = [
+                    NumericDraftParsing.seedText(for: x),
+                    NumericDraftParsing.seedText(for: y),
+                    NumericDraftParsing.seedText(for: z)
+                ]
+            case .text, .integer, .flag, nil:
+                break
+            }
+        }
+    }
+
+    /// Commits one numeric parameter through snapshot restore.
+    ///
+    /// `setParameter` stores `Text` verbatim, and a text `size`/`center`
+    /// would fail the cook with `InvalidParameter` on every tick retry —
+    /// so typed values travel inside a restored snapshot instead, through
+    /// the same `commit()` refresh-and-autosave path as every other intent.
+    /// The effect re-reads the mirror before writing so two rapid commits
+    /// from different fields compose instead of clobbering (a residual
+    /// interleave window remains; the epoch-guarded refresh keeps the
+    /// mirror truthful either way).
+    private func commitNumericParam(
+        state: inout State,
+        id: UInt64,
+        key: String,
+        value: ParameterValue,
+        engine: EngineClient,
+        persistence: GraphPersistence
+    ) -> Effect<Action> {
+        // Cleared optimistically; only the matching failed response
+        // restores the key (see `snapshotResponse`).
+        state.editorParamDirtyKeys.remove(key)
+        state.snapshotEpoch += 1
+        state.editorParamCommitEpoch = state.snapshotEpoch
+        state.editorParamCommitKey = key
+        return commit(
+            engine: engine,
+            persistence: persistence,
+            epoch: state.snapshotEpoch
+        ) { (client: EngineClient) async throws(GraphEngineError) in
+            var base = try await client.requestSnapshot()
+            if let index = base.operators.firstIndex(where: { $0.id == id }) {
+                base.operators[index].parameters[key] = value
+            }
+            try await client.restoreSnapshot(base)
+        }
     }
 
     /// Runs one mutating intent, then refreshes the mirror, autosaves it,

@@ -212,10 +212,92 @@ struct GraphSnapshotTests {
         #expect(x != Double(Float(0.12345678901234568)))
     }
 
-    @Test func registryHasSingleContainerEntry() {
+    @Test func registryHoldsContainerAndCube() {
         #expect(OperatorTypeRegistry.all == [
-            OperatorTypeDef(kind: "container", displayName: "Container")
+            OperatorTypeDef(kind: "container", displayName: "Container", menuGroup: nil),
+            OperatorTypeDef(kind: "cube", displayName: "Cube", menuGroup: .geometry)
         ])
+    }
+
+    @Test func menuTaxonomyRootsContainerNestsCubeUnderGeometry() {
+        #expect(OperatorMenuModel.rootItems == [
+            OperatorTypeDef(kind: "container", displayName: "Container", menuGroup: nil)
+        ])
+        #expect(OperatorMenuModel.submenus == [
+            OperatorSubmenu(
+                title: "Geometry",
+                items: [OperatorTypeDef(kind: "cube", displayName: "Cube", menuGroup: .geometry)]
+            )
+        ])
+    }
+
+    @Test func cubeSchemaDefaultsMirrorRustCubeParams() {
+        let defaults = OperatorParameterSchema.editableNumericDefaults(for: "cube")
+        #expect(defaults == [
+            "size": .vec3(1, 1, 1),
+            "center": .vec3(0, 0, 0)
+        ])
+        // Bit-exact: the editor seeds what the cook defaults to.
+        if case let .vec3(x, y, z) = defaults["size"] {
+            #expect(x.bitPattern == (1.0).bitPattern)
+            #expect(y.bitPattern == (1.0).bitPattern)
+            #expect(z.bitPattern == (1.0).bitPattern)
+        } else {
+            Issue.record("expected a vec3 for size")
+        }
+        #expect(OperatorParameterSchema.editableNumericDefaults(for: "container") == [:])
+        #expect(OperatorParameterSchema.editableNumericDefaults(for: "unknown") == [:])
+    }
+
+    @Test(
+        "float drafts commit numerics and reject the rest",
+        arguments: [
+            ("2", 2.0), ("-0.5", -0.5), ("  3.25  ", 3.25), ("1e3", 1_000.0)
+        ]
+    )
+    func floatDraftAcceptsNumerics(draft: String, expected: Double) {
+        #expect(NumericDraftParsing.parseFloatDraft(draft) == expected)
+    }
+
+    @Test(
+        "float drafts reject non-numerics",
+        arguments: ["", "   ", "abc", "1,2", "12px", "--3", "1.2.3", "nan", "NaN", "inf", "-inf", "infinity"]
+    )
+    func floatDraftRejectsNonNumerics(draft: String) {
+        #expect(NumericDraftParsing.parseFloatDraft(draft) == nil)
+    }
+
+    @Test func vec3DraftCommitsCompleteTriplesOnly() {
+        let parsed = NumericDraftParsing.parseVec3Draft(["1", "2", "3"])
+        #expect(parsed == Vec3Components(x: 1, y: 2, z: 3))
+        // One bad component vetoes the whole triple: never partially commit.
+        #expect(NumericDraftParsing.parseVec3Draft(["1", "oops", "3"]) == nil)
+        #expect(NumericDraftParsing.parseVec3Draft(["1", "", "3"]) == nil)
+        #expect(NumericDraftParsing.parseVec3Draft(["1", "2"]) == nil)
+        #expect(NumericDraftParsing.parseVec3Draft(["1", "2", "3", "4"]) == nil)
+        #expect(NumericDraftParsing.parseVec3Draft([]) == nil)
+    }
+
+    @Test func editableNumericsPreferMirrorAndSkipMistyped() {
+        let mirrored = OperatorMirror(
+            id: 1, kind: "cube", name: "Box", parent: nil,
+            position: GraphPosition(x: 0, y: 0),
+            parameters: ["size": .text("big"), "center": .vec3(0, 0, 0), "seed": .integer(7)]
+        )
+        let editable = OperatorParameterSchema.editableNumericParams(for: mirrored)
+        // Present-but-mistyped stays out (read-only row, never an editor);
+        // stored triples win over the schema defaults.
+        #expect(editable["size"] == nil)
+        #expect(editable["center"] == .vec3(0, 0, 0))
+        #expect(editable["seed"] == nil)
+        #expect(OperatorParameterSchema.editableNumericParams(for: nil) == [:])
+    }
+
+    @Test func seedTextRoundTripsThroughParser() {
+        for value in [1.0, -2.5, 0.1 + 0.2, 1_000.0] {
+            let parsed = NumericDraftParsing.parseFloatDraft(NumericDraftParsing.seedText(for: value))
+            #expect(parsed == value)
+        }
     }
 
     @Test func childrenFilterByParent() {
