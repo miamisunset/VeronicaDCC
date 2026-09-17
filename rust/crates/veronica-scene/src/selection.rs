@@ -171,6 +171,16 @@ pub fn write_selection_mask(mesh: &mut Mesh, face: u32) -> Result<usize, SceneEr
 }
 
 impl SceneWorld {
+    /// Live cooked entity for `node`, if any. Single lookup behind
+    /// [`SceneWorld::set_selection`], [`SceneWorld::clear_selection`], and
+    /// the recook retention path, so the membership predicate
+    /// (`SourceOperator` match over [`CookedMesh`] entities) lives once.
+    fn selection_target_entity(&mut self, node: NodeId) -> Option<Entity> {
+        self.cooked_entities()
+            .into_iter()
+            .find_map(|(id, entity)| (id == node).then_some(entity))
+    }
+
     /// Select `pick`: mask plus tint on the target's cooked mesh (CPU and
     /// GPU copies), stored pick in the [`Selection`] resource.
     ///
@@ -187,9 +197,7 @@ impl SceneWorld {
     /// triangle of the target.
     pub fn set_selection(&mut self, pick: Pick) -> Result<(), SceneError> {
         let entity = self
-            .cooked_entities()
-            .into_iter()
-            .find_map(|(id, entity)| (id == pick.node).then_some(entity))
+            .selection_target_entity(pick.node)
             .ok_or(SceneError::NoCookedSelectionTarget { node: pick.node })?;
         let triangles = {
             let mut cooked = self
@@ -217,10 +225,7 @@ impl SceneWorld {
     pub fn clear_selection(&mut self) {
         let stored = self.app.world().resource::<Selection>().pick;
         if let Some(stored) = stored {
-            let entity = self
-                .cooked_entities()
-                .into_iter()
-                .find_map(|(id, entity)| (id == stored.node).then_some(entity));
+            let entity = self.selection_target_entity(stored.node);
             if let Some(entity) = entity {
                 if let Some(mut cooked) = self.app.world_mut().get_mut::<CookedMesh>(entity) {
                     paint_base_mesh(&mut cooked.0);
@@ -260,10 +265,7 @@ impl SceneWorld {
     /// Live triangle total for `node`'s cooked mesh, or `None` when the
     /// node has no cooked entity or no mappable index run.
     fn cooked_triangle_total(&mut self, node: NodeId) -> Option<usize> {
-        let entity = self
-            .cooked_entities()
-            .into_iter()
-            .find_map(|(id, entity)| (id == node).then_some(entity))?;
+        let entity = self.selection_target_entity(node)?;
         cooked_triangle_count(self.cooked_mesh(entity)?)
     }
 
@@ -405,12 +407,21 @@ mod tests {
         panic!("beauty pipeline drew no cube within 30 updates");
     }
 
-    /// Render the settled frame: warm first, then one update plus readback
-    /// so asset re-uploads (mask repaints) have propagated to the target.
+    /// Render the settled frame: two updates plus readback so asset
+    /// re-uploads (mask repaints) have propagated to the target. Same
+    /// wait-discipline as the warmup: a missing GPU image is "not yet",
+    /// anything else failing is loud.
     fn settled_frame(world: &mut SceneWorld) -> RenderFrame {
         world.update();
         world.update();
-        world.render_frame().unwrap()
+        match world.render_frame() {
+            Ok(frame) => frame,
+            Err(SceneError::NoGpuImage) => {
+                world.update();
+                world.render_frame().unwrap()
+            }
+            Err(error) => panic!("settled copy-back failed: {error}"),
+        }
     }
 
     #[test]
