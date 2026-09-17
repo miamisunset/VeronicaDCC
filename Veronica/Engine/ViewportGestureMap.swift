@@ -57,6 +57,11 @@ nonisolated enum ViewportGestureMap {
     /// from `wheelDollyScale`: magnification is unitless, wheel deltas are
     /// line units.
     static let pinchDollyScale = 1.0
+    /// Press-release slop distinguishing a tap from a drag (issue #59):
+    /// AppKit delivers no drag events for a clean click, but a press that
+    /// wanders a pixel or two before release is still a tap — only motion
+    /// beyond this radius (view-space pixels) commits to navigation.
+    static let tapThresholdPixels = 4.0
 
     /// Coarse op for a drag starting with `button` and modifiers.
     ///
@@ -129,6 +134,21 @@ nonisolated enum ViewportGestureMap {
     /// matching wheel feel (spreading fingers zooms in, pinching zooms out).
     static func pinchAction(magnification: Double, cursor: CursorNDC) -> ViewportFeature.Action {
         .dolly(logFactor: magnification * pinchDollyScale, cursor: cursor)
+    }
+
+    /// Tap intent for a press at `pressPoint` released at `releasePoint`
+    /// (view-space points, y-up) in a view of `size`: `.tapAt` carrying the
+    /// release NDC when the press never left tap slop, else `nil` (a drag —
+    /// navigation owns it). `nil` for empty views (no meaningful NDC).
+    ///
+    /// Pure for testing; the nav view owns the press/drag bookkeeping and
+    /// calls this only when no drag step has fired.
+    static func tapAction(pressPoint: CGPoint, releasePoint: CGPoint, size: CGSize) -> ViewportFeature.Action? {
+        guard size.width > 0, size.height > 0 else { return nil }
+        let distance = hypot(releasePoint.x - pressPoint.x, releasePoint.y - pressPoint.y)
+        guard distance <= tapThresholdPixels else { return nil }
+        guard let cursor = cursorNDC(point: releasePoint, size: size) else { return nil }
+        return .tapAt(cursor: cursor)
     }
 
     /// Cursor NDC for `point` (view-space, y-up) in a view of `size`, or

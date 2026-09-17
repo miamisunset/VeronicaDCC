@@ -115,6 +115,44 @@ struct ViewportNavViewTests {
         #expect(actions == [.orbitDelta(dx: 12, dy: -7)])
     }
 
+    @Test func tapWithoutDragEmitsTapAtReleaseNDC() {
+        let (nav, recorded) = makeView()
+        nav.frame = NSRect(x: 0, y: 0, width: 400, height: 300)
+        nav.mouseDown(with: mouseEvent(type: .leftMouseDown, button: 0, point: NSPoint(x: 100, y: 100)))
+        nav.mouseUp(with: mouseEvent(type: .leftMouseUp, button: 0, point: NSPoint(x: 100, y: 100)))
+        #expect(recorded.actions == [.tapAt(cursor: CursorNDC(x: 2 * 100 / 400 - 1, y: 2 * 100 / 300 - 1))])
+    }
+
+    @Test func tapWithTinyMovementStillTaps() {
+        // A press wandering inside slop taps where the button came up.
+        let (nav, recorded) = makeView()
+        nav.frame = NSRect(x: 0, y: 0, width: 400, height: 300)
+        nav.mouseDown(with: mouseEvent(type: .leftMouseDown, button: 0, point: NSPoint(x: 100, y: 100)))
+        nav.mouseUp(with: mouseEvent(type: .leftMouseUp, button: 0, point: NSPoint(x: 102, y: 101)))
+        #expect(recorded.actions == [.tapAt(cursor: CursorNDC(x: 2 * 102 / 400 - 1, y: 2 * 101 / 300 - 1))])
+    }
+
+    @Test func dragThenReleaseEmitsNoTap() {
+        // A release after navigation stays navigation-only: no tap rides
+        // along with the orbit.
+        let (nav, recorded) = makeView()
+        nav.frame = NSRect(x: 0, y: 0, width: 400, height: 300)
+        nav.mouseDown(with: mouseEvent(type: .leftMouseDown, button: 0, point: NSPoint(x: 100, y: 100)))
+        nav.mouseDragged(with: mouseEvent(type: .leftMouseDragged, button: 0, point: NSPoint(x: 112, y: 93)))
+        nav.mouseUp(with: mouseEvent(type: .leftMouseUp, button: 0, point: NSPoint(x: 112, y: 93)))
+        #expect(recorded.actions == [.orbitDelta(dx: 12, dy: -7)])
+    }
+
+    @Test func rightClickReleaseEmitsNoTap() {
+        // Right/middle buttons stay navigation-only: a click without drag
+        // emits nothing.
+        let (nav, recorded) = makeView()
+        nav.frame = NSRect(x: 0, y: 0, width: 400, height: 300)
+        nav.rightMouseDown(with: mouseEvent(type: .rightMouseDown, button: 1, point: NSPoint(x: 100, y: 100)))
+        nav.rightMouseUp(with: mouseEvent(type: .rightMouseUp, button: 1, point: NSPoint(x: 100, y: 100)))
+        #expect(recorded.actions.isEmpty)
+    }
+
     @Test func commandLeftDragPans() {
         let (nav, recorded) = makeView()
         var down = mouseEvent(type: .leftMouseDown, button: 0, point: NSPoint(x: 50, y: 50))

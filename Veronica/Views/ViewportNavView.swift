@@ -21,6 +21,11 @@ final class ViewportNavView: MTKView {
     private var dragKind: ViewportDragKind?
     /// Last drag location in view space, for per-event pixel deltas.
     private var lastPoint: NSPoint?
+    /// Press location in view space, for the tap-vs-drag discriminator.
+    private var pressPoint: NSPoint?
+    /// Whether the in-flight press already navigated (a drag step fired).
+    /// A release after navigation is never also a tap.
+    private var dragEmitted = false
 
     /// Click-to-focus so bare `F` reaches `keyDown` after one click.
     override var acceptsFirstResponder: Bool { true }
@@ -72,7 +77,7 @@ final class ViewportNavView: MTKView {
     }
 
     override func mouseUp(with event: NSEvent) {
-        _ = event
+        emitTapIfPressWithoutDrag(event)
         endDrag()
     }
 
@@ -188,7 +193,10 @@ final class ViewportNavView: MTKView {
             command: flags.contains(.command),
             option: flags.contains(.option)
         )
-        lastPoint = convert(event.locationInWindow, from: nil)
+        let point = convert(event.locationInWindow, from: nil)
+        lastPoint = point
+        pressPoint = point
+        dragEmitted = false
     }
 
     /// Map one drag step to its action from the view-space pixel delta.
@@ -199,13 +207,34 @@ final class ViewportNavView: MTKView {
         let dy = Double(point.y - last.y)
         lastPoint = point
         guard dx != 0 || dy != 0 else { return }
+        dragEmitted = true
         onAction?(ViewportGestureMap.dragAction(kind: kind, dx: dx, dy: dy, cursor: cursorNDC(event)))
+    }
+
+    /// Tap-vs-drag discriminator (issue #59): a left press released inside
+    /// tap slop without an intervening drag step is a Pick tap carrying the
+    /// release NDC; anything that already navigated stays navigation only.
+    /// Right/middle releases never tap — those buttons are navigation-only.
+    private func emitTapIfPressWithoutDrag(_ event: NSEvent) {
+        guard !dragEmitted else { return }
+        let release = convert(event.locationInWindow, from: nil)
+        let press = pressPoint ?? release
+        guard let tap = ViewportGestureMap.tapAction(
+            pressPoint: press,
+            releasePoint: release,
+            size: bounds.size
+        ) else {
+            return
+        }
+        onAction?(tap)
     }
 
     /// Release the in-flight drag (mouse-up anywhere ends the gesture).
     private func endDrag() {
         dragKind = nil
         lastPoint = nil
+        pressPoint = nil
+        dragEmitted = false
     }
 
     /// Cursor NDC for `event`'s location, defaulting to center when the view

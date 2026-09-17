@@ -51,6 +51,83 @@ func waitForViewportWarmUp(
 /// before/after ratios the static side chrome dilutes but cannot erase the
 /// change, since only pane pixels move.
 func viewportBrightPixelFraction(of shot: XCUIScreenshot, in windowFrame: CGRect) -> Double? {
+    guard let crop = croppedWindowPixels(of: shot, in: windowFrame) else {
+        return nil
+    }
+    // Stride-sample: every 8th pixel is plenty for a fraction.
+    var bright = 0
+    var count = 0
+    let stride = 8
+    for index in 0..<(crop.width * crop.height) where index % stride == 0 {
+        let base = index * 4
+        let luminance = 0.2126 * Double(crop.pixels[base]) + 0.7152 * Double(crop.pixels[base + 1])
+            + 0.0722 * Double(crop.pixels[base + 2])
+        if luminance > 127.5 {
+            bright += 1
+        }
+        count += 1
+    }
+    guard count > 0 else { return nil }
+    return Double(bright) / Double(count)
+}
+
+/// Fraction of `windowFrame` pixels whose RGB differs between two
+/// screenshots, or `nil` when either shot cannot be mapped.
+///
+/// The companion oracle to `viewportBrightPixelFraction` for motion (issue
+/// #59): bright counts are rotation-stable (orbiting a framed cube swaps
+/// which faces are lit without changing how many pixels are), but moved
+/// edges and flipped shading change the pixels themselves. Screenshots are
+/// lossless PNG, so a static scene diffs to exactly the overlay-text
+/// flicker (~1e-5); any real camera move lands orders of magnitude above.
+func viewportPixelDifferenceFraction(
+    before: XCUIScreenshot,
+    after: XCUIScreenshot,
+    in windowFrame: CGRect
+) -> Double? {
+    guard let a = croppedWindowPixels(of: before, in: windowFrame),
+        let b = croppedWindowPixels(of: after, in: windowFrame),
+        a.width == b.width, a.height == b.height
+    else {
+        return nil
+    }
+    var changed = 0
+    let total = a.width * a.height
+    for index in 0..<total {
+        let base = index * 4
+        // Sum of absolute RGB channel differences (0–765). Threshold 48
+        // ignores encode/color noise without blunting real motion: a moved
+        // edge or relit face swings channels by the hundreds.
+        let delta = abs(Int(a.pixels[base]) - Int(b.pixels[base]))
+            + abs(Int(a.pixels[base + 1]) - Int(b.pixels[base + 1]))
+            + abs(Int(a.pixels[base + 2]) - Int(b.pixels[base + 2]))
+        if delta > 48 {
+            changed += 1
+        }
+    }
+    guard total > 0 else { return nil }
+    return Double(changed) / Double(total)
+}
+
+/// Normalized RGBA pixels of `windowFrame` cropped from `shot`, shared by
+/// the bright-fraction and pixel-difference oracles so both map screenshots
+/// identically: `windowFrame` in points (top-left origin), `shot` in device
+/// pixels (top-left origin, spans the main display).
+private struct WindowCrop {
+    /// Row-major RGBA bytes (`bytesPerRow == width * 4`, no stride gaps).
+    var pixels: [UInt8]
+    /// Crop width in device pixels.
+    var width: Int
+    /// Crop height in device pixels.
+    var height: Int
+}
+
+/// Crop `shot` to `windowFrame` (see `viewportBrightPixelFraction` for the
+/// mapping), or `nil` when the shot cannot be mapped.
+private func croppedWindowPixels(
+    of shot: XCUIScreenshot,
+    in windowFrame: CGRect
+) -> WindowCrop? {
     guard windowFrame.width > 0, windowFrame.height > 0,
         let screenSize = NSScreen.main?.frame.size, screenSize.width > 0,
         let image = NSImage(data: shot.pngRepresentation),
@@ -84,22 +161,9 @@ func viewportBrightPixelFraction(of shot: XCUIScreenshot, in windowFrame: CGRect
         return nil
     }
     context.draw(cropped, in: CGRect(x: 0, y: 0, width: width, height: height))
-    guard let pixels = context.data?.assumingMemoryBound(to: UInt8.self) else {
+    guard let data = context.data?.assumingMemoryBound(to: UInt8.self) else {
         return nil
     }
-    // Stride-sample: every 8th pixel is plenty for a fraction.
-    var bright = 0
-    var count = 0
-    let stride = 8
-    for index in 0..<(width * height) where index % stride == 0 {
-        let base = index * 4
-        let luminance = 0.2126 * Double(pixels[base]) + 0.7152 * Double(pixels[base + 1])
-            + 0.0722 * Double(pixels[base + 2])
-        if luminance > 127.5 {
-            bright += 1
-        }
-        count += 1
-    }
-    guard count > 0 else { return nil }
-    return Double(bright) / Double(count)
+    let pixels = Array(UnsafeBufferPointer(start: data, count: width * height * 4))
+    return WindowCrop(pixels: pixels, width: width, height: height)
 }
