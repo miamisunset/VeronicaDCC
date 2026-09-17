@@ -69,10 +69,11 @@ Sources: Swift evolution (SE-0466 default isolation), TCA docs, SwiftLint rule d
 - Rust lint, from `rust/`: `cargo fmt --check` and `cargo clippy --workspace --all-targets -- -D warnings` — zero findings.
 - Swift unit tests: `VeronicaTests`, Swift Testing (`@Test`, `#expect`).
 - Swift integration tests: `VeronicaUITests`, XCTest + `XCUIApplication` (launch the app, drive real flows). New user-facing flow = new UI test.
-- Rust unit tests: `#[cfg(test)] mod tests` inside each module. Rust integration tests: `rust/crates/<crate>/tests/*.rs` against the public API (no `tests/` dirs exist yet — first integration-test task scaffolds them). Run: `cargo test --workspace` (or `-p <crate>`).
-- Coverage (both languages, floor 85% — never ship below it):
+- Rust unit tests: `#[cfg(test)] mod tests` inside each module. Rust integration tests: `rust/crates/<crate>/tests/*.rs` against the public API. Iterate scoped: `cargo test -p <crate>`; iterate Swift scoped: `-only-testing:<Target>/<Test>`.
+- Coverage (both languages, floor 85% — never ship below it). The coverage scripts EXECUTE the suites, so they are the single full-suite runs — never add a plain `cargo test --workspace` or full-scheme `xcodebuild test` next to them; that executes every test twice:
   - Rust: `./scripts/coverage-rust.sh` (cargo-llvm-cov `--fail-under-lines 85`, workspace-wide).
   - Swift: `./scripts/coverage-swift.sh` (`xcodebuild -enableCodeCoverage YES` + `scripts/xccov-coverage.py` threshold check).
+  - Reading a red coverage gate: no coverage table in the output means tests failed; a table below 85 means tests passed but coverage is short.
 - Never ship with a red gate; fix the finding, don't weaken the config.
 
 ## Intended architecture (user-directed, scaffold accordingly)
