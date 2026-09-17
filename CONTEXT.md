@@ -77,6 +77,17 @@ parametric (both describe the graph, not the data).
 The step turning Implicit Geometry into vertices, run only when a
 downstream consumer needs topology.
 
+## Topology
+
+The triangle count and connectivity of realized geometry. Parameter
+edits that preserve Topology retain Selection; edits that change it
+clear Selection.
+
+## Resolution
+
+The segment and ring counts controlling a Sphere's triangle budget.
+The first Topology-varying parameters in the graph.
+
 ## Viewport Pixels
 
 The rendered frames displayed in the Viewport. Produced Rust-side from live
