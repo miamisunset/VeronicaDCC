@@ -106,9 +106,12 @@ final class ViewportSelectionTests: XCTestCase {
         try setField(app, xField, to: "2")
         try setField(app, viewportElement(app, "parameterField-size-1"), to: "2")
         try setField(app, viewportElement(app, "parameterField-size-2"), to: "2")
-        // Leaving the triple group commits the unit; the click lands on the
-        // grown cube's front face, re-picking what the recook retained.
-        viewport.click()
+        // Leave the triple group through the node graph, NOT the viewport:
+        // a viewport click here would re-pick the grown face and repaint
+        // the Selection even if the recook had dropped it, making this a
+        // false positive for exactly the retention it claims to pin.
+        // Focusing another pane commits the unit all the same.
+        box1.click()
         RunLoop.main.run(until: Date().addingTimeInterval(1.5))
 
         let kept = try XCTUnwrap(

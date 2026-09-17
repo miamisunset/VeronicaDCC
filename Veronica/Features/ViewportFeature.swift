@@ -6,6 +6,17 @@ import Foundation
 /// State holds only mirrored observations (`tickCount`, `entityCount`);
 /// scene content itself lives in Rust ECS. Each display refresh sends
 /// `.frame`; the effect ticks the engine off-MainActor and publishes stats.
+/// Cancellation scope for the viewport pick effect: taps serialize,
+/// latest wins.
+///
+/// File-scope and explicitly `nonisolated`: nested in the MainActor-
+/// defaulted reducer, the `Hashable` conformance would be actor-isolated
+/// and fail TCA's `Sendable` requirement on cancellation ids.
+nonisolated private enum ViewportCancelID: Hashable, Sendable {
+    /// In-flight pick, superseded by the next tap.
+    case tap
+}
+
 @Reducer
 struct ViewportFeature {
     @ObservableState
@@ -100,10 +111,17 @@ struct ViewportFeature {
                 // the Selection mirror now answers. The closure is
                 // snapshotted here (MainActor) because the `.run` body is
                 // nonisolated; the client hops to the engine queue itself.
+                //
+                // Latest wins: FFI executes taps FIFO on the serial engine
+                // queue, but responses race back on concurrent tasks — a
+                // stale hit-then-miss double-tap could otherwise leave the
+                // mirror disagreeing with Rust. Cancelling in flight keeps
+                // the newest tap's answer.
                 let tap = engine.sendTapNDC
                 return .run { send in
                     await send(.pickResponse(TaskResult { try await tap(cursor) }))
                 }
+                .cancellable(id: ViewportCancelID.tap, cancelInFlight: true)
             case let .pickResponse(.success(pick)):
                 // Hit paints, miss clears — both sides already agree, the
                 // mirror just catches up.
