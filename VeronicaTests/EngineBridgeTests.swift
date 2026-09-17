@@ -16,7 +16,9 @@ struct EngineBridgeTests {
         let first = await EngineBridge.tickWithStats()
         let second = await EngineBridge.tickWithStats()
         #expect(second.tickCount > first.tickCount)
-        #expect(first.entityCount == 3)
+        // Base scene only (viewport camera + key light): no unit test
+        // mutates the shared graph, so no cook ever fires here.
+        #expect(first.entityCount == 2)
     }
 
     /// Slice-2 oracle: every tick publishes a valid frame — a borrowed

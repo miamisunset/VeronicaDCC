@@ -1,7 +1,7 @@
 import XCTest
 
 /// Slice-2 oracle: the viewport stats advance across frames because Rust
-/// ticks the engine, and the entity count holds the demo scene size.
+/// ticks the engine, and the entity count holds the base scene size.
 final class ViewportPixelsTests: XCTestCase {
     override func setUpWithError() throws {
         continueAfterFailure = false
@@ -15,6 +15,9 @@ final class ViewportPixelsTests: XCTestCase {
     @MainActor
     func testTickStatsAdvanceAcrossFrames() throws {
         let app = XCUIApplication()
+        // Isolation: a persisted cube from another test would cook into
+        // the scene and move the count.
+        app.launchArguments = ["--vrn-reset-graph"]
         app.launch()
 
         let tick = element(app, "viewportTickLabel")
@@ -29,10 +32,10 @@ final class ViewportPixelsTests: XCTestCase {
         )
         wait(for: [advanced], timeout: 5)
 
-        // The demo scene stays three entities (camera, light, cube).
+        // The base scene stays two entities (viewport camera, key light).
         let entities = element(app, "viewportEntityLabel")
         XCTAssertTrue(entities.waitForExistence(timeout: 5))
-        XCTAssertEqual(entities.value as? String, "entities 3")
+        XCTAssertEqual(entities.value as? String, "entities 2")
     }
 
     /// Issue-#32 oracle: the timing line exists and carries the fps meter
