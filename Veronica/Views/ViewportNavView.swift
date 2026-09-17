@@ -10,8 +10,10 @@ import MetalKit
 /// by unit tests without AppKit events.
 ///
 /// Map: LMB-drag orbits, Command+LMB and middle-drag pan, Option+LMB and
-/// right-drag dolly, non-precise wheel dollies, bare `F` frames all. Precise
-/// (trackpad) scroll is ignored here — it belongs to #42.
+/// right-drag dolly, non-precise wheel dollies, bare `F` frames all.
+/// Trackpad (#42): two-finger-drag pans, Option+two-finger-drag orbits,
+/// pinch dollies. Momentum scroll is ignored so the camera stops when the
+/// fingers lift.
 final class ViewportNavView: MTKView {
     /// Forwards mapped navigation actions (wired to `store.send`).
     var onAction: ((ViewportFeature.Action) -> Void)?
@@ -101,12 +103,21 @@ final class ViewportNavView: MTKView {
     }
 
     override func scrollWheel(with event: NSEvent) {
-        // Precise deltas mean a trackpad: #42 owns precision zoom/pinch, so
-        // only discrete mouse wheels dolly here.
-        guard !event.hasPreciseScrollingDeltas else { return }
+        if event.hasPreciseScrollingDeltas {
+            trackpadScroll(event)
+            return
+        }
         let deltaY = Double(event.scrollingDeltaY)
         guard deltaY != 0 else { return }
         onAction?(ViewportGestureMap.wheelAction(deltaY: deltaY, cursor: cursorNDC(event)))
+    }
+
+    /// Pinch-to-dolly (#42): exponential, cursor-pivoted, matching wheel
+    /// feel — spreading the fingers zooms in, pinching zooms out.
+    override func magnify(with event: NSEvent) {
+        let magnification = Double(event.magnification)
+        guard magnification != 0 else { return }
+        onAction?(ViewportGestureMap.pinchAction(magnification: magnification, cursor: cursorNDC(event)))
     }
 
     override func keyDown(with event: NSEvent) {
@@ -146,6 +157,28 @@ final class ViewportNavView: MTKView {
         return true
     }
 
+    /// Trackpad two-finger-drag (#42): live gesture phases pan
+    /// (Option: orbit); momentum after the fingers lift is ignored so the
+    /// camera stops dead instead of drifting.
+    ///
+    /// `scrollingDelta*` carry scroll sense, which follows the user's
+    /// natural-scrolling setting; `isDirectionInvertedFromDevice` normalizes
+    /// them to finger-motion pixels (matching drag feel: finger motion here
+    /// equals cursor motion in the matching mouse drag, in either setting).
+    private func trackpadScroll(_ event: NSEvent) {
+        guard !event.phase.isEmpty else { return }
+        let dx = Double(event.scrollingDeltaX)
+        let dy = Double(event.scrollingDeltaY)
+        guard dx != 0 || dy != 0 else { return }
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        onAction?(ViewportGestureMap.trackpadDragAction(
+            dx: dx,
+            dy: dy,
+            option: flags.contains(.option),
+            inverted: event.isDirectionInvertedFromDevice,
+            cursor: cursorNDC(event)
+        ))
+    }
     /// Fix the drag's coarse op from button + modifiers; deltas accumulate
     /// from here in `continueDrag`.
     private func beginDrag(_ event: NSEvent, button: ViewportMouseButton) {
