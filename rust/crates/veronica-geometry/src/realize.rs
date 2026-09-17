@@ -150,8 +150,8 @@ fn realize_sphere(params: &SphereParams) -> EvaluatedMesh {
     let [cx, cy, cz] = params.center();
     let triangles = params.triangle_count();
 
-    // Ring vertex: latitude line `j` (`0` = south pole line, `rings` =
-    // north pole line), longitude step `i` (`segments` wraps the seam, so
+    // Ring vertex: latitude line `j` (`0` = north pole line, `rings` =
+    // south pole line), longitude step `i` (`segments` wraps the seam, so
     // `i + 1 == segments` duplicates the seam vertex by construction).
     let ring_vertex = |j: u32, i: u32| -> Corner {
         let theta = PI * f64::from(j) / f64::from(rings);
@@ -188,10 +188,15 @@ fn realize_sphere(params: &SphereParams) -> EvaluatedMesh {
         next += 3;
     };
 
-    // South pole fan: ordinals `0..segments`.
+    // South pole fan: ordinals `0..segments`, joined to the adjacent
+    // (southernmost) ring.
     let south_pole: Corner = ([cx, cy - radius, cz], [0.0, -1.0, 0.0], [0.0, 0.0]);
     for i in 0..segments {
-        push_triangle(south_pole, ring_vertex(1, i + 1), ring_vertex(1, i));
+        push_triangle(
+            south_pole,
+            ring_vertex(rings - 1, i + 1),
+            ring_vertex(rings - 1, i),
+        );
     }
 
     // Quad bands, ring by ring. Empty when `rings == 2` (bare fans).
@@ -206,14 +211,11 @@ fn realize_sphere(params: &SphereParams) -> EvaluatedMesh {
         }
     }
 
-    // North pole fan: the closing `segments` ordinals.
+    // North pole fan: the closing `segments` ordinals, joined to the
+    // adjacent (northernmost) ring.
     let north_pole: Corner = ([cx, cy + radius, cz], [0.0, 1.0, 0.0], [1.0, 1.0]);
     for i in 0..segments {
-        push_triangle(
-            north_pole,
-            ring_vertex(rings - 1, i),
-            ring_vertex(rings - 1, i + 1),
-        );
+        push_triangle(north_pole, ring_vertex(1, i), ring_vertex(1, i + 1));
     }
 
     EvaluatedMesh::new(
@@ -231,7 +233,7 @@ fn realize_sphere(params: &SphereParams) -> EvaluatedMesh {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CubeParams, DEFAULT_SPHERE_CENTER};
+    use crate::{CubeParams, DEFAULT_SPHERE_CENTER, DEFAULT_SPHERE_SEGMENTS};
 
     fn bits_eq(actual: [f64; 3], expected: [f64; 3]) {
         for (index, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
@@ -495,6 +497,39 @@ mod tests {
             first.positions, moved.positions,
             "center edits must move vertices"
         );
+    }
+
+    #[test]
+    fn pole_fans_cap_their_own_hemisphere() {
+        // Regression: the fans once joined each pole to the far ring,
+        // cutting diameter-spanning fins through the interior and leaving
+        // both polar caps open. Counts, radii, and winding all passed on
+        // the miswired mesh — only hemisphere membership catches it.
+        //
+        // Arrange: the default sphere; south fan owns the first
+        // `segments` ordinals, north fan the last `segments`.
+        let mesh = realize(&ImplicitGeometry::Sphere(SphereParams::default()));
+        let fan_triangles = DEFAULT_SPHERE_SEGMENTS as usize;
+
+        // Act/Assert: every non-pole fan vertex sits on its pole's half.
+        // Each fan triangle leads with its pole vertex, so the ring
+        // vertices are the second and third of every triple.
+        for triangle in mesh.indices.chunks_exact(3).take(fan_triangles) {
+            for index in [triangle[1], triangle[2]] {
+                assert!(
+                    mesh.positions[index as usize][1] < 0.0,
+                    "south fan reaches the northern hemisphere"
+                );
+            }
+        }
+        for triangle in mesh.indices.chunks_exact(3).rev().take(fan_triangles) {
+            for index in [triangle[1], triangle[2]] {
+                assert!(
+                    mesh.positions[index as usize][1] > 0.0,
+                    "north fan reaches the southern hemisphere"
+                );
+            }
+        }
     }
 
     #[test]
