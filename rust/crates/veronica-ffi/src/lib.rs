@@ -1570,28 +1570,40 @@ mod selection_tests {
     fn out_of_range_miss_clears_a_live_selection() {
         let context = vrn_context_create();
         assert!(!context.is_null());
-        let _ = test_create_cube(context);
+        let cube = test_create_cube(context);
         // SAFETY: just created, alive, single-threaded test.
         unsafe {
-            // The recook precedes the frame publish in `vrn_tick`, so the
-            // cooked cube exists even where the tick reports Internal for
-            // a missing adapter; the result is intentionally ignored.
-            let _ = vrn_tick(context);
+            // Cook directly through the lock: the recook is the seam this
+            // test needs, while the frame publish itches for a GPU. Fail
+            // here on a broken cook rather than in the plant below.
+            let mut ctx = (*context).0.lock().unwrap();
+            {
+                let VrnContext {
+                    scene,
+                    operator_graph,
+                    ..
+                } = &mut *ctx;
+                scene.recook_graph(operator_graph).unwrap();
+            }
+            assert!(
+                ctx.scene
+                    .cooked_entities()
+                    .iter()
+                    .any(|(id, _)| *id == NodeId(cube))
+            );
             // Plant a selection through the lock: CPU asset ops only, no
             // GPU needed.
-            {
-                let mut ctx = (*context).0.lock().unwrap();
-                ctx.scene
-                    .set_selection(Pick {
-                        node: NodeId(1),
-                        face: 0,
-                    })
-                    .unwrap();
-            }
+            ctx.scene
+                .set_selection(Pick {
+                    node: NodeId(cube),
+                    face: 0,
+                })
+                .unwrap();
+            drop(ctx);
             assert_eq!(
                 live_selection(context),
                 Some(Pick {
-                    node: NodeId(1),
+                    node: NodeId(cube),
                     face: 0
                 })
             );
