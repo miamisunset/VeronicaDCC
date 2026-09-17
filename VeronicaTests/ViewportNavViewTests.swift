@@ -155,10 +155,34 @@ struct ViewportNavViewTests {
         #expect(logFactor == 3 * ViewportGestureMap.wheelDollyScale)
     }
 
-    @Test func preciseTrackpadScrollIsIgnored() {
+    @Test func preciseTrackpadDragPans() {
         let (nav, recorded) = makeView()
-        // Precise (trackpad) scrolling belongs to #42, never dollies here.
-        nav.scrollWheel(with: wheelEvent(deltaY: 3, precise: true))
+        nav.frame = NSRect(x: 0, y: 0, width: 400, height: 300)
+        // Scroll-sense deltas (inverted vs finger motion): the view negates
+        // to finger-motion pixels, so this is fingers moving (-10, 6).
+        nav.scrollWheel(with: wheelEvent(deltaX: 10, deltaY: -6, precise: true, scrollPhase: .changed))
+        #expect(recorded.actions == [.panDelta(dx: -10, dy: 6)])
+    }
+
+    @Test func optionPreciseTrackpadDragOrbits() {
+        let (nav, recorded) = makeView()
+        nav.frame = NSRect(x: 0, y: 0, width: 400, height: 300)
+        nav.scrollWheel(
+            with: wheelEvent(deltaX: 0, deltaY: 8, precise: true, modifiers: .maskAlternate, scrollPhase: .changed)
+        )
+        #expect(recorded.actions == [.orbitDelta(dx: 0, dy: -8)])
+    }
+
+    @Test func trackpadMomentumScrollIsIgnored() {
+        let (nav, recorded) = makeView()
+        // Momentum (fingers lifted: no gesture phase) never moves the camera.
+        nav.scrollWheel(with: wheelEvent(deltaY: 12, precise: true, momentumPhase: .begin))
+        #expect(recorded.actions.isEmpty)
+    }
+
+    @Test func zeroDeltaPreciseScrollEmitsNothing() {
+        let (nav, recorded) = makeView()
+        nav.scrollWheel(with: wheelEvent(deltaY: 0, precise: true, scrollPhase: .changed))
         #expect(recorded.actions.isEmpty)
     }
 
@@ -214,15 +238,34 @@ struct ViewportNavViewTests {
 
     /// Scroll-wheel event; `precise` selects trackpad-style (pixel-unit,
     /// continuous) deltas over discrete mouse-wheel (line-unit) ones.
-    private func wheelEvent(deltaY: Int32, precise: Bool) -> NSEvent {
+    /// `scrollPhase` marks a live gesture (nil = no phase, as in momentum);
+    /// `momentumPhase` marks post-lift momentum. `modifiers` sets the key
+    /// flags (e.g. `.maskAlternate` for Option).
+    private func wheelEvent(
+        deltaX: Int32 = 0,
+        deltaY: Int32,
+        precise: Bool,
+        modifiers: CGEventFlags = [],
+        scrollPhase: CGScrollPhase? = nil,
+        momentumPhase: CGMomentumScrollPhase? = nil
+    ) -> NSEvent {
         let cg = CGEvent(
             scrollWheelEvent2Source: nil,
             units: precise ? .pixel : .line,
-            wheelCount: 1,
+            wheelCount: 2,
             wheel1: deltaY,
-            wheel2: 0,
+            wheel2: deltaX,
             wheel3: 0
         ).unsafelyUnwrapped
+        if !modifiers.isEmpty {
+            cg.flags = modifiers
+        }
+        if let scrollPhase {
+            cg.setIntegerValueField(.scrollWheelEventScrollPhase, value: Int64(scrollPhase.rawValue))
+        }
+        if let momentumPhase {
+            cg.setIntegerValueField(.scrollWheelEventMomentumPhase, value: Int64(momentumPhase.rawValue))
+        }
         return NSEvent(cgEvent: cg).unsafelyUnwrapped
     }
 }

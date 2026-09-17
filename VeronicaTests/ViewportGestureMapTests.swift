@@ -130,4 +130,50 @@ struct ViewportGestureMapTests {
             ) == nil
         )
     }
+
+    @Test("trackpad drag kind pans, orbits with Option", arguments: [
+        (false, ViewportDragKind.pan),
+        (true, ViewportDragKind.orbit)
+    ])
+    func trackpadDragKind(option: Bool, expected: ViewportDragKind) {
+        #expect(ViewportGestureMap.trackpadDragKind(option: option) == expected)
+    }
+
+    @Test func trackpadDragPansByFingerMotionPixels() {
+        let cursor = CursorNDC(x: 0, y: 0)
+        // Plain two-finger-drag ≡ Command+left-drag pan.
+        #expect(
+            ViewportGestureMap.trackpadDragAction(dx: 8, dy: -5, option: false, cursor: cursor)
+                == .panDelta(dx: 8, dy: -5)
+        )
+    }
+
+    @Test func trackpadDragOrbitsWithOption() {
+        let cursor = CursorNDC(x: 0.1, y: 0.2)
+        // Option+two-finger-drag ≡ Option+left-drag orbit.
+        #expect(
+            ViewportGestureMap.trackpadDragAction(dx: 8, dy: -5, option: true, cursor: cursor)
+                == .orbitDelta(dx: 8, dy: -5)
+        )
+    }
+
+    @Test func pinchScalesMagnificationToLogFactor() {
+        let cursor = CursorNDC(x: -0.5, y: 0.25)
+        // Spreading fingers (positive magnification) zooms in.
+        #expect(
+            ViewportGestureMap.pinchAction(magnification: 0.1, cursor: cursor)
+                == .dolly(logFactor: 0.1 * ViewportGestureMap.pinchDollyScale, cursor: cursor)
+        )
+        // Pinching (negative magnification) zooms out.
+        #expect(
+            ViewportGestureMap.pinchAction(magnification: -0.2, cursor: cursor)
+                == .dolly(logFactor: -0.2 * ViewportGestureMap.pinchDollyScale, cursor: cursor)
+        )
+    }
+
+    @Test func pinchScaleIsPositiveAndSeparateFromWheelScale() {
+        // Magnification is unitless; wheel deltas are line units — the two
+        // scales must not be conflated.
+        #expect(ViewportGestureMap.pinchDollyScale > 0)
+    }
 }

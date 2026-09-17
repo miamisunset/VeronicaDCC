@@ -32,11 +32,18 @@ nonisolated enum ViewportDragKind: Equatable, Sendable {
 }
 
 /// Pure (button, modifier, delta) → `ViewportFeature.Action` mapping for
-/// viewport mouse navigation (issue #41).
+/// viewport mouse navigation (issue #41) plus trackpad gestures (#42).
 ///
 /// AppKit-free by design: the nav view translates `NSEvent` into these
 /// inputs, so the whole map is unit-testable without events. The nav view
 /// stays thin (translate → map → `store.send`).
+///
+/// Trackpad semantics (#42): two-finger-drag pans, Option+two-finger-drag
+/// orbits, pinch dollies. Momentum scroll (fingers lifted) is ignored — the
+/// camera stops dead instead of drifting. A two-finger-drag step is defined
+/// to equal the matching mouse drag (plain ≡ Command+left-drag pan,
+/// Option ≡ Option+left-drag orbit), so finger motion and cursor motion
+/// agree.
 nonisolated enum ViewportGestureMap {
     /// Drag pixels → dolly log-factor scale. Dragging up (positive view-space
     /// dy) zooms in, matching the FFI contract (positive factor zooms in).
@@ -44,6 +51,12 @@ nonisolated enum ViewportGestureMap {
     /// Non-precise wheel delta → dolly log-factor scale. Scrolling up
     /// (positive `scrollingDeltaY`) zooms in.
     static let wheelDollyScale = 0.002
+    /// Pinch magnification → dolly log-factor scale. Magnification is already
+    /// a fractional zoom and `ln(1 + m) ≈ m`, so 1:1 keeps pinch feel matched
+    /// to the wheel (positive magnification zooms in). Deliberately separate
+    /// from `wheelDollyScale`: magnification is unitless, wheel deltas are
+    /// line units.
+    static let pinchDollyScale = 1.0
 
     /// Coarse op for a drag starting with `button` and modifiers.
     ///
@@ -84,9 +97,34 @@ nonisolated enum ViewportGestureMap {
     }
 
     /// Action for one non-precise wheel tick. Precise (trackpad) scrolling
-    /// never reaches here — it belongs to #42 and the nav view ignores it.
+    /// never reaches here — it belongs to #42 (`trackpadDragAction`).
     static func wheelAction(deltaY: Double, cursor: CursorNDC) -> ViewportFeature.Action {
         .dolly(logFactor: deltaY * wheelDollyScale, cursor: cursor)
+    }
+
+    /// Coarse op for a trackpad two-finger-drag step: pans, modified to
+    /// orbit by Option.
+    static func trackpadDragKind(option: Bool) -> ViewportDragKind {
+        option ? .orbit : .pan
+    }
+
+    /// Action for one trackpad two-finger-drag step with finger-motion pixel
+    /// deltas (already negated from `scrollingDeltaX/Y`, whose scroll sense
+    /// is inverted vs finger motion). Flows through `dragAction`, so the
+    /// gesture equals the matching mouse drag.
+    static func trackpadDragAction(
+        dx: Double,
+        dy: Double,
+        option: Bool,
+        cursor: CursorNDC
+    ) -> ViewportFeature.Action {
+        dragAction(kind: trackpadDragKind(option: option), dx: dx, dy: dy, cursor: cursor)
+    }
+
+    /// Action for one pinch step: exponential dolly pivoted on the cursor,
+    /// matching wheel feel (spreading fingers zooms in, pinching zooms out).
+    static func pinchAction(magnification: Double, cursor: CursorNDC) -> ViewportFeature.Action {
+        .dolly(logFactor: magnification * pinchDollyScale, cursor: cursor)
     }
 
     /// Cursor NDC for `point` (view-space, y-up) in a view of `size`, or
