@@ -150,7 +150,7 @@ struct ViewportGestureMapTests {
 
     @Test func trackpadDragOrbitsWithOption() {
         let cursor = CursorNDC(x: 0.1, y: 0.2)
-        // Option+two-finger-drag ≡ Option+left-drag orbit.
+        // Option+two-finger-drag ≡ plain left-drag orbit.
         #expect(
             ViewportGestureMap.trackpadDragAction(dx: 8, dy: -5, option: true, cursor: cursor)
                 == .orbitDelta(dx: 8, dy: -5)
@@ -175,5 +175,6 @@ struct ViewportGestureMapTests {
         // Magnification is unitless; wheel deltas are line units — the two
         // scales must not be conflated.
         #expect(ViewportGestureMap.pinchDollyScale > 0)
+        #expect(ViewportGestureMap.pinchDollyScale != ViewportGestureMap.wheelDollyScale)
     }
 }
