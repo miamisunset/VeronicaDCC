@@ -26,7 +26,7 @@ final class ViewportFrameAllTests: XCTestCase {
     }
 
     @MainActor
-    func testPressingFFramesAllAndEngineStaysLive() throws {
+    func testPressingFFramesAllIsPixelObservable() throws {
         let app = XCUIApplication()
         app.launch()
 

@@ -63,8 +63,11 @@ struct ViewportNavViewTests {
 
     @Test func fKeyConsumesInLiveWindowWithoutTextFocus() {
         // Hosted in a window (no text input focused), bare `F` fires.
+        // The window is bound so the live-window path (not the windowless
+        // fallback) is what consumes.
         let (nav, recorded) = makeView()
-        hostWindow().contentView?.addSubview(nav)
+        let window = hostWindow()
+        window.contentView?.addSubview(nav)
         #expect(nav.consumeKeyEvent(keyEvent(characters: "f", modifiers: [])))
         #expect(recorded.actions == [.frameAll])
     }
@@ -84,7 +87,8 @@ struct ViewportNavViewTests {
     @Test func fKeyNotConsumedForForeignWindow() {
         // The app-wide monitor sees every window's keys; only ours consume.
         let (nav, recorded) = makeView()
-        hostWindow().contentView?.addSubview(nav)
+        let window = hostWindow()
+        window.contentView?.addSubview(nav)
         let other = hostWindow()
         let foreign = NSEvent.keyEvent(
             with: .keyDown,

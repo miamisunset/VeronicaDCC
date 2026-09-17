@@ -37,7 +37,22 @@ final class ViewportNavView: MTKView {
                 guard let self, self.consumeKeyEvent(event) else { return event }
                 return nil
             }
-        } else if window == nil, let monitor = keyMonitor {
+        } else if window == nil {
+            detachKeyMonitor()
+        }
+    }
+
+    override func removeFromSuperview() {
+        // Teardown without a window move (e.g. hierarchy rebuild) must not
+        // leak the monitor: it holds only `weak self`, so a missed removal
+        // is benign, but one dead pass-through per view would linger.
+        detachKeyMonitor()
+        super.removeFromSuperview()
+    }
+
+    /// Remove the app-wide key tap, if installed.
+    private func detachKeyMonitor() {
+        if let monitor = keyMonitor {
             NSEvent.removeMonitor(monitor)
             keyMonitor = nil
         }
