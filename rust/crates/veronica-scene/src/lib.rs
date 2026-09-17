@@ -27,7 +27,7 @@ use bevy_time::TimePlugin;
 use bevy_transform::prelude::Transform;
 use bevy_window::{ExitCondition, WindowPlugin};
 use thiserror::Error;
-use veronica_core::{BoneTransform, MeshId, MorphWeights};
+use veronica_core::{BoneTransform, MeshId, MorphWeights, NodeId};
 
 mod camera;
 mod cook;
@@ -35,12 +35,17 @@ mod gpu;
 mod mesh;
 mod pick;
 mod render;
+mod selection;
 
 pub use cook::{CookedMesh, SourceOperator};
 pub use mesh::render_mesh_from_evaluated;
 pub use pick::Pick;
 pub use render::{
     FRAME_BYTES_PER_PIXEL, FRAME_HEIGHT, FRAME_WIDTH, MAX_VIEWPORT_EDGE, RenderFrame,
+};
+pub use selection::{
+    SELECTION_BASE, SELECTION_MASK_ATTR, SELECTION_MASK_ATTRIBUTE, SELECTION_TINT, Selection,
+    cooked_triangle_count, paint_base_mesh, write_selection_mask,
 };
 
 /// Errors for scene operations.
@@ -134,6 +139,20 @@ pub enum SceneError {
     PickSpaceExhausted {
         /// Items needing distinct IDs (triangles or entity slots).
         count: usize,
+    },
+    /// No live cooked entity belongs to the selection target node.
+    #[error("no cooked mesh for selection target {node:?}")]
+    NoCookedSelectionTarget {
+        /// Operator id with no cooked entity.
+        node: NodeId,
+    },
+    /// A selection face ordinal names no triangle of the target mesh.
+    #[error("selection face {face} is out of range for {triangles} triangles")]
+    SelectionFaceOutOfRange {
+        /// Offending face ordinal.
+        face: u32,
+        /// Triangles the target mesh actually holds.
+        triangles: usize,
     },
     /// A pick pass showed no painted pixel within its update budget.
     #[error("pick pass produced no painted pixel after {attempts} updates")]
@@ -254,6 +273,7 @@ impl SceneWorld {
             PbrPlugin::default(),
         ));
         app.init_resource::<TickCount>()
+            .init_resource::<selection::Selection>()
             .add_systems(Update, count_ticks);
         app.finish();
         app.cleanup();
