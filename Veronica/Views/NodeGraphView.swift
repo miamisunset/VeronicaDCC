@@ -159,14 +159,28 @@ struct NodeGraphView: View {
                     }
             )
             .contextMenu {
-                ForEach(OperatorTypeRegistry.all, id: \.kind) { definition in
-                    Button("Add \(definition.displayName)") {
+                ForEach(OperatorMenuModel.rootItems, id: \.kind) { definition in
+                    Button(definition.displayName) {
                         store.send(
                             .createRequested(
                                 kind: definition.kind,
                                 position: store.pendingCreatePosition
                             )
                         )
+                    }
+                }
+                ForEach(OperatorMenuModel.submenus, id: \.title) { submenu in
+                    Menu(submenu.title) {
+                        ForEach(submenu.items, id: \.kind) { definition in
+                            Button(definition.displayName) {
+                                store.send(
+                                    .createRequested(
+                                        kind: definition.kind,
+                                        position: store.pendingCreatePosition
+                                    )
+                                )
+                            }
+                        }
                     }
                 }
             }

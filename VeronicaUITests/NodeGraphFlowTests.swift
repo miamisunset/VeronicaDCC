@@ -260,14 +260,14 @@ final class NodeGraphFlowTests: XCTestCase {
             .withOffset(point)
     }
 
-    /// Right-clicks `point` and picks the registry add item.
+    /// Right-clicks `point` and picks the registry menu item.
     private func createContainer(_ app: XCUIApplication, at point: CGVector) throws {
         let target = canvasPoint(app, point)
         // The click moves the mouse first so hover-tracked creation lands
         // exactly on the point before the menu opens.
         target.click()
         target.rightClick()
-        let addItem = app.menuItems["Add Container"]
+        let addItem = app.menuItems["Container"]
         XCTAssertTrue(addItem.waitForExistence(timeout: 5))
         addItem.click()
     }

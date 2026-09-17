@@ -5,13 +5,13 @@ import SwiftUI
 ///
 /// Reads the shared `NodeGraphFeature` store. Empty state when nothing (or a
 /// dead id) is selected; otherwise the selected operator's kind header, a
-/// Name field bound to the editor draft, and the stored typed parameters.
-/// Commits travel as `setParameter(id, "name", draft)`; failures surface
-/// in-pane via `lastError` so a failed commit is never silent.
-///
-/// Only the virtual `name` key (the Name field, always text) is editable.
-/// Every stored value renders read-only with its lowercase type tag, so the
-/// UI cannot corrupt non-text types it has no commit path for.
+/// Name field bound to the editor draft, generic numeric editors for every
+/// `.float`/`.vec3` parameter (schema defaults cover absent keys, so a fresh
+/// cube's `size`/`center` stay editable), and read-only rows for the rest.
+/// Name commits travel as `setParameter(id, "name", draft)`; numeric commits
+/// travel as snapshot restores carrying typed values (`setParameter` stores
+/// `Text` verbatim, which the cook would reject). Failures surface in-pane
+/// via `lastError` so a failed commit is never silent.
 struct ParameterEditorView: View {
     /// Shared feature store.
     @Bindable var store: StoreOf<NodeGraphFeature>
@@ -45,10 +45,39 @@ struct ParameterEditorView: View {
                 }
                 .accessibilityIdentifier("parameterNameField")
                 .accessibilityLabel("Operator name")
-                if !mirrored.parameters.isEmpty {
+                let editable = OperatorParameterSchema.editableNumericParams(for: mirrored)
+                let readOnly = mirrored.parameters.filter { editable[$0.key] == nil }
+                if !editable.isEmpty {
                     Divider()
-                    ForEach(mirrored.parameters.keys.sorted(), id: \.self) { key in
-                        if let value = mirrored.parameters[key] {
+                    ForEach(editable.keys.sorted(), id: \.self) { key in
+                        switch editable[key] {
+                        case .float:
+                            FloatParamField(
+                                key: key,
+                                text: store.editorFloatDrafts[key] ?? "",
+                                onChanged: { store.send(.editorFloatChanged(key: key, draft: $0)) },
+                                onCommitted: { store.send(.editorFloatCommitted(key: key)) },
+                                onReverted: { store.send(.editorParamReverted(key: key)) }
+                            )
+                        case .vec3:
+                            Vec3ParamField(
+                                key: key,
+                                components: store.editorVec3Drafts[key] ?? ["", "", ""],
+                                onChanged: { axis, draft in
+                                    store.send(.editorVec3Changed(key: key, axis: axis, draft: draft))
+                                },
+                                onCommitted: { store.send(.editorVec3Committed(key: key)) },
+                                onReverted: { store.send(.editorParamReverted(key: key)) }
+                            )
+                        case .text, .integer, .flag, nil:
+                            EmptyView()
+                        }
+                    }
+                }
+                if !readOnly.isEmpty {
+                    Divider()
+                    ForEach(readOnly.keys.sorted(), id: \.self) { key in
+                        if let value = readOnly[key] {
                             parameterRow(key: key, value: value)
                         }
                     }
@@ -113,6 +142,29 @@ struct ParameterEditorView: View {
     ]
     state.selected = 1
     state.editorNameDraft = "Hero"
+    return ParameterEditorView(
+        store: Store(initialState: state) {
+            NodeGraphFeature()
+        }
+    )
+}
+
+#Preview("Cube parameters") {
+    var state = NodeGraphFeature.State()
+    state.operators = [
+        OperatorMirror(
+            id: 2,
+            kind: "cube",
+            name: "Box",
+            parent: nil,
+            position: GraphPosition(x: 40, y: 60),
+            parameters: ["size": .vec3(1, 1, 1), "center": .vec3(0, 0, 0)]
+        )
+    ]
+    state.selected = 2
+    state.editorNameDraft = "Box"
+    state.editorFloatDrafts = [:]
+    state.editorVec3Drafts = ["size": ["1", "1", "1"], "center": ["0", "0", "0"]]
     return ParameterEditorView(
         store: Store(initialState: state) {
             NodeGraphFeature()

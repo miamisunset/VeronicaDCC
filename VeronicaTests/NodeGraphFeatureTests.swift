@@ -115,6 +115,22 @@ struct NodeGraphFeatureTests {
         )
     }
 
+    /// Builds a mirrored cube operator for fixtures.
+    private func cube(
+        id: UInt64,
+        name: String = "Container",
+        parameters: [String: ParameterValue] = [:]
+    ) -> OperatorMirror {
+        OperatorMirror(
+            id: id,
+            kind: "cube",
+            name: name,
+            parent: nil,
+            position: GraphPosition(x: 0, y: 0),
+            parameters: parameters
+        )
+    }
+
     @Test func appearedMirrorsEngineSnapshot() async {
         let snapshot = GraphSnapshot(operators: [container(id: 1, x: 120, y: 80)])
         let store = TestStore(initialState: NodeGraphFeature.State()) {
@@ -980,5 +996,268 @@ struct NodeGraphFeatureTests {
         await store.send(.snapshotSaveFailed(refreshed, failure, epoch: 0)) {
             $0.lastError = failure.message
         }
+    }
+
+    @Test func editorSeedsNumericDraftsFromSchemaDefaults() async {
+        var state = NodeGraphFeature.State()
+        // A fresh cube carries no size/center keys; the editor still seeds
+        // the schema defaults so both stay editable from creation.
+        state.operators = [cube(id: 1)]
+        let store = TestStore(initialState: state) {
+            NodeGraphFeature()
+        }
+        await store.send(.operatorSelected(1)) {
+            $0.selected = 1
+            $0.editorNameDraft = "Container"
+            $0.editorVec3Drafts = [
+                "size": ["1.0", "1.0", "1.0"],
+                "center": ["0.0", "0.0", "0.0"]
+            ]
+        }
+        // Stored triples win over the defaults.
+        await store.send(
+            .snapshotResponse(
+                .success(GraphSnapshot(operators: [
+                    cube(id: 1, parameters: ["size": .vec3(2, 3, 4)])
+                ])),
+                epoch: 0
+            )
+        ) {
+            $0.operators = [cube(id: 1, parameters: ["size": .vec3(2, 3, 4)])]
+            $0.editorVec3Drafts = [
+                "size": ["2.0", "3.0", "4.0"],
+                "center": ["0.0", "0.0", "0.0"]
+            ]
+        }
+        // Containers seed nothing numeric.
+        await store.send(
+            .snapshotResponse(.success(GraphSnapshot(operators: [container(id: 9)])), epoch: 0)
+        ) {
+            $0.operators = [container(id: 9)]
+            $0.editorNameDraft = ""
+            $0.editorVec3Drafts = [:]
+        }
+    }
+
+    @Test func editorVec3CommitRestoresTypedTriple() async {
+        let recorder = IntentRecorder()
+        let fresh = GraphSnapshot(operators: [cube(id: 1)])
+        var state = NodeGraphFeature.State()
+        state.operators = [cube(id: 1)]
+        state.selected = 1
+        state.editorVec3Drafts = ["size": ["2", "2", "2"]]
+        state.editorParamDirtyKeys = ["size"]
+        let store = TestStore(initialState: state) {
+            NodeGraphFeature()
+        } withDependencies: {
+            $0.engineClient.requestSnapshot = { fresh }
+            $0.engineClient.restoreSnapshot = { snapshot in
+                await recorder.recordRestore(snapshot)
+            }
+            $0.graphPersistence.save = { saved in
+                await recorder.recordSave(saved)
+            }
+        }
+        await store.send(.editorVec3Committed(key: "size")) {
+            $0.editorParamDirtyKeys = []
+            $0.snapshotEpoch = 1
+            $0.editorParamCommitEpoch = 1
+            $0.editorParamCommitKey = "size"
+        }
+        await store.receive(.snapshotResponse(.success(fresh), epoch: 1)) {
+            $0.operators = fresh.operators
+            $0.editorParamCommitEpoch = nil
+            $0.editorParamCommitKey = nil
+            // The clean name draft follows the confirmed mirror too.
+            $0.editorNameDraft = "Container"
+            // The confirmed mirror carries no size key, so the clean draft
+            // follows back to the schema default.
+            $0.editorVec3Drafts = [
+                "size": ["1.0", "1.0", "1.0"],
+                "center": ["0.0", "0.0", "0.0"]
+            ]
+        }
+        // The restore image carries the typed triple — never text — so the
+        // cook sees a vec3 and the viewport recooks instead of erroring.
+        let restored = await recorder.restored
+        #expect(restored.count == 1)
+        #expect(restored.first?.operators.first?.parameters["size"] == .vec3(2, 2, 2))
+        #expect(await recorder.saved == [fresh])
+    }
+
+    @Test func editorVec3CommitRejectsNonNumericWithoutIntent() async {
+        let recorder = IntentRecorder()
+        var state = NodeGraphFeature.State()
+        state.operators = [cube(id: 1)]
+        state.selected = 1
+        state.editorVec3Drafts = ["size": ["2", "oops", "1"]]
+        state.editorParamDirtyKeys = ["size"]
+        let store = TestStore(initialState: state) {
+            NodeGraphFeature()
+        } withDependencies: {
+            $0.engineClient.requestSnapshot = { GraphSnapshot(operators: []) }
+            $0.engineClient.restoreSnapshot = { snapshot in
+                await recorder.recordRestore(snapshot)
+            }
+            $0.graphPersistence.save = { _ in }
+        }
+        // One bad component vetoes the whole triple: no epoch bump, no
+        // intent (no effect to receive), the draft and its dirty key stay
+        // for correction.
+        await store.send(.editorVec3Committed(key: "size"))
+        #expect(store.state.snapshotEpoch == 0)
+        #expect(store.state.editorParamDirtyKeys == ["size"])
+        #expect(store.state.editorVec3Drafts == ["size": ["2", "oops", "1"]])
+        #expect(await recorder.restored.isEmpty)
+    }
+
+    @Test func editorFloatCommitRestoresTypedFloatOnAnyKind() async {
+        // Genericity proof: a stored float on a container (no schema row)
+        // still edits through the same float field + restore path.
+        let recorder = IntentRecorder()
+        let withGain = container(id: 1)
+        let fresh = GraphSnapshot(operators: [withGain])
+        var state = NodeGraphFeature.State()
+        state.operators = [OperatorMirror(
+            id: 1, kind: "container", name: "Container", parent: nil,
+            position: GraphPosition(x: 0, y: 0),
+            parameters: ["gain": .float(0.5)]
+        )]
+        state.selected = 1
+        state.editorFloatDrafts = ["gain": "0.75"]
+        state.editorParamDirtyKeys = ["gain"]
+        let store = TestStore(initialState: state) {
+            NodeGraphFeature()
+        } withDependencies: {
+            $0.engineClient.requestSnapshot = { fresh }
+            $0.engineClient.restoreSnapshot = { snapshot in
+                await recorder.recordRestore(snapshot)
+            }
+            $0.graphPersistence.save = { _ in }
+        }
+        await store.send(.editorFloatCommitted(key: "gain")) {
+            $0.editorParamDirtyKeys = []
+            $0.snapshotEpoch = 1
+            $0.editorParamCommitEpoch = 1
+            $0.editorParamCommitKey = "gain"
+        }
+        await store.receive(.snapshotResponse(.success(fresh), epoch: 1)) {
+            $0.operators = fresh.operators
+            $0.editorParamCommitEpoch = nil
+            $0.editorParamCommitKey = nil
+            // The clean name draft follows the confirmed mirror too.
+            $0.editorNameDraft = "Container"
+            $0.editorFloatDrafts = [:]
+        }
+        let restored = await recorder.restored
+        #expect(restored.first?.operators.first?.parameters["gain"] == .float(0.75))
+    }
+
+    @Test func editorParamCommitFailureRestoresDirtyKey() async {
+        let failure = GraphEngineError.ffiFailed(operation: "vrn_graph_restore", code: 2)
+        let fresh = GraphSnapshot(operators: [cube(id: 1)])
+        var state = NodeGraphFeature.State()
+        state.operators = [cube(id: 1)]
+        state.selected = 1
+        state.editorVec3Drafts = ["size": ["2", "2", "2"]]
+        state.editorParamDirtyKeys = ["size"]
+        let store = TestStore(initialState: state) {
+            NodeGraphFeature()
+        } withDependencies: {
+            $0.engineClient.requestSnapshot = { fresh }
+            $0.engineClient.restoreSnapshot = { (_: GraphSnapshot) async throws(GraphEngineError) in
+                throw failure
+            }
+            $0.graphPersistence.save = { _ in }
+        }
+        await store.send(.editorVec3Committed(key: "size")) {
+            $0.editorParamDirtyKeys = []
+            $0.snapshotEpoch = 1
+            $0.editorParamCommitEpoch = 1
+            $0.editorParamCommitKey = "size"
+        }
+        // Only the matching failed response restores the key: the typed
+        // triple survives for correction.
+        await store.receive(.snapshotResponse(.failure(failure), epoch: 1)) {
+            $0.lastError = failure.message
+            $0.editorParamCommitEpoch = nil
+            $0.editorParamCommitKey = nil
+            $0.editorParamDirtyKeys = ["size"]
+        }
+        #expect(store.state.editorVec3Drafts == ["size": ["2", "2", "2"]])
+    }
+
+    @Test func editorParamSaveFailureRestoresDirtyKey() async {
+        let saveError = GraphEngineError.persistenceFailed("disk full")
+        let fresh = GraphSnapshot(operators: [cube(id: 1)])
+        var state = NodeGraphFeature.State()
+        state.operators = [cube(id: 1)]
+        state.selected = 1
+        state.editorVec3Drafts = ["size": ["2", "2", "2"]]
+        state.editorParamDirtyKeys = ["size"]
+        let store = TestStore(initialState: state) {
+            NodeGraphFeature()
+        } withDependencies: {
+            $0.engineClient.requestSnapshot = { fresh }
+            $0.engineClient.restoreSnapshot = { _ in }
+            $0.graphPersistence.save = { @Sendable (_: GraphSnapshot) async throws(GraphEngineError) in
+                throw saveError
+            }
+        }
+        await store.send(.editorVec3Committed(key: "size")) {
+            $0.editorParamDirtyKeys = []
+            $0.snapshotEpoch = 1
+            $0.editorParamCommitEpoch = 1
+            $0.editorParamCommitKey = "size"
+        }
+        // The engine committed, so the mirror advances — but the in-flight
+        // numeric key is dirty again, so the reseed skips it and the typed
+        // triple survives instead of being clobbered by the mirror.
+        await store.receive(.snapshotSaveFailed(fresh, saveError, epoch: 1)) {
+            $0.operators = fresh.operators
+            $0.lastError = saveError.message
+            $0.editorParamCommitEpoch = nil
+            $0.editorParamCommitKey = nil
+            $0.editorParamDirtyKeys = ["size"]
+            $0.editorNameDraft = "Container"
+            $0.editorVec3Drafts = [
+                "size": ["2", "2", "2"],
+                "center": ["0.0", "0.0", "0.0"]
+            ]
+        }
+    }
+
+    @Test func editorParamRevertReseedsKey() async {
+        var state = NodeGraphFeature.State()
+        state.operators = [cube(id: 1)]
+        state.selected = 1
+        state.editorVec3Drafts = ["size": ["9", "9", "9"]]
+        state.editorParamDirtyKeys = ["size"]
+        let store = TestStore(initialState: state) {
+            NodeGraphFeature()
+        }
+        await store.send(.editorParamReverted(key: "size")) {
+            $0.editorParamDirtyKeys = []
+            $0.editorVec3Drafts = [
+                "size": ["1.0", "1.0", "1.0"],
+                "center": ["0.0", "0.0", "0.0"]
+            ]
+        }
+    }
+
+    @Test func editorParamCommitNoopsWhenCleanOrUnselected() async {
+        var state = NodeGraphFeature.State()
+        state.operators = [cube(id: 1)]
+        state.selected = 1
+        state.editorVec3Drafts = ["size": ["1.0", "1.0", "1.0"]]
+        let store = TestStore(initialState: state) {
+            NodeGraphFeature()
+        }
+        // Clean: nothing diverged, so no intent leaves (no effect to receive).
+        await store.send(.editorVec3Committed(key: "size"))
+        #expect(store.state.snapshotEpoch == 0)
+        // Out-of-range axes are ignored, not clamped or crashed on.
+        await store.send(.editorVec3Changed(key: "size", axis: 9, draft: "2"))
+        #expect(store.state.editorParamDirtyKeys.isEmpty)
     }
 }
