@@ -372,15 +372,15 @@ nonisolated struct Vec3Components: Equatable, Sendable {
 /// Pure field-level validation for the generic numeric editor components.
 ///
 /// Both helpers trim surrounding whitespace (like the name commit path) and
-/// accept exactly what `Double` parses — backend travels non-finite floats
-/// verbatim, so range checks belong to future validation, not to parsing.
-/// Anything else is rejected at the field and never committed, keeping
-/// mistyped values away from the cook's `InvalidParameter` backstop.
+/// accept finite doubles only: `Double` also parses `nan`/`inf`, but those
+/// are never meaningful parameter values, so they are rejected at the field
+/// and never committed. Anything else is rejected the same way, keeping
+/// bad values away from the cook's `InvalidParameter` backstop.
 nonisolated enum NumericDraftParsing {
     /// Parses one float-field draft, or `nil` when it must not commit.
     static func parseFloatDraft(_ draft: String) -> Double? {
         let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, let value = Double(trimmed) else {
+        guard !trimmed.isEmpty, let value = Double(trimmed), value.isFinite else {
             return nil
         }
         return value

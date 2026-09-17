@@ -79,7 +79,10 @@ struct FloatParamField: View {
 ///
 /// The triple commits as a unit: tabbing between the three axes never
 /// commits (focus only leaves the group as a whole), and one non-numeric
-/// component vetoes the whole commit — never partially.
+/// component vetoes the whole commit — never partially. (Return in one
+/// axis also submits immediately with the other axes as they stand, so
+/// "unit" means the triple validates together, not that all three were
+/// just edited.)
 struct Vec3ParamField: View {
     /// Parameter key (accessibility identifiers + validation scope).
     let key: String

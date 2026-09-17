@@ -261,7 +261,7 @@ struct GraphSnapshotTests {
 
     @Test(
         "float drafts reject non-numerics",
-        arguments: ["", "   ", "abc", "1,2", "12px", "--3", "1.2.3"]
+        arguments: ["", "   ", "abc", "1,2", "12px", "--3", "1.2.3", "nan", "NaN", "inf", "-inf", "infinity"]
     )
     func floatDraftRejectsNonNumerics(draft: String) {
         #expect(NumericDraftParsing.parseFloatDraft(draft) == nil)
