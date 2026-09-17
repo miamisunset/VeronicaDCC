@@ -50,6 +50,58 @@ struct ViewportNavViewTests {
         #expect(recorded.actions.isEmpty)
     }
 
+    /// Host window for scope-guard tests (`contentRect`-only is not a valid
+    /// `NSWindow` initializer).
+    private func hostWindow() -> NSWindow {
+        NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+    }
+
+    @Test func fKeyConsumesInLiveWindowWithoutTextFocus() {
+        // Hosted in a window (no text input focused), bare `F` fires.
+        let (nav, recorded) = makeView()
+        hostWindow().contentView?.addSubview(nav)
+        #expect(nav.consumeKeyEvent(keyEvent(characters: "f", modifiers: [])))
+        #expect(recorded.actions == [.frameAll])
+    }
+
+    @Test func fKeyNotConsumedWhileEditingText() {
+        // Typing `f` in a rename field must never reframe the viewport.
+        let (nav, recorded) = makeView()
+        let window = hostWindow()
+        window.contentView?.addSubview(nav)
+        let field = NSTextView(frame: NSRect(x: 0, y: 0, width: 100, height: 20))
+        window.contentView?.addSubview(field)
+        window.makeFirstResponder(field)
+        #expect(!nav.consumeKeyEvent(keyEvent(characters: "f", modifiers: [])))
+        #expect(recorded.actions.isEmpty)
+    }
+
+    @Test func fKeyNotConsumedForForeignWindow() {
+        // The app-wide monitor sees every window's keys; only ours consume.
+        let (nav, recorded) = makeView()
+        hostWindow().contentView?.addSubview(nav)
+        let other = hostWindow()
+        let foreign = NSEvent.keyEvent(
+            with: .keyDown,
+            location: NSPoint.zero,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: other.windowNumber,
+            context: nil,
+            characters: "f",
+            charactersIgnoringModifiers: "f",
+            isARepeat: false,
+            keyCode: 3
+        ).unsafelyUnwrapped
+        #expect(!nav.consumeKeyEvent(foreign))
+        #expect(recorded.actions.isEmpty)
+    }
+
     @Test func leftDragOrbitsByPixelDelta() {
         let (nav, recorded) = makeView()
         nav.mouseDown(with: mouseEvent(type: .leftMouseDown, button: 0, point: NSPoint(x: 100, y: 100)))

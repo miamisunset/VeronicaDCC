@@ -22,6 +22,26 @@ final class ViewportNavView: MTKView {
 
     /// Click-to-focus so bare `F` reaches `keyDown` after one click.
     override var acceptsFirstResponder: Bool { true }
+    /// App-wide key tap for bare `F` (issue #46). SwiftUI's focus system
+    /// can move first-responder status off this view after the click that
+    /// claimed it, so `keyDown` alone never fires in the live app even
+    /// though the click lands here. The monitor sees every app key-down
+    /// regardless of focus; `consumeKeyEvent` scopes it back to our window
+    /// and away from text inputs.
+    private var keyMonitor: Any?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil, keyMonitor == nil {
+            keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard let self, self.consumeKeyEvent(event) else { return event }
+                return nil
+            }
+        } else if window == nil, let monitor = keyMonitor {
+            NSEvent.removeMonitor(monitor)
+            keyMonitor = nil
+        }
+    }
 
     override func mouseDown(with event: NSEvent) {
         // Clicking a bare NSView does not claim focus on its own; without
@@ -75,18 +95,40 @@ final class ViewportNavView: MTKView {
     }
 
     override func keyDown(with event: NSEvent) {
+        if !consumeKeyEvent(event) {
+            super.keyDown(with: event)
+        }
+    }
+
+    /// Single decision point for bare-`F`-frames-all, shared by `keyDown`
+    /// and the app-wide monitor. Returns whether the event was consumed.
+    ///
+    /// Scope guards apply only when hosted in a live window (unit tests
+    /// drive windowless views): a foreign `event.window` is ignored, and a
+    /// text input holding first responder keeps the keystroke — typing `f`
+    /// in a rename field must never reframe the viewport.
+    func consumeKeyEvent(_ event: NSEvent) -> Bool {
+        guard event.type == .keyDown else { return false }
+        if let host = window {
+            if let target = event.window, target != host {
+                return false
+            }
+            if host.firstResponder is NSText || host.firstResponder is NSTextField {
+                return false
+            }
+        }
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        if let action = ViewportGestureMap.frameAllKey(
+        guard let action = ViewportGestureMap.frameAllKey(
             characters: event.charactersIgnoringModifiers?.lowercased(),
             command: flags.contains(.command),
             control: flags.contains(.control),
             option: flags.contains(.option),
             shift: flags.contains(.shift)
-        ) {
-            onAction?(action)
-        } else {
-            super.keyDown(with: event)
+        ) else {
+            return false
         }
+        onAction?(action)
+        return true
     }
 
     /// Fix the drag's coarse op from button + modifiers; deltas accumulate

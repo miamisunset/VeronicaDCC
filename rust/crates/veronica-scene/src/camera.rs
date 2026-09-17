@@ -352,8 +352,8 @@ impl SceneWorld {
     /// but the projection derives from the camera the orbit/pan/dolly ops
     /// move: distance drives the scale, orbit the view angles, the pivot's
     /// camera-space position the screen center — so every nav op is
-    /// pixel-observable without warming up the GPU path. Reads the turntable
-    /// angle and viewport extents live, so consecutive ticks still differ.
+    /// pixel-observable without warming up the GPU path. Reads the cube
+    /// angle and viewport extents live, so the oracle tracks ECS state.
     ///
     /// # Errors
     ///
@@ -377,7 +377,7 @@ impl SceneWorld {
             pan_up: pivot.dot(transform.rotation * Vec3::Y),
         };
         let (width, height) = self.viewport_size();
-        render_demo_frame_with_camera(self.spin_angle(), &view, width, height)
+        render_demo_frame_with_camera(self.cube_angle_y(), &view, width, height)
     }
 }
 

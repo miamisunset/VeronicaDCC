@@ -1,8 +1,8 @@
 //! Deterministic CPU rasterizer: the test oracle for the demo scene (ADR-0001).
 //!
-//! Pixels are derived from live Bevy ECS state — the per-tick turntable
-//! angle — so consecutive frames provably differ because Scene state
-//! advanced, not because Swift re-rendered. Since the GPU slice (issue #27)
+//! Pixels are derived from live Bevy ECS state — the demo-cube angle — so
+//! frames provably differ because scene state advanced, not because Swift
+//! re-rendered. Since the GPU slice (issue #27)
 //! this rasterizer is kept only as the deterministic test oracle behind the
 //! frame-publish seam ([`SceneWorld::render_frame`]): integration tests assert
 //! GPU frames are visibly beyond flat rasterization by comparing against
@@ -532,7 +532,7 @@ mod tests {
     }
 
     #[test]
-    fn turntable_step_changes_pixels() {
+    fn angle_step_changes_pixels() {
         let before = render_demo_frame(0.0, 128, 96).unwrap();
         let after = render_demo_frame(0.02, 128, 96).unwrap();
         assert_ne!(before.pixels(), after.pixels());

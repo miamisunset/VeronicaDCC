@@ -42,13 +42,14 @@ func waitForViewportWarmUp(
 /// luminance exceeds 0.5, sampled from `shot` (device pixels, top-left
 /// origin, spans the main display).
 ///
-/// The viewport pane deliberately exposes no geometry to accessibility
-/// (its `NSViewRepresentable` content is invisible to AX, so the pane
-/// element's frame collapses to the stats overlay), hence the
-/// window-wide bright-pixel metric instead of pane sampling: it is
-/// layout-independent and still separates lit geometry (~10%) from a
-/// clear-only viewport plus overlay text (~0.3%) by over an order of
-/// magnitude.
+/// Window-wide (not pane-sampled) by necessity and by choice: the MTKView
+/// never surfaces in the AX tree (proven at #46 — neither AppKit opt-in
+/// nor a representable-level identifier exposes it), so no queryable
+/// element carries pane geometry; and the metric is layout-independent
+/// while still separating lit geometry (~10%) from a clear-only viewport
+/// plus overlay text (~0.3%) by over an order of magnitude. For
+/// before/after ratios the static side chrome dilutes but cannot erase the
+/// change, since only pane pixels move.
 func viewportBrightPixelFraction(of shot: XCUIScreenshot, in windowFrame: CGRect) -> Double? {
     guard windowFrame.width > 0, windowFrame.height > 0,
         let screenSize = NSScreen.main?.frame.size, screenSize.width > 0,
