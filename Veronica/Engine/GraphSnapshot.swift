@@ -280,15 +280,17 @@ nonisolated struct OperatorSubmenu: Equatable, Sendable {
 
 /// Static registry backing the canvas menu (ADR-0002: Swift-static).
 ///
-/// `Container` stays at the menu root (structural); `Cube` lives in the
-/// `Geometry` submenu, establishing the family pattern for future operators.
+/// `Container` stays at the menu root (structural); `Cube` and `Sphere` live
+/// in the `Geometry` submenu, establishing the family pattern for future
+/// operators.
 ///
 /// Explicitly `nonisolated`: read from background engine effects and views.
 nonisolated enum OperatorTypeRegistry {
     /// All creatable operator kinds.
     static let all: [OperatorTypeDef] = [
         OperatorTypeDef(kind: "container", displayName: "Container", menuGroup: nil),
-        OperatorTypeDef(kind: "cube", displayName: "Cube", menuGroup: .geometry)
+        OperatorTypeDef(kind: "cube", displayName: "Cube", menuGroup: .geometry),
+        OperatorTypeDef(kind: "sphere", displayName: "Sphere", menuGroup: .geometry)
     ]
 }
 
@@ -322,27 +324,40 @@ nonisolated enum OperatorMenuModel {
 ///
 /// A fresh cube carries no `size`/`center` keys (creation seeds only the
 /// name); the cook falls back to Rust's `DEFAULT_CUBE_SIZE`/`DEFAULT_CUBE_CENTER`
-/// (`[1, 1, 1]`/`[0, 0, 0]`). The editor seeds its triple-fields from these
-/// same values so absent keys stay editable. Mirrors `CubeParams` — any
+/// (`[1, 1, 1]`/`[0, 0, 0]`). A fresh sphere likewise carries no keys; the
+/// cook falls back to Rust's `DEFAULT_SPHERE_SEGMENTS`/`DEFAULT_SPHERE_RINGS`
+/// (`32`/`16`) plus `DEFAULT_SPHERE_RADIUS`/`DEFAULT_SPHERE_CENTER`
+/// (`0.5`/`[0, 0, 0]`). The editor seeds its fields from these same values
+/// so absent keys stay editable. Mirrors `CubeParams`/`SphereParams` — any
 /// drift breaks the cook contract (see the schema tests).
 nonisolated enum OperatorParameterSchema {
-    /// Editable numeric defaults for `kind`: cube's `size`/`center`, empty
-    /// for kinds with no numeric schema (for example `container`).
+    /// Editable numeric defaults for `kind`: cube's `size`/`center`,
+    /// sphere's `segments`/`rings`/`radius`/`center`, empty for kinds with
+    /// no numeric schema (for example `container`).
     static func editableNumericDefaults(for kind: String) -> [String: ParameterValue] {
-        guard kind == "cube" else {
+        switch kind {
+        case "cube":
+            return [
+                "size": .vec3(1, 1, 1),
+                "center": .vec3(0, 0, 0)
+            ]
+        case "sphere":
+            return [
+                "segments": .integer(32),
+                "rings": .integer(16),
+                "radius": .float(0.5),
+                "center": .vec3(0, 0, 0)
+            ]
+        default:
             return [:]
         }
-        return [
-            "size": .vec3(1, 1, 1),
-            "center": .vec3(0, 0, 0)
-        ]
     }
 
     /// Editable numeric parameters for one mirror: schema defaults for
     /// absent keys, mirror values where present, restricted to the
-    /// `.float`/`.vec3` cases the generic editor components commit.
-    /// Present-but-mistyped values (for example a text `size`) stay out:
-    /// they render as read-only rows, never as editors.
+    /// `.float`/`.vec3`/`.integer` cases the generic editor components
+    /// commit. Present-but-mistyped values (for example a text `size`)
+    /// stay out: they render as read-only rows, never as editors.
     static func editableNumericParams(for mirrored: OperatorMirror?) -> [String: ParameterValue] {
         guard let mirrored else {
             return [:]
@@ -351,11 +366,33 @@ nonisolated enum OperatorParameterSchema {
             .merging(mirrored.parameters) { _, mirror in mirror }
         return merged.filter {
             switch $1 {
-            case .float, .vec3:
+            case .float, .vec3, .integer:
                 true
-            case .text, .integer, .flag:
+            case .text, .flag:
                 false
             }
+        }
+    }
+
+    /// Valid range for an integer parameter, by operator kind and key.
+    ///
+    /// Sphere resolutions mirror the Rust cook bounds exactly
+    /// (`MIN/MAX_SPHERE_SEGMENTS` = 3...128, `MIN/MAX_SPHERE_RINGS` = 2...64):
+    /// out-of-range input is rejected at the field and never commits, so the
+    /// cook's `InvalidParameter` stays a backend backstop. `nil` means no
+    /// range applies and any parsed integer commits (stored integers on
+    /// kinds without a schema row stay editable, like stored floats).
+    static func integerRange(for kind: String, key: String) -> ClosedRange<Int>? {
+        guard kind == "sphere" else {
+            return nil
+        }
+        switch key {
+        case "segments":
+            return 3...128
+        case "rings":
+            return 2...64
+        default:
+            return nil
         }
     }
 }
@@ -400,8 +437,33 @@ nonisolated enum NumericDraftParsing {
         return Vec3Components(x: x, y: y, z: z)
     }
 
+    /// Parses one integer-field draft, or `nil` when it must not commit.
+    /// Decimal digits (with an optional sign) only: `"12.0"`, hex, and
+    /// overflowing magnitudes are not integers and never commit. Trims
+    /// surrounding whitespace like the float path.
+    static func parseIntegerDraft(_ draft: String) -> Int? {
+        let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return nil
+        }
+        let unsigned = trimmed.hasPrefix("+") || trimmed.hasPrefix("-")
+            ? String(trimmed.dropFirst()) : trimmed
+        guard !unsigned.isEmpty,
+              unsigned.allSatisfy({ $0.isASCII && $0.isNumber }),
+              let value = Int(trimmed)
+        else {
+            return nil
+        }
+        return value
+    }
+
     /// Seed text for one float component. Round-trips through the parser.
     static func seedText(for value: Double) -> String {
+        String(value)
+    }
+
+    /// Seed text for one integer component. Round-trips through the parser.
+    static func seedText(for value: Int) -> String {
         String(value)
     }
 }

@@ -87,6 +87,18 @@ struct MockGraphEngineTests {
         #expect(snapshot.operators.map(\.kind) == ["cube"])
     }
 
+    @Test func createAcceptsSphereKind() async throws {
+        let engine = MockGraphEngine()
+        let id = try await engine.create(
+            kind: "sphere",
+            parent: nil,
+            position: GraphPosition(x: 0, y: 0)
+        )
+        #expect(id == 1)
+        let snapshot = await engine.snapshot()
+        #expect(snapshot.operators.map(\.kind) == ["sphere"])
+    }
+
     @Test func createRejectsUnknownKindAndParent() async {
         let engine = MockGraphEngine()
         await #expect(throws: GraphEngineError.self) {

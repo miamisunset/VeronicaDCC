@@ -148,6 +148,22 @@ struct NodeGraphFeatureTests {
         )
     }
 
+    /// Builds a mirrored sphere operator for fixtures.
+    private func sphere(
+        id: UInt64,
+        name: String = "Ball",
+        parameters: [String: ParameterValue] = [:]
+    ) -> OperatorMirror {
+        OperatorMirror(
+            id: id,
+            kind: "sphere",
+            name: name,
+            parent: nil,
+            position: GraphPosition(x: 0, y: 0),
+            parameters: parameters
+        )
+    }
+
     @Test func appearedMirrorsEngineSnapshot() async {
         let snapshot = GraphSnapshot(operators: [container(id: 1, x: 120, y: 80)])
         let store = TestStore(initialState: NodeGraphFeature.State()) {
@@ -1123,6 +1139,105 @@ struct NodeGraphFeatureTests {
         #expect(store.state.snapshotEpoch == 0)
         #expect(store.state.editorParamDirtyKeys == ["size"])
         #expect(store.state.editorVec3Drafts == ["size": ["2", "oops", "1"]])
+        #expect(await recorder.parametersSetTyped.isEmpty)
+    }
+
+    @Test func editorIntCommitSendsTypedIntegerOnAnyKind() async {
+        // Genericity proof: a stored integer on a container (no schema row,
+        // hence no range) still edits through the same int field + typed
+        // intent.
+        let recorder = IntentRecorder()
+        let withSeed = container(id: 1)
+        let fresh = GraphSnapshot(operators: [withSeed])
+        var state = NodeGraphFeature.State()
+        state.operators = [OperatorMirror(
+            id: 1, kind: "container", name: "Container", parent: nil,
+            position: GraphPosition(x: 0, y: 0),
+            parameters: ["seed": .integer(7)]
+        )]
+        state.selected = 1
+        state.editorIntDrafts = ["seed": "9"]
+        state.editorParamDirtyKeys = ["seed"]
+        let store = TestStore(initialState: state) {
+            NodeGraphFeature()
+        } withDependencies: {
+            $0.engineClient.setParameterTyped = { id, key, value in
+                await recorder.recordSetParameterTyped(id: id, key: key, value: value)
+            }
+            $0.engineClient.requestSnapshot = { fresh }
+            $0.graphPersistence.save = { _ in }
+        }
+        await store.send(.editorIntCommitted(key: "seed")) {
+            $0.editorParamDirtyKeys = []
+            $0.snapshotEpoch = 1
+            $0.editorParamCommitEpoch = 1
+            $0.editorParamCommitKey = "seed"
+        }
+        await store.receive(.snapshotResponse(.success(fresh), epoch: 1)) {
+            $0.operators = fresh.operators
+            $0.editorParamCommitEpoch = nil
+            $0.editorParamCommitKey = nil
+            // The clean name draft follows the confirmed mirror too.
+            $0.editorNameDraft = "Container"
+            $0.editorIntDrafts = [:]
+        }
+        let restored = await recorder.parametersSetTyped
+        #expect(restored == [.init(id: 1, key: "seed", value: .integer(9))])
+    }
+
+    @Test func editorIntCommitRejectsNonNumericWithoutIntent() async {
+        let recorder = IntentRecorder()
+        var state = NodeGraphFeature.State()
+        state.operators = [sphere(id: 1)]
+        state.selected = 1
+        state.editorIntDrafts = ["segments": "lots"]
+        state.editorParamDirtyKeys = ["segments"]
+        let store = TestStore(initialState: state) {
+            NodeGraphFeature()
+        } withDependencies: {
+            $0.engineClient.requestSnapshot = { GraphSnapshot(operators: []) }
+            $0.engineClient.setParameterTyped = { id, key, value in
+                await recorder.recordSetParameterTyped(id: id, key: key, value: value)
+            }
+            $0.graphPersistence.save = { _ in }
+        }
+        // Non-numeric input is rejected at the field: no epoch bump, no
+        // intent (no effect to receive), the draft and its dirty key stay
+        // for correction.
+        await store.send(.editorIntCommitted(key: "segments"))
+        #expect(store.state.snapshotEpoch == 0)
+        #expect(store.state.editorParamDirtyKeys == ["segments"])
+        #expect(store.state.editorIntDrafts == ["segments": "lots"])
+        #expect(await recorder.parametersSetTyped.isEmpty)
+    }
+
+    @Test(
+        "out-of-range sphere resolutions never commit",
+        arguments: [("segments", "2"), ("segments", "129"), ("rings", "1"), ("rings", "65")]
+    )
+    func editorIntCommitRejectsOutOfRangeWithoutIntent(key: String, draft: String) async {
+        let recorder = IntentRecorder()
+        var state = NodeGraphFeature.State()
+        state.operators = [sphere(id: 1)]
+        state.selected = 1
+        state.editorIntDrafts = [key: draft]
+        state.editorParamDirtyKeys = [key]
+        let store = TestStore(initialState: state) {
+            NodeGraphFeature()
+        } withDependencies: {
+            $0.engineClient.requestSnapshot = { GraphSnapshot(operators: []) }
+            $0.engineClient.setParameterTyped = { id, key, value in
+                await recorder.recordSetParameterTyped(id: id, key: key, value: value)
+            }
+            $0.graphPersistence.save = { _ in }
+        }
+        // Below-minimum and above-maximum are rejected at the field, so the
+        // cook's `InvalidParameter` stays a backend backstop: no epoch bump,
+        // no intent, draft and dirty key survive for correction.
+        await store.send(.editorIntCommitted(key: key))
+        #expect(store.state.snapshotEpoch == 0)
+        #expect(store.state.editorParamDirtyKeys == [key])
+        #expect(store.state.editorIntDrafts == [key: draft])
         #expect(await recorder.parametersSetTyped.isEmpty)
     }
 

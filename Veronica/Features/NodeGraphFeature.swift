@@ -90,6 +90,9 @@ struct NodeGraphFeature {
         /// exactly 3 component strings each. Same seeding lifetime as
         /// `editorFloatDrafts`.
         var editorVec3Drafts: [String: [String]] = [:]
+        /// Parameter-editor drafts of integer parameters, by key. Same
+        /// seeding lifetime as `editorFloatDrafts`.
+        var editorIntDrafts: [String: String] = [:]
         /// Numeric parameter keys whose drafts diverge from the mirror. A
         /// confirmed round-trip re-seeds only clean keys, so typing in one
         /// field survives commits from another.
@@ -179,6 +182,11 @@ struct NodeGraphFeature {
         case editorVec3Changed(key: String, axis: Int, draft: String)
         /// Parameter-editor triple committed for `key` (Enter or focus loss).
         case editorVec3Committed(key: String)
+        /// Parameter-editor integer draft changed for `key`.
+        case editorIntChanged(key: String, draft: String)
+        /// Parameter-editor integer committed for `key` (Enter or focus
+        /// loss).
+        case editorIntCommitted(key: String)
         /// Parameter-editor numeric edit reverted for `key` (Escape).
         case editorParamReverted(key: String)
         /// Delete key or menu requested deletion (cascades in Rust).
@@ -538,6 +546,35 @@ struct NodeGraphFeature {
                     persistence: persistence
                 )
 
+            case let .editorIntChanged(key, draft):
+                state.editorIntDrafts[key] = draft
+                state.editorParamDirtyKeys.insert(key)
+                return .none
+
+            case let .editorIntCommitted(key):
+                // Same shape as the float commit, plus the schema range:
+                // non-numeric or out-of-range input is rejected at the field
+                // and never commits (the cook's `InvalidParameter` stays a
+                // backend backstop, never a user-visible path). Keys with no
+                // schema range accept any parsed integer.
+                guard let id = state.selected,
+                      state.editorParamDirtyKeys.contains(key),
+                      let draft = state.editorIntDrafts[key],
+                      let value = NumericDraftParsing.parseIntegerDraft(draft),
+                      let kind = state.operators.first(where: { $0.id == id })?.kind,
+                      OperatorParameterSchema.integerRange(for: kind, key: key)?.contains(value) ?? true
+                else {
+                    return .none
+                }
+                return commitNumericParam(
+                    state: &state,
+                    id: id,
+                    key: key,
+                    value: .integer(value),
+                    engine: engine,
+                    persistence: persistence
+                )
+
             case let .editorParamReverted(key):
                 state.editorParamDirtyKeys.remove(key)
                 if state.editorParamCommitKey == key {
@@ -577,6 +614,7 @@ struct NodeGraphFeature {
         state.editorCommitEpoch = nil
         state.editorFloatDrafts = [:]
         state.editorVec3Drafts = [:]
+        state.editorIntDrafts = [:]
         state.editorParamDirtyKeys = []
         state.editorParamCommitEpoch = nil
         state.editorParamCommitKey = nil
@@ -592,6 +630,7 @@ struct NodeGraphFeature {
         let editable = OperatorParameterSchema.editableNumericParams(for: mirrored)
         let known = Set(state.editorFloatDrafts.keys)
             .union(state.editorVec3Drafts.keys)
+            .union(state.editorIntDrafts.keys)
             .union(editable.keys)
         for key in known {
             guard !state.editorParamDirtyKeys.contains(key) else {
@@ -599,6 +638,7 @@ struct NodeGraphFeature {
             }
             state.editorFloatDrafts.removeValue(forKey: key)
             state.editorVec3Drafts.removeValue(forKey: key)
+            state.editorIntDrafts.removeValue(forKey: key)
             switch editable[key] {
             case let .float(value):
                 state.editorFloatDrafts[key] = NumericDraftParsing.seedText(for: value)
@@ -608,7 +648,9 @@ struct NodeGraphFeature {
                     NumericDraftParsing.seedText(for: y),
                     NumericDraftParsing.seedText(for: z)
                 ]
-            case .text, .integer, .flag, nil:
+            case let .integer(value):
+                state.editorIntDrafts[key] = NumericDraftParsing.seedText(for: value)
+            case .text, .flag, nil:
                 break
             }
         }

@@ -215,7 +215,8 @@ struct GraphSnapshotTests {
     @Test func registryHoldsContainerAndCube() {
         #expect(OperatorTypeRegistry.all == [
             OperatorTypeDef(kind: "container", displayName: "Container", menuGroup: nil),
-            OperatorTypeDef(kind: "cube", displayName: "Cube", menuGroup: .geometry)
+            OperatorTypeDef(kind: "cube", displayName: "Cube", menuGroup: .geometry),
+            OperatorTypeDef(kind: "sphere", displayName: "Sphere", menuGroup: .geometry)
         ])
     }
 
@@ -226,7 +227,10 @@ struct GraphSnapshotTests {
         #expect(OperatorMenuModel.submenus == [
             OperatorSubmenu(
                 title: "Geometry",
-                items: [OperatorTypeDef(kind: "cube", displayName: "Cube", menuGroup: .geometry)]
+                items: [
+                    OperatorTypeDef(kind: "cube", displayName: "Cube", menuGroup: .geometry),
+                    OperatorTypeDef(kind: "sphere", displayName: "Sphere", menuGroup: .geometry)
+                ]
             )
         ])
     }
@@ -267,6 +271,74 @@ struct GraphSnapshotTests {
         #expect(NumericDraftParsing.parseFloatDraft(draft) == nil)
     }
 
+    @Test(
+        "integer drafts commit whole numbers and reject the rest",
+        arguments: [
+            ("32", 32), ("-4", -4), ("+7", 7), ("  16  ", 16), ("007", 7)
+        ]
+    )
+    func integerDraftAcceptsWholeNumbers(draft: String, expected: Int) {
+        #expect(NumericDraftParsing.parseIntegerDraft(draft) == expected)
+    }
+
+    @Test(
+        "integer drafts reject non-integers",
+        arguments: ["", "   ", "abc", "12px", "3.0", "1e3", "0x10", "--3", "1_000", "nan", "inf"]
+    )
+    func integerDraftRejectsNonIntegers(draft: String) {
+        #expect(NumericDraftParsing.parseIntegerDraft(draft) == nil)
+    }
+
+    @Test func integerSeedTextRoundTripsThroughTheParser() {
+        #expect(NumericDraftParsing.parseIntegerDraft(NumericDraftParsing.seedText(for: 32)) == 32)
+        #expect(NumericDraftParsing.parseIntegerDraft(NumericDraftParsing.seedText(for: -4)) == -4)
+        #expect(NumericDraftParsing.parseIntegerDraft(NumericDraftParsing.seedText(for: 0)) == 0)
+    }
+
+    @Test func sphereSchemaDefaultsMirrorRustSphereParams() {
+        let defaults = OperatorParameterSchema.editableNumericDefaults(for: "sphere")
+        #expect(defaults == [
+            "segments": .integer(32),
+            "rings": .integer(16),
+            "radius": .float(0.5),
+            "center": .vec3(0, 0, 0)
+        ])
+        // Bit-exact: the editor seeds what the cook defaults to.
+        if case let .float(radius) = defaults["radius"] {
+            #expect(radius.bitPattern == (0.5).bitPattern)
+        } else {
+            Issue.record("expected a float for radius")
+        }
+        #expect(OperatorParameterSchema.editableNumericDefaults(for: "container") == [:])
+        #expect(OperatorParameterSchema.editableNumericDefaults(for: "unknown") == [:])
+    }
+
+    @Test func integerRangesMirrorRustCookBounds() {
+        #expect(OperatorParameterSchema.integerRange(for: "sphere", key: "segments") == 3...128)
+        #expect(OperatorParameterSchema.integerRange(for: "sphere", key: "rings") == 2...64)
+        // No range: other sphere keys, other kinds, unknown keys.
+        #expect(OperatorParameterSchema.integerRange(for: "sphere", key: "radius") == nil)
+        #expect(OperatorParameterSchema.integerRange(for: "cube", key: "segments") == nil)
+        #expect(OperatorParameterSchema.integerRange(for: "container", key: "seed") == nil)
+        #expect(OperatorParameterSchema.integerRange(for: "sphere", key: "nope") == nil)
+    }
+
+    @Test func sphereMirrorExposesAllFourNumericsAsEditable() {
+        let mirrored = OperatorMirror(
+            id: 3, kind: "sphere", name: "Ball", parent: nil,
+            position: GraphPosition(x: 0, y: 0),
+            parameters: [:]
+        )
+        let editable = OperatorParameterSchema.editableNumericParams(for: mirrored)
+        // Absent keys seed from the schema, so a fresh sphere edits fully.
+        #expect(editable == [
+            "segments": .integer(32),
+            "rings": .integer(16),
+            "radius": .float(0.5),
+            "center": .vec3(0, 0, 0)
+        ])
+    }
+
     @Test func vec3DraftCommitsCompleteTriplesOnly() {
         let parsed = NumericDraftParsing.parseVec3Draft(["1", "2", "3"])
         #expect(parsed == Vec3Components(x: 1, y: 2, z: 3))
@@ -286,10 +358,11 @@ struct GraphSnapshotTests {
         )
         let editable = OperatorParameterSchema.editableNumericParams(for: mirrored)
         // Present-but-mistyped stays out (read-only row, never an editor);
-        // stored triples win over the schema defaults.
+        // stored triples win over the schema defaults. Stored integers edit
+        // through the generic int field, like stored floats do.
         #expect(editable["size"] == nil)
         #expect(editable["center"] == .vec3(0, 0, 0))
-        #expect(editable["seed"] == nil)
+        #expect(editable["seed"] == .integer(7))
         #expect(OperatorParameterSchema.editableNumericParams(for: nil) == [:])
     }
 

@@ -3,14 +3,15 @@ import SwiftUI
 /// Generic, `ParamValue`-driven numeric editor components for the parameter
 /// editor.
 ///
-/// Both fields are case-keyed, never operator-keyed: the float field edits
-/// any `.float` parameter and the triple-field any `.vec3` parameter, so
-/// future operators reuse them with no drift. Draft text lives in the TCA
-/// store (these views only report keystrokes); validation runs through
-/// `NumericDraftParsing`, the same parser the reducer commits through, so
-/// non-numeric input can never commit. Failed validation shows an inline
-/// hint; the commit callbacks are still sent on submit/focus-loss and the
-/// reducer no-ops them when invalid (defense in depth).
+/// All three fields are case-keyed, never operator-keyed: the float field
+/// edits any `.float` parameter, the integer field any `.integer` parameter,
+/// and the triple-field any `.vec3` parameter, so future operators reuse
+/// them with no drift. Draft text lives in the TCA store (these views only
+/// report keystrokes); validation runs through `NumericDraftParsing`, the
+/// same parser the reducer commits through, so non-numeric input can never
+/// commit. Failed validation shows an inline hint; the commit callbacks are
+/// still sent on submit/focus-loss and the reducer no-ops them when invalid
+/// (defense in depth).
 struct FloatParamField: View {
     /// Parameter key (accessibility identifier + validation scope).
     let key: String
@@ -72,6 +73,93 @@ struct FloatParamField: View {
     /// Field-level validity: the single source is the commit parser.
     private var isValid: Bool {
         NumericDraftParsing.parseFloatDraft(text) != nil
+    }
+}
+
+/// Generic integer-field for any `.integer` parameter (segments, rings,
+/// counts).
+///
+/// Same shape as `FloatParamField`: key-scoped identifier, submit/focus-loss
+/// commit, Escape revert, inline hint on invalid input. The optional range
+/// comes from `OperatorParameterSchema.integerRange(for:key:)` — the same
+/// source the reducer commits through, so out-of-range input is rejected at
+/// the field and never commits. A `nil` range means any parsed integer
+/// commits.
+struct IntParamField: View {
+    /// Parameter key (accessibility identifier + validation scope).
+    let key: String
+    /// Current draft text, owned by the store.
+    let text: String
+    /// Valid range, or `nil` when any parsed integer commits.
+    let validRange: ClosedRange<Int>?
+    /// Reports keystrokes to the store.
+    let onChanged: (String) -> Void
+    /// Requests a commit (submit or focus loss). The reducer no-ops when
+    /// the draft does not parse or falls outside the range.
+    let onCommitted: () -> Void
+    /// Requests a revert (Escape).
+    let onReverted: () -> Void
+
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text(key)
+                    .font(.callout)
+                Spacer()
+                TextField(
+                    key,
+                    text: Binding(
+                        get: { text },
+                        set: { onChanged($0) }
+                    )
+                )
+                .textFieldStyle(.roundedBorder)
+                .multilineTextAlignment(.trailing)
+                .frame(width: 120)
+                .focused($focused)
+                .onSubmit {
+                    onCommitted()
+                }
+                .onExitCommand {
+                    onReverted()
+                }
+                .accessibilityIdentifier("parameterField-\(key)")
+                .accessibilityLabel("\(key) value")
+                Text(ParameterValue.integer(0).typeLabel)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if !isValid {
+                Text(hint)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .accessibilityIdentifier("parameterField-\(key)-error")
+            }
+        }
+        .onChange(of: focused) {
+            if !focused {
+                onCommitted()
+            }
+        }
+    }
+
+    /// Field-level validity: the commit parser plus the schema range.
+    private var isValid: Bool {
+        guard let value = NumericDraftParsing.parseIntegerDraft(text) else {
+            return false
+        }
+        return validRange?.contains(value) ?? true
+    }
+
+    /// Inline hint: ranged when the schema bounds the key.
+    private var hint: String {
+        if let validRange {
+            "Enter a whole number from \(validRange.lowerBound) to \(validRange.upperBound)."
+        } else {
+            "Enter a whole number."
+        }
     }
 }
 
@@ -170,6 +258,31 @@ struct Vec3ParamField: View {
     FloatParamField(
         key: "gain",
         text: "oops",
+        onChanged: { _ in },
+        onCommitted: {},
+        onReverted: {}
+    )
+    .padding()
+}
+
+#Preview("Integer field") {
+    @Previewable @State var draft = "32"
+    IntParamField(
+        key: "segments",
+        text: draft,
+        validRange: 3...128,
+        onChanged: { draft = $0 },
+        onCommitted: {},
+        onReverted: { draft = "32" }
+    )
+    .padding()
+}
+
+#Preview("Integer field invalid") {
+    IntParamField(
+        key: "segments",
+        text: "200",
+        validRange: 3...128,
         onChanged: { _ in },
         onCommitted: {},
         onReverted: {}

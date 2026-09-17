@@ -6,8 +6,10 @@ import SwiftUI
 /// Reads the shared `NodeGraphFeature` store. Empty state when nothing (or a
 /// dead id) is selected; otherwise the selected operator's kind header, a
 /// Name field bound to the editor draft, generic numeric editors for every
-/// `.float`/`.vec3` parameter (schema defaults cover absent keys, so a fresh
-/// cube's `size`/`center` stay editable), and read-only rows for the rest.
+/// `.float`/`.vec3`/`.integer` parameter (schema defaults cover absent keys,
+/// so a fresh cube's `size`/`center` and a fresh sphere's
+/// `segments`/`rings`/`radius`/`center` stay editable), and read-only rows
+/// for the rest.
 /// Name commits travel as `setParameter(id, "name", draft)`; numeric commits
 /// travel as `setParameterTyped` carrying the `ParamValue` wire value (the
 /// text setter stores `Text` verbatim, which the cook would reject).
@@ -69,7 +71,19 @@ struct ParameterEditorView: View {
                                 onCommitted: { store.send(.editorVec3Committed(key: key)) },
                                 onReverted: { store.send(.editorParamReverted(key: key)) }
                             )
-                        case .text, .integer, .flag, nil:
+                        case .integer:
+                            IntParamField(
+                                key: key,
+                                text: store.editorIntDrafts[key] ?? "",
+                                validRange: OperatorParameterSchema.integerRange(
+                                    for: mirrored.kind,
+                                    key: key
+                                ),
+                                onChanged: { store.send(.editorIntChanged(key: key, draft: $0)) },
+                                onCommitted: { store.send(.editorIntCommitted(key: key)) },
+                                onReverted: { store.send(.editorParamReverted(key: key)) }
+                            )
+                        case .text, .flag, nil:
                             EmptyView()
                         }
                     }
@@ -165,6 +179,33 @@ struct ParameterEditorView: View {
     state.editorNameDraft = "Box"
     state.editorFloatDrafts = [:]
     state.editorVec3Drafts = ["size": ["1", "1", "1"], "center": ["0", "0", "0"]]
+    return ParameterEditorView(
+        store: Store(initialState: state) {
+            NodeGraphFeature()
+        }
+    )
+}
+
+#Preview("Sphere parameters") {
+    var state = NodeGraphFeature.State()
+    state.operators = [
+        OperatorMirror(
+            id: 3,
+            kind: "sphere",
+            name: "Ball",
+            parent: nil,
+            position: GraphPosition(x: 40, y: 60),
+            parameters: [
+                "segments": .integer(32), "rings": .integer(16),
+                "radius": .float(0.5), "center": .vec3(0, 0, 0)
+            ]
+        )
+    ]
+    state.selected = 3
+    state.editorNameDraft = "Ball"
+    state.editorIntDrafts = ["segments": "32", "rings": "16"]
+    state.editorFloatDrafts = ["radius": "0.5"]
+    state.editorVec3Drafts = ["center": ["0", "0", "0"]]
     return ParameterEditorView(
         store: Store(initialState: state) {
             NodeGraphFeature()
