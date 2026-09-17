@@ -48,3 +48,6 @@ serde_json.workspace = true
 
 [build-dependencies]
 cbindgen.workspace = true
+
+[dev-dependencies]
+veronica-geometry.workspace = true
