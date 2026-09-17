@@ -127,4 +127,22 @@ fn graph_sphere_recooks_into_scene_mesh_with_budgeted_triangles() {
     assert_eq!(spawned[0].0, NodeId(1));
     let mesh = world.cooked_mesh(spawned[0].1).unwrap();
     assert_eq!(cooked_triangle_count(mesh), Some(48));
+
+    // The count alone would pass a wrong-radius or wrong-center sphere,
+    // so pin the bounding sphere too: every vertex one unit from the
+    // origin. f32 trig output, so tight tolerance — never identity.
+    let VertexAttributeValues::Float32x3(positions) =
+        mesh.attribute(Mesh::ATTRIBUTE_POSITION).unwrap()
+    else {
+        panic!("cooked sphere must carry f32 positions");
+    };
+    assert_eq!(positions.len(), 3 * 48);
+    for position in positions {
+        let radius = (position[0].powi(2) + position[1].powi(2) + position[2].powi(2)).sqrt();
+        let deviation = (radius - 1.0).abs();
+        assert!(
+            deviation < 1e-4,
+            "vertex {position:?} off the unit sphere by {deviation}"
+        );
+    }
 }

@@ -69,6 +69,14 @@ fn sphere_with_explicit_params_cooks_to_matching_implicit() {
     assert_eq!(params.segments(), 8);
     assert_eq!(params.rings(), 4);
     assert_eq!(params.radius().to_bits(), 2.0_f64.to_bits());
+    for (index, (actual, expected)) in params
+        .center()
+        .iter()
+        .zip([1.0_f64, 2.0, 3.0].iter())
+        .enumerate()
+    {
+        assert_eq!(actual.to_bits(), expected.to_bits(), "component {index}");
+    }
     assert_eq!(params.triangle_count(), 2 * 8 * 3);
 }
 
@@ -133,7 +141,19 @@ fn snapshot_round_trip_carries_all_four_params() {
     let Some((_, params)) = only_sphere(&cook(&second).unwrap()) else {
         panic!("only_sphere asserted the implicit shape above");
     };
+    // Re-verify every param after the round trip, not just the
+    // resolutions: a restore side that dropped radius or center back to
+    // defaults must fail here.
     assert_eq!((params.segments(), params.rings()), (8, 4));
+    assert_eq!(params.radius().to_bits(), 2.0_f64.to_bits());
+    for (index, (actual, expected)) in params
+        .center()
+        .iter()
+        .zip([1.0_f64, 2.0, 3.0].iter())
+        .enumerate()
+    {
+        assert_eq!(actual.to_bits(), expected.to_bits(), "component {index}");
+    }
 }
 
 #[test]
