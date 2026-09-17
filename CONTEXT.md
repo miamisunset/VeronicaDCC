@@ -114,3 +114,28 @@ Named data carried by geometry, from standard channels (position, normal,
 uv) to custom ones (tension, wetness). Bound to render attributes where
 geometry leaves the graph. _Avoid_: attribute (the Houdini SOP name for
 the same idea).
+
+## Face
+
+One triangle of realized geometry. Identity is the face ordinal: triangle
+*k* of an Operator's realized mesh. _Avoid_: polygon (implies N-gons,
+which the soup has none of).
+
+## Pick
+
+The operation mapping one viewport tap to one Face identity, computed
+Rust-side, plus that resulting identity. A tap on empty space is a Pick
+that hits nothing. _Avoid_: select (the verb is reserved for Selection
+state changes).
+
+## Selection
+
+The ephemeral tool state holding current Picks. Never serialized into the
+graph snapshot; cleared on background miss and on topology change.
+_Avoid_: group (a persisted graph Operator, not built yet).
+
+## Highlight
+
+The viewport rendering of the Selection. Driven primvar-first: a mask on
+the mesh, mixed emissive-side. _Avoid_: outline, overlay (both name
+throwaway techniques, not the mask).
