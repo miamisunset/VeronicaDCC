@@ -24,6 +24,17 @@ use veronica_graph::OperatorGraph;
 
 use crate::{SceneError, SceneTag, SceneWorld, render_mesh_from_evaluated};
 
+/// One stale cooked entity plus its render-bundle handles for cleanup.
+///
+/// Handles are optional: membership is defined by [`CookedMesh`], and a
+/// future cooked entity may carry no render bundle — it must still be
+/// despawned rather than leak.
+type StaleCooked = (
+    Entity,
+    Option<Handle<Mesh>>,
+    Option<Handle<StandardMaterial>>,
+);
+
 /// Links a cooked-mesh entity back to the graph operator that produced it.
 ///
 /// A dedicated component — not [`crate::MeshTag`] — because operator
@@ -83,6 +94,12 @@ impl SceneWorld {
             };
             meshes.push((id, render_mesh_from_evaluated(&evaluated)?));
         }
+        // Nothing to upload or spawn: return before touching the asset
+        // store, so an empty cook (container-only or empty graph) creates
+        // no orphan material handle.
+        if meshes.is_empty() {
+            return Ok(Vec::new());
+        }
         // Upload once per cook: one GPU mesh per operator plus a single
         // default material shared by the whole batch.
         let handles: Vec<Handle<Mesh>> = {
@@ -138,29 +155,40 @@ impl SceneWorld {
         &mut self,
         graph: &OperatorGraph,
     ) -> Result<Vec<(NodeId, Entity)>, SceneError> {
-        let stale: Vec<(Entity, Handle<Mesh>, Handle<StandardMaterial>)> = {
+        // Stale set uses the same membership predicate as
+        // [`SceneWorld::cooked_entities`] (`With<CookedMesh>`): render-bundle
+        // handles are looked up optionally, so a future cooked entity
+        // without the bundle is still cleaned up instead of leaking.
+        let stale_entities: Vec<Entity> = {
             let world = self.app.world_mut();
-            let mut cooked = world.query_filtered::<
-                (
-                    Entity,
-                    &Mesh3d,
-                    &MeshMaterial3d<StandardMaterial>,
-                ),
-                With<SourceOperator>,
-            >();
-            cooked
-                .iter(world)
-                .map(|(entity, mesh, material)| (entity, mesh.0.clone(), material.0.clone()))
+            let mut cooked = world.query_filtered::<Entity, With<CookedMesh>>();
+            cooked.iter(world).collect()
+        };
+        let stale: Vec<StaleCooked> = {
+            let world = self.app.world_mut();
+            stale_entities
+                .into_iter()
+                .map(|entity| {
+                    let mesh = world.get::<Mesh3d>(entity).map(|handle| handle.0.clone());
+                    let material = world
+                        .get::<MeshMaterial3d<StandardMaterial>>(entity)
+                        .map(|handle| handle.0.clone());
+                    (entity, mesh, material)
+                })
                 .collect()
         };
         let spawned = self.cook_graph(graph)?;
         {
             let world = self.app.world_mut();
             for (entity, mesh, material) in stale {
-                world.resource_mut::<Assets<Mesh>>().remove(&mesh);
-                world
-                    .resource_mut::<Assets<StandardMaterial>>()
-                    .remove(&material);
+                if let Some(mesh) = mesh {
+                    world.resource_mut::<Assets<Mesh>>().remove(&mesh);
+                }
+                if let Some(material) = material {
+                    world
+                        .resource_mut::<Assets<StandardMaterial>>()
+                        .remove(&material);
+                }
                 world.despawn(entity);
             }
         }

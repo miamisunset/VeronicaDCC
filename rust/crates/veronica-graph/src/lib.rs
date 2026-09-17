@@ -300,9 +300,11 @@ impl OperatorGraph {
         self.epoch
     }
 
-    /// Record one successful mutation. Saturating rather than wrapping: a
-    /// graph mutated `u64::MAX` times keeps reporting dirty instead of
-    /// aliasing a previously cooked stamp.
+    /// Record one successful mutation. Saturating rather than wrapping: at
+    /// `u64::MAX` further mutations stop advancing the stamp (so a cook at
+    /// `MAX` reads clean forever after) instead of aliasing a previously
+    /// cooked stamp and skipping a real recook. Unreachable in practice —
+    /// it takes 2^64 mutations to get there.
     fn bump_epoch(&mut self) {
         self.epoch = self.epoch.saturating_add(1);
     }
