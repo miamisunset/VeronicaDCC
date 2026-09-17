@@ -43,6 +43,16 @@ private actor IntentRecorder {
         var value: String
     }
 
+    /// One typed set-parameter intent.
+    struct TypedParameterSet: Equatable, Sendable {
+        /// Target operator id.
+        var id: UInt64
+        /// Parameter key.
+        var key: String
+        /// Parameter value.
+        var value: ParameterValue
+    }
+
     /// Created intents.
     var created: [Created] = []
     /// Moved intents.
@@ -51,6 +61,8 @@ private actor IntentRecorder {
     var renamed: [Renamed] = []
     /// Set-parameter intents.
     var parametersSet: [ParameterSet] = []
+    /// Typed set-parameter intents.
+    var parametersSetTyped: [TypedParameterSet] = []
     /// Deleted ids.
     var deleted: [UInt64] = []
     /// Restored snapshots.
@@ -76,6 +88,11 @@ private actor IntentRecorder {
     /// Records a set-parameter intent.
     func recordSetParameter(id: UInt64, key: String, value: String) {
         parametersSet.append(ParameterSet(id: id, key: key, value: value))
+    }
+
+    /// Records a typed set-parameter intent.
+    func recordSetParameterTyped(id: UInt64, key: String, value: ParameterValue) {
+        parametersSetTyped.append(TypedParameterSet(id: id, key: key, value: value))
     }
 
     /// Records a deletion.
@@ -1039,7 +1056,7 @@ struct NodeGraphFeatureTests {
         }
     }
 
-    @Test func editorVec3CommitRestoresTypedTriple() async {
+    @Test func editorVec3CommitSendsTypedTriple() async {
         let recorder = IntentRecorder()
         let fresh = GraphSnapshot(operators: [cube(id: 1)])
         var state = NodeGraphFeature.State()
@@ -1050,10 +1067,10 @@ struct NodeGraphFeatureTests {
         let store = TestStore(initialState: state) {
             NodeGraphFeature()
         } withDependencies: {
-            $0.engineClient.requestSnapshot = { fresh }
-            $0.engineClient.restoreSnapshot = { snapshot in
-                await recorder.recordRestore(snapshot)
+            $0.engineClient.setParameterTyped = { id, key, value in
+                await recorder.recordSetParameterTyped(id: id, key: key, value: value)
             }
+            $0.engineClient.requestSnapshot = { fresh }
             $0.graphPersistence.save = { saved in
                 await recorder.recordSave(saved)
             }
@@ -1077,11 +1094,9 @@ struct NodeGraphFeatureTests {
                 "center": ["0.0", "0.0", "0.0"]
             ]
         }
-        // The restore image carries the typed triple — never text — so the
-        // cook sees a vec3 and the viewport recooks instead of erroring.
-        let restored = await recorder.restored
-        #expect(restored.count == 1)
-        #expect(restored.first?.operators.first?.parameters["size"] == .vec3(2, 2, 2))
+        // The typed intent carries the triple — never text — so the cook
+        // sees a vec3 and the viewport recooks instead of erroring.
+        #expect(await recorder.parametersSetTyped == [.init(id: 1, key: "size", value: .vec3(2, 2, 2))])
         #expect(await recorder.saved == [fresh])
     }
 
@@ -1096,8 +1111,8 @@ struct NodeGraphFeatureTests {
             NodeGraphFeature()
         } withDependencies: {
             $0.engineClient.requestSnapshot = { GraphSnapshot(operators: []) }
-            $0.engineClient.restoreSnapshot = { snapshot in
-                await recorder.recordRestore(snapshot)
+            $0.engineClient.setParameterTyped = { id, key, value in
+                await recorder.recordSetParameterTyped(id: id, key: key, value: value)
             }
             $0.graphPersistence.save = { _ in }
         }
@@ -1108,12 +1123,12 @@ struct NodeGraphFeatureTests {
         #expect(store.state.snapshotEpoch == 0)
         #expect(store.state.editorParamDirtyKeys == ["size"])
         #expect(store.state.editorVec3Drafts == ["size": ["2", "oops", "1"]])
-        #expect(await recorder.restored.isEmpty)
+        #expect(await recorder.parametersSetTyped.isEmpty)
     }
 
-    @Test func editorFloatCommitRestoresTypedFloatOnAnyKind() async {
+    @Test func editorFloatCommitSendsTypedFloatOnAnyKind() async {
         // Genericity proof: a stored float on a container (no schema row)
-        // still edits through the same float field + restore path.
+        // still edits through the same float field + typed intent.
         let recorder = IntentRecorder()
         let withGain = container(id: 1)
         let fresh = GraphSnapshot(operators: [withGain])
@@ -1129,10 +1144,10 @@ struct NodeGraphFeatureTests {
         let store = TestStore(initialState: state) {
             NodeGraphFeature()
         } withDependencies: {
-            $0.engineClient.requestSnapshot = { fresh }
-            $0.engineClient.restoreSnapshot = { snapshot in
-                await recorder.recordRestore(snapshot)
+            $0.engineClient.setParameterTyped = { id, key, value in
+                await recorder.recordSetParameterTyped(id: id, key: key, value: value)
             }
+            $0.engineClient.requestSnapshot = { fresh }
             $0.graphPersistence.save = { _ in }
         }
         await store.send(.editorFloatCommitted(key: "gain")) {
@@ -1149,12 +1164,12 @@ struct NodeGraphFeatureTests {
             $0.editorNameDraft = "Container"
             $0.editorFloatDrafts = [:]
         }
-        let restored = await recorder.restored
-        #expect(restored.first?.operators.first?.parameters["gain"] == .float(0.75))
+        let restored = await recorder.parametersSetTyped
+        #expect(restored == [.init(id: 1, key: "gain", value: .float(0.75))])
     }
 
     @Test func editorParamCommitFailureRestoresDirtyKey() async {
-        let failure = GraphEngineError.ffiFailed(operation: "vrn_graph_restore", code: 2)
+        let failure = GraphEngineError.ffiFailed(operation: "setParameterTyped", code: 2)
         let fresh = GraphSnapshot(operators: [cube(id: 1)])
         var state = NodeGraphFeature.State()
         state.operators = [cube(id: 1)]
@@ -1164,10 +1179,10 @@ struct NodeGraphFeatureTests {
         let store = TestStore(initialState: state) {
             NodeGraphFeature()
         } withDependencies: {
-            $0.engineClient.requestSnapshot = { fresh }
-            $0.engineClient.restoreSnapshot = { (_: GraphSnapshot) async throws(GraphEngineError) in
+            $0.engineClient.setParameterTyped = { (_: UInt64, _: String, _: ParameterValue) async throws(GraphEngineError) in
                 throw failure
             }
+            $0.engineClient.requestSnapshot = { fresh }
             $0.graphPersistence.save = { _ in }
         }
         await store.send(.editorVec3Committed(key: "size")) {
@@ -1198,8 +1213,8 @@ struct NodeGraphFeatureTests {
         let store = TestStore(initialState: state) {
             NodeGraphFeature()
         } withDependencies: {
+            $0.engineClient.setParameterTyped = { _, _, _ in }
             $0.engineClient.requestSnapshot = { fresh }
-            $0.engineClient.restoreSnapshot = { _ in }
             $0.graphPersistence.save = { @Sendable (_: GraphSnapshot) async throws(GraphEngineError) in
                 throw saveError
             }

@@ -319,6 +319,13 @@ nonisolated enum EngineBridge {
         _ key: UnsafePointer<CChar>?,
         _ value: UnsafePointer<CChar>?
     ) -> Int32
+    @_silgen_name("vrn_graph_set_parameter_typed")
+    nonisolated private static func vrnGraphSetParameterTyped(
+        _ context: UnsafeMutableRawPointer?,
+        _ id: UInt64,
+        _ key: UnsafePointer<CChar>?,
+        _ valueJSON: UnsafePointer<CChar>?
+    ) -> Int32
     @_silgen_name("vrn_graph_snapshot")
     nonisolated private static func vrnGraphSnapshot(
         _ context: UnsafeMutableRawPointer?,
@@ -512,6 +519,50 @@ nonisolated enum EngineBridge {
         }
     }
 
+    /// Sets one typed parameter value on a known operator id. The value
+    /// encodes as its `ParamValue` wire JSON (`{"vec3": [...]}`, …) — the
+    /// same bytes the snapshot round-trips, so the cook sees exactly what
+    /// a restore would have written. The `"name"` key is reserved (rename
+    /// travels via `setParameter`); Rust rejects it.
+    ///
+    /// Explicitly `nonisolated` (see `createOperator`).
+    nonisolated static func setParameterTyped(
+        id: UInt64,
+        key: String,
+        value: ParameterValue
+    ) async throws(GraphEngineError) {
+        let encoded: Data
+        do {
+            encoded = try JSONEncoder().encode(value)
+        } catch {
+            throw GraphEngineError.snapshotEncodingFailed(error.localizedDescription)
+        }
+        guard let valueJSON = String(bytes: encoded, encoding: .utf8) else {
+            throw GraphEngineError.snapshotEncodingFailed("parameter value is not valid UTF-8")
+        }
+        try await withCheckedThrowingContinuation { (continuation: GraphContinuation<Void>) in
+            engineQueue.async {
+                guard let context = requireGraphContext(
+                    continuation,
+                    operation: "setParameterTyped"
+                ) else {
+                    return
+                }
+                let result: Result<Void, GraphEngineError> = key.withCString { keyPtr in
+                    valueJSON.withCString { valuePtr in
+                        let code = vrnGraphSetParameterTyped(context, id, keyPtr, valuePtr)
+                        guard code == VrnResultCode.ok.rawValue else {
+                            return .failure(
+                                .ffiFailed(operation: "setParameterTyped", code: code)
+                            )
+                        }
+                        return .success(())
+                    }
+                }
+                continuation.resume(with: result)
+            }
+        }
+    }
     /// Fetches the whole-graph mirror, owning the allocate/free boundary.
     ///
     /// The `CString` Rust hands out is copied and freed inside the engine

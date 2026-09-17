@@ -27,7 +27,8 @@ nonisolated struct GraphPosition: Codable, Equatable, Sendable {
 /// Explicitly `nonisolated`: values cross from background engine effects
 /// to the main actor (see `GraphPosition`).
 nonisolated enum ParameterValue: Codable, Equatable, Sendable {
-    /// UTF-8 text. The only variant the editor writes (see `MockGraphEngine`).
+    /// UTF-8 text. What the text setter writes; numeric editor commits
+    /// travel as their own variants via the typed setter.
     case text(String)
     /// Double-precision scalar.
     case float(Double)

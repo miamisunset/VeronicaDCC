@@ -12,7 +12,8 @@ use veronica_core::{
     MeshId, MeshTopology, MorphWeights, NodeId, UndoHistory, validate_mesh_topology,
 };
 use veronica_graph::{
-    GRAPH_SNAPSHOT_VERSION, GraphSnapshot, NodeGraph, OperatorGraph, OperatorKind, Position,
+    GRAPH_SNAPSHOT_VERSION, GraphSnapshot, NodeGraph, OperatorGraph, OperatorKind, ParamValue,
+    Position,
 };
 use veronica_scene::{MAX_VIEWPORT_EDGE, SceneIds, SceneWorld};
 
@@ -833,6 +834,69 @@ pub unsafe extern "C" fn vrn_graph_set_parameter(
     let before = ctx.operator_graph.snapshot();
     ctx.graph_history.push(before);
     match ctx.operator_graph.set_parameter(id, key, value) {
+        Ok(()) => VrnResult::Ok,
+        Err(_) => VrnResult::InvalidArgument,
+    }
+}
+
+/// Set a typed parameter value on an operator (issue #54).
+///
+/// `value_json` carries one [`ParamValue`] in its wire form (`{"vec3": [...]}`,
+/// `{"float": 1.5}`, …) — the same JSON the snapshot round-trips, so Swift
+/// encodes its `ParameterValue` verbatim and the cook sees exactly what a
+/// restore would have written. Guards mirror [`vrn_graph_set_parameter`],
+/// plus malformed `ParamValue` JSON and the reserved `name` key (names travel
+/// via rename, never as typed data) → [`VrnResult::InvalidArgument`], all
+/// before the pre-image history push.
+///
+/// # Safety
+///
+/// `context` must be a live pointer from [`vrn_context_create`] and `key`
+/// plus `value_json` valid NUL-terminated strings for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vrn_graph_set_parameter_typed(
+    context: *mut VrnContextHandle,
+    id: u64,
+    key: *const c_char,
+    value_json: *const c_char,
+) -> VrnResult {
+    if context.is_null() || key.is_null() || value_json.is_null() {
+        return VrnResult::NullArgument;
+    }
+    // SAFETY: non-null; the caller guarantees a valid NUL-terminated string
+    // for the duration of the call.
+    let key_text = unsafe { CStr::from_ptr(key) };
+    let Ok(key) = key_text.to_str() else {
+        return VrnResult::InvalidArgument;
+    };
+    // SAFETY: non-null; the caller guarantees a valid NUL-terminated string
+    // for the duration of the call.
+    let value_text = unsafe { CStr::from_ptr(value_json) };
+    let Ok(value_json) = value_text.to_str() else {
+        return VrnResult::InvalidArgument;
+    };
+    let Ok(value) = serde_json::from_str::<ParamValue>(value_json) else {
+        return VrnResult::InvalidArgument;
+    };
+    // SAFETY: non-null pointer from `vrn_context_create`, still alive.
+    let mutex = unsafe { &(*context).0 };
+    let Ok(mut ctx) = mutex.lock() else {
+        return VrnResult::Internal;
+    };
+    let id = NodeId(id);
+    if ctx.operator_graph.operator(id).is_none() {
+        return VrnResult::InvalidArgument;
+    }
+    let trimmed = key.trim();
+    if trimmed.is_empty() {
+        return VrnResult::InvalidArgument;
+    }
+    if trimmed == "name" {
+        return VrnResult::InvalidArgument;
+    }
+    let before = ctx.operator_graph.snapshot();
+    ctx.graph_history.push(before);
+    match ctx.operator_graph.set_parameter_value(id, key, value) {
         Ok(()) => VrnResult::Ok,
         Err(_) => VrnResult::InvalidArgument,
     }
@@ -2037,6 +2101,205 @@ mod graph_tests {
             // Rejected writes leave the snapshot untouched.
             let json = snapshot_json(context);
             assert!(!json.contains(r#""label""#));
+            vrn_context_destroy(context);
+        }
+    }
+
+    #[test]
+    fn set_parameter_typed_round_trip_is_visible_in_snapshot() {
+        let context = vrn_context_create();
+        assert!(!context.is_null());
+        let kind = cstring("container");
+        let size_key = cstring("size");
+        let size_value = cstring(r#"{"vec3":[2.0,2.0,2.0]}"#);
+        let gain_key = cstring("gain");
+        let gain_value = cstring(r#"{"float":0.75}"#);
+        let mut id = 0u64;
+        // SAFETY: just created, alive, single-threaded test; strings outlive calls.
+        unsafe {
+            assert_eq!(
+                vrn_graph_create_operator(
+                    context,
+                    kind.as_ptr().cast_mut(),
+                    0,
+                    0.0,
+                    0.0,
+                    &raw mut id
+                ),
+                VrnResult::Ok
+            );
+            assert_eq!(
+                vrn_graph_set_parameter_typed(
+                    context,
+                    id,
+                    size_key.as_ptr().cast_mut(),
+                    size_value.as_ptr().cast_mut()
+                ),
+                VrnResult::Ok
+            );
+            let json = snapshot_json(context);
+            assert!(json.contains(r#""size":{"vec3":[2.0,2.0,2.0]}"#));
+            assert_eq!(
+                vrn_graph_set_parameter_typed(
+                    context,
+                    id,
+                    gain_key.as_ptr().cast_mut(),
+                    gain_value.as_ptr().cast_mut()
+                ),
+                VrnResult::Ok
+            );
+            let json = snapshot_json(context);
+            assert!(json.contains(r#""gain":{"float":0.75}"#));
+            vrn_context_destroy(context);
+        }
+    }
+
+    #[test]
+    fn set_parameter_typed_guards_map_to_result_codes() {
+        let context = vrn_context_create();
+        assert!(!context.is_null());
+        let kind = cstring("container");
+        let key = cstring("gain");
+        let value = cstring(r#"{"float":0.75}"#);
+        let blank = cstring("   ");
+        let mut id = 0u64;
+        // SAFETY: just created, alive, single-threaded test; strings outlive calls.
+        unsafe {
+            assert_eq!(
+                vrn_graph_create_operator(
+                    context,
+                    kind.as_ptr().cast_mut(),
+                    0,
+                    0.0,
+                    0.0,
+                    &raw mut id
+                ),
+                VrnResult::Ok
+            );
+            // Null value / null key / null context.
+            assert_eq!(
+                vrn_graph_set_parameter_typed(
+                    context,
+                    id,
+                    key.as_ptr().cast_mut(),
+                    ptr::null_mut()
+                ),
+                VrnResult::NullArgument
+            );
+            assert_eq!(
+                vrn_graph_set_parameter_typed(
+                    context,
+                    id,
+                    ptr::null_mut(),
+                    value.as_ptr().cast_mut()
+                ),
+                VrnResult::NullArgument
+            );
+            assert_eq!(
+                vrn_graph_set_parameter_typed(
+                    ptr::null_mut(),
+                    id,
+                    key.as_ptr().cast_mut(),
+                    value.as_ptr().cast_mut()
+                ),
+                VrnResult::NullArgument
+            );
+            // Unknown id.
+            assert_eq!(
+                vrn_graph_set_parameter_typed(
+                    context,
+                    99,
+                    key.as_ptr().cast_mut(),
+                    value.as_ptr().cast_mut()
+                ),
+                VrnResult::InvalidArgument
+            );
+            // Blank keys rejected.
+            assert_eq!(
+                vrn_graph_set_parameter_typed(
+                    context,
+                    id,
+                    blank.as_ptr().cast_mut(),
+                    value.as_ptr().cast_mut()
+                ),
+                VrnResult::InvalidArgument
+            );
+            // Rejected writes leave the snapshot untouched.
+            let json = snapshot_json(context);
+            assert!(!json.contains(r#""gain""#));
+            vrn_context_destroy(context);
+        }
+    }
+
+    #[test]
+    fn set_parameter_typed_reserved_name_and_malformed_values_are_rejected() {
+        let context = vrn_context_create();
+        assert!(!context.is_null());
+        let kind = cstring("container");
+        let key = cstring("gain");
+        let value = cstring(r#"{"float":0.75}"#);
+        let name_key = cstring("name");
+        let padded_name = cstring("  name  ");
+        let name_value = cstring(r#"{"text":"Villain"}"#);
+        let not_json = cstring("not json");
+        let wrong_shape = cstring(r#"{"vec3":[1.0,2.0]}"#);
+        let untagged = cstring("[1.0,2.0,3.0]");
+        let mut id = 0u64;
+        // SAFETY: just created, alive, single-threaded test; strings outlive calls.
+        unsafe {
+            assert_eq!(
+                vrn_graph_create_operator(
+                    context,
+                    kind.as_ptr().cast_mut(),
+                    0,
+                    0.0,
+                    0.0,
+                    &raw mut id
+                ),
+                VrnResult::Ok
+            );
+            // The `name` key is reserved for rename, even as text —
+            // padded too, since the boundary trims like the graph core.
+            for reserved in [&name_key, &padded_name] {
+                assert_eq!(
+                    vrn_graph_set_parameter_typed(
+                        context,
+                        id,
+                        reserved.as_ptr().cast_mut(),
+                        name_value.as_ptr().cast_mut()
+                    ),
+                    VrnResult::InvalidArgument
+                );
+            }
+            // Non-UTF8 keys never reach the graph core (`0xFF` opens no
+            // valid UTF-8 sequence).
+            let invalid_key: [u8; 2] = [0xFF, 0x00];
+            assert_eq!(
+                vrn_graph_set_parameter_typed(
+                    context,
+                    id,
+                    invalid_key.as_ptr().cast::<c_char>().cast_mut(),
+                    value.as_ptr().cast_mut()
+                ),
+                VrnResult::InvalidArgument
+            );
+            // Malformed `ParamValue` wire forms rejected.
+            for bad in [&not_json, &wrong_shape, &untagged] {
+                assert_eq!(
+                    vrn_graph_set_parameter_typed(
+                        context,
+                        id,
+                        key.as_ptr().cast_mut(),
+                        bad.as_ptr().cast_mut()
+                    ),
+                    VrnResult::InvalidArgument
+                );
+            }
+            // Rejected writes leave the snapshot untouched: no `gain`
+            // parameter row, and the display name never moved.
+            let json = snapshot_json(context);
+            assert!(!json.contains(r#""gain""#));
+            assert!(json.contains(r#""name":"Container""#));
             vrn_context_destroy(context);
         }
     }

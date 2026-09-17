@@ -614,16 +614,13 @@ struct NodeGraphFeature {
         }
     }
 
-    /// Commits one numeric parameter through snapshot restore.
+    /// Commits one numeric parameter through the typed intent (issue #54).
     ///
-    /// `setParameter` stores `Text` verbatim, and a text `size`/`center`
-    /// would fail the cook with `InvalidParameter` on every tick retry —
-    /// so typed values travel inside a restored snapshot instead, through
-    /// the same `commit()` refresh-and-autosave path as every other intent.
-    /// The effect re-reads the mirror before writing so two rapid commits
-    /// from different fields compose instead of clobbering (a residual
-    /// interleave window remains; the epoch-guarded refresh keeps the
-    /// mirror truthful either way).
+    /// The value crosses as its `ParamValue` wire JSON, so the cook sees
+    /// exactly what a restore would have written — the same `commit()`
+    /// refresh-and-autosave path as every other intent, with no
+    /// read-modify-write and no residual interleave window for two
+    /// in-flight numeric commits.
     private func commitNumericParam(
         state: inout State,
         id: UInt64,
@@ -643,11 +640,7 @@ struct NodeGraphFeature {
             persistence: persistence,
             epoch: state.snapshotEpoch
         ) { (client: EngineClient) async throws(GraphEngineError) in
-            var base = try await client.requestSnapshot()
-            if let index = base.operators.firstIndex(where: { $0.id == id }) {
-                base.operators[index].parameters[key] = value
-            }
-            try await client.restoreSnapshot(base)
+            try await client.setParameterTyped(id, key, value)
         }
     }
 

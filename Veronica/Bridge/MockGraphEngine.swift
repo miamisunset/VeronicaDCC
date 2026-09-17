@@ -90,6 +90,21 @@ actor MockGraphEngine {
         operators[id] = mirrored
     }
 
+    /// Sets one typed parameter value, storing it verbatim. Unknown ids,
+    /// blank keys, and the reserved `"name"` key are rejected — mirroring
+    /// `vrn_graph_set_parameter_typed` so the double never accepts what the
+    /// engine rejects. Keys are trimmed, mirroring Rust.
+    func setParameterTyped(id: UInt64, key: String, value: ParameterValue) throws(GraphEngineError) {
+        guard var mirrored = operators[id] else {
+            throw .ffiFailed(operation: "setParameterTyped", code: 2)
+        }
+        let trimmedKey = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedKey.isEmpty, trimmedKey != "name" else {
+            throw .ffiFailed(operation: "setParameterTyped", code: 2)
+        }
+        mirrored.parameters[trimmedKey] = value
+        operators[id] = mirrored
+    }
     /// Deletes an operator id, cascading its subtree.
     func delete(id: UInt64) throws(GraphEngineError) {
         guard operators[id] != nil else {

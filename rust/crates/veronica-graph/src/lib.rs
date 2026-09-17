@@ -36,6 +36,11 @@ pub enum GraphError {
     /// A parameter key was empty or blank (symmetric with [`GraphError::EmptyName`]).
     #[error("parameter key must not be empty")]
     EmptyParameterKey,
+    /// The `name` key was set through the typed setter. Names travel via
+    /// rename (or the text setter's delegation), never as typed data — a
+    /// second source of truth for the display name is a bug.
+    #[error("parameter key is reserved for rename: {0}")]
+    ReservedParameterKey(String),
     /// A snapshot carried the same id twice.
     #[error("duplicate node: {0:?}")]
     DuplicateNode(NodeId),
@@ -185,7 +190,7 @@ pub enum ParamValue {
     Float(f64),
     /// 64-bit integer.
     Integer(i64),
-    /// Verbatim text; the only variant [`OperatorGraph::set_parameter`] writes.
+    /// Verbatim text; what [`OperatorGraph::set_parameter`] writes.
     Text(String),
     /// Boolean flag.
     Flag(bool),
@@ -400,9 +405,8 @@ impl OperatorGraph {
     /// Set a text parameter on an operator.
     ///
     /// Keys are trimmed, values are stored verbatim as [`ParamValue::Text`].
-    /// Other variants only enter through snapshot restore until typed setters
-    /// land with typed editing. A trimmed key of `"name"` delegates to the
-    /// rename path ([`OperatorGraph::rename_operator`]).
+    /// A trimmed key of `"name"` delegates to the rename path
+    /// ([`OperatorGraph::rename_operator`]).
     ///
     /// # Errors
     ///
@@ -410,20 +414,44 @@ impl OperatorGraph {
     /// [`GraphError::EmptyParameterKey`] when `key` is empty or blank, or
     /// [`GraphError::EmptyName`] when delegating to rename with a blank value.
     pub fn set_parameter(&mut self, id: NodeId, key: &str, value: &str) -> Result<(), GraphError> {
-        let trimmed = key.trim();
-        if trimmed == "name" {
+        if key.trim() == "name" {
             return self.rename_operator(id, value);
         }
+        self.set_parameter_value(id, key, ParamValue::Text(value.to_owned()))
+    }
+
+    /// Set a typed parameter value on an operator (issue #54).
+    ///
+    /// Keys are trimmed and values stored verbatim — including non-finite
+    /// floats, exactly like snapshot restore: shape validation is the
+    /// cook's job, value validation a future range check's. The `"name"`
+    /// key is always rejected: names travel via rename (or the text
+    /// setter's delegation), never as typed data, so the display name keeps
+    /// a single source of truth.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GraphError::UnknownNode`] when `id` is not in the graph,
+    /// [`GraphError::EmptyParameterKey`] when `key` is empty or blank, or
+    /// [`GraphError::ReservedParameterKey`] for `"name"` with any value.
+    pub fn set_parameter_value(
+        &mut self,
+        id: NodeId,
+        key: &str,
+        value: ParamValue,
+    ) -> Result<(), GraphError> {
         let operator = self
             .operators
             .get_mut(&id)
             .ok_or(GraphError::UnknownNode(id))?;
+        let trimmed = key.trim();
         if trimmed.is_empty() {
             return Err(GraphError::EmptyParameterKey);
         }
-        operator
-            .parameters
-            .insert(trimmed.to_owned(), ParamValue::Text(value.to_owned()));
+        if trimmed == "name" {
+            return Err(GraphError::ReservedParameterKey(trimmed.to_owned()));
+        }
+        operator.parameters.insert(trimmed.to_owned(), value);
         self.bump_epoch();
         Ok(())
     }
@@ -928,6 +956,98 @@ mod operator_tests {
         );
         // Failed writes leave existing parameters untouched.
         assert!(graph.operator(id).unwrap().parameters.is_empty());
+    }
+
+    #[test]
+    fn set_parameter_value_stores_typed_values_verbatim() {
+        let mut graph = OperatorGraph::new();
+        let id = graph
+            .create_operator(OperatorKind::Container, None, position(0.0, 0.0))
+            .unwrap();
+        let before = graph.epoch();
+        graph
+            .set_parameter_value(id, "gain", ParamValue::Float(0.75))
+            .unwrap();
+        // Keys trim; values keep every bit, including non-finite floats —
+        // exactly the restore contract, so typed commits cook like restores.
+        graph
+            .set_parameter_value(id, "  size  ", ParamValue::Vec3([2.0, f64::NAN, 1.0]))
+            .unwrap();
+        graph
+            .set_parameter_value(id, "count", ParamValue::Integer(-3))
+            .unwrap();
+        graph
+            .set_parameter_value(id, "visible", ParamValue::Flag(true))
+            .unwrap();
+        let operator = graph.operator(id).unwrap();
+        assert_eq!(operator.parameters["gain"], ParamValue::Float(0.75));
+        assert_eq!(operator.parameters["count"], ParamValue::Integer(-3));
+        assert_eq!(operator.parameters["visible"], ParamValue::Flag(true));
+        assert!(!operator.parameters.contains_key("  size  "));
+        if let ParamValue::Vec3(triple) = &operator.parameters["size"] {
+            assert_eq!(triple[0].to_bits(), 2.0_f64.to_bits());
+            assert!(triple[1].is_nan());
+        } else {
+            panic!("size must store as Vec3");
+        }
+        assert!(graph.epoch() > before);
+    }
+
+    #[test]
+    fn set_parameter_value_rejects_blank_keys_and_unknown_ids() {
+        let mut graph = OperatorGraph::new();
+        let id = graph
+            .create_operator(OperatorKind::Container, None, position(0.0, 0.0))
+            .unwrap();
+        let before = graph.epoch();
+        assert_eq!(
+            graph.set_parameter_value(id, "", ParamValue::Float(1.0)),
+            Err(GraphError::EmptyParameterKey)
+        );
+        assert_eq!(
+            graph.set_parameter_value(id, "   ", ParamValue::Float(1.0)),
+            Err(GraphError::EmptyParameterKey)
+        );
+        assert_eq!(
+            graph.set_parameter_value(NodeId(99), "gain", ParamValue::Float(1.0)),
+            Err(GraphError::UnknownNode(NodeId(99)))
+        );
+        // Failed writes bump nothing and store nothing.
+        assert_eq!(graph.epoch(), before);
+        assert!(graph.operator(id).unwrap().parameters.is_empty());
+    }
+
+    #[test]
+    fn set_parameter_value_name_is_always_reserved() {
+        let mut graph = OperatorGraph::new();
+        let id = graph
+            .create_operator(OperatorKind::Container, None, position(0.0, 0.0))
+            .unwrap();
+        let before = graph.epoch();
+        // Every variant — including text — is rejected: names travel via
+        // rename or the text setter's delegation, never as typed data.
+        for value in [
+            ParamValue::Text("Hero".to_owned()),
+            ParamValue::Float(1.0),
+            ParamValue::Integer(1),
+            ParamValue::Flag(true),
+            ParamValue::Vec3([1.0, 1.0, 1.0]),
+        ] {
+            assert_eq!(
+                graph.set_parameter_value(id, "name", value),
+                Err(GraphError::ReservedParameterKey("name".to_owned()))
+            );
+        }
+        // Unknown ids still report uniformly, even on the reserved key.
+        assert_eq!(
+            graph.set_parameter_value(NodeId(99), "name", ParamValue::Float(1.0)),
+            Err(GraphError::UnknownNode(NodeId(99)))
+        );
+        // The display name keeps its single source of truth: no parameter
+        // row, no rename, no epoch bump.
+        assert_eq!(graph.epoch(), before);
+        assert_eq!(graph.operator(id).unwrap().name, "Container");
+        assert!(!graph.operator(id).unwrap().parameters.contains_key("name"));
     }
 
     #[test]
