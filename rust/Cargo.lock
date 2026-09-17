@@ -2991,6 +2991,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "veronica-core",
+ "veronica-geometry",
  "veronica-graph",
  "veronica-scene",
 ]

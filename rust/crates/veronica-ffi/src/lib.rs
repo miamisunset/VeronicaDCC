@@ -15,7 +15,7 @@ use veronica_graph::{
     GRAPH_SNAPSHOT_VERSION, GraphSnapshot, NodeGraph, OperatorGraph, OperatorKind, ParamValue,
     Position,
 };
-use veronica_scene::{MAX_VIEWPORT_EDGE, SceneIds, SceneWorld};
+use veronica_scene::{MAX_VIEWPORT_EDGE, SceneError, SceneIds, SceneWorld};
 
 mod surface;
 
@@ -634,6 +634,104 @@ pub unsafe extern "C" fn vrn_viewport_frame_all(context: *mut VrnContextHandle) 
         Ok(()) => VrnResult::Ok,
         Err(_) => VrnResult::Internal,
     }
+}
+
+/// Map a pick-pipeline failure onto FFI codes, matching on the error kind
+/// (never the message): caller-observable state problems — nothing cooked,
+/// no frame yet, validations the pass itself just survived — are
+/// [`VrnResult::InvalidArgument`], mirroring the graph convention where
+/// unknown ids reject; GPU/readback machinery failures are
+/// [`VrnResult::Internal`].
+fn pick_error_code(error: &SceneError) -> VrnResult {
+    match error {
+        SceneError::NoGpuImage
+        | SceneError::NoViewportCamera
+        | SceneError::UnpickableMesh
+        | SceneError::NoCookedSelectionTarget { .. }
+        | SceneError::SelectionFaceOutOfRange { .. } => VrnResult::InvalidArgument,
+        _ => VrnResult::Internal,
+    }
+}
+
+/// Resolve a tap to a highlighted face: NDC in, node/face out.
+///
+/// Runs the on-demand ID pass (T3) and paints the pick into the Selection
+/// resource (T4) — a single pick replaces. A background miss (empty space,
+/// out-of-range or non-finite NDC) clears the selection and still returns
+/// [`VrnResult::Ok`] with `0, 0` in the slots: `NodeId(0)` is the FFI
+/// sentinel, never issued by operator creation, so it reads as "nothing
+/// selected". Runs its own render work internally — call off the Swift
+/// `MainActor` like every tick.
+///
+/// [`SceneError`] mapping follows [`pick_error_code`]: stale-target and
+/// pre-tick states reject, GPU faults report internal.
+///
+/// # Safety
+///
+/// `context` must be a live pointer from [`vrn_context_create`]; `out_node`
+/// and `out_face` must be non-null writable slots for the duration of the
+/// call. Do not call concurrently with [`vrn_context_destroy`] on the same
+/// context.
+#[allow(
+    clippy::similar_names,
+    reason = "the x/y NDC pair is conventional; renaming would hurt the C signature"
+)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vrn_viewport_pick(
+    context: *mut VrnContextHandle,
+    ndc_x: f32,
+    ndc_y: f32,
+    out_node: *mut u64,
+    out_face: *mut u32,
+) -> VrnResult {
+    if context.is_null() || out_node.is_null() || out_face.is_null() {
+        return VrnResult::NullArgument;
+    }
+    // SAFETY: all pointers checked non-null; context is alive per contract.
+    let (mutex, node_slot, face_slot) = unsafe { (&(*context).0, &mut *out_node, &mut *out_face) };
+    let Ok(mut ctx) = mutex.lock() else {
+        return VrnResult::Internal;
+    };
+    match ctx.scene.resolve_pick(ndc_x, ndc_y) {
+        Ok(Some(pick)) => match ctx.scene.set_selection(pick) {
+            Ok(()) => {
+                *node_slot = pick.node.0;
+                *face_slot = pick.face;
+                VrnResult::Ok
+            }
+            Err(error) => pick_error_code(&error),
+        },
+        Ok(None) => {
+            ctx.scene.clear_selection();
+            *node_slot = 0;
+            *face_slot = 0;
+            VrnResult::Ok
+        }
+        Err(error) => pick_error_code(&error),
+    }
+}
+
+/// Clear the selection, repainting the previously highlighted mesh to base
+/// when it still lives. Idempotent and GPU-free: the repaint touches
+/// CPU-side asset channels only, and an empty selection is a no-op — safe
+/// to call before any tick.
+///
+/// # Safety
+///
+/// `context` must be a live pointer from [`vrn_context_create`]. Do not call
+/// concurrently with [`vrn_context_destroy`] on the same context.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vrn_selection_clear(context: *mut VrnContextHandle) -> VrnResult {
+    if context.is_null() {
+        return VrnResult::NullArgument;
+    }
+    // SAFETY: non-null pointer from `vrn_context_create`, still alive.
+    let mutex = unsafe { &(*context).0 };
+    let Ok(mut ctx) = mutex.lock() else {
+        return VrnResult::Internal;
+    };
+    ctx.scene.clear_selection();
+    VrnResult::Ok
 }
 
 /// Parse a strict operator-kind string from the FFI boundary.
@@ -1384,6 +1482,231 @@ mod viewport_tests {
             assert_eq!(surface, second);
             assert_ne!(third, second);
             vrn_context_destroy(context);
+        }
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+    use std::ptr;
+    use veronica_core::NodeId;
+    use veronica_geometry::CookError;
+    use veronica_scene::Pick;
+
+    /// Live selection identity through the context lock.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the lock is poisoned; that indicates a broken test setup,
+    /// not fallible production input.
+    fn live_selection(context: *mut VrnContextHandle) -> Option<Pick> {
+        // SAFETY: live context, single-threaded test; lock is unpoisoned.
+        let ctx = unsafe { (*context).0.lock().unwrap() };
+        ctx.scene.selection()
+    }
+
+    #[test]
+    fn pick_and_clear_reject_null_arguments() {
+        let context = vrn_context_create();
+        assert!(!context.is_null());
+        let mut node = 0u64;
+        let mut face = 0u32;
+        // SAFETY: null is the input under test; live slots where required.
+        unsafe {
+            assert_eq!(
+                vrn_viewport_pick(ptr::null_mut(), 0.0, 0.0, &raw mut node, &raw mut face),
+                VrnResult::NullArgument
+            );
+            assert_eq!(
+                vrn_viewport_pick(context, 0.0, 0.0, ptr::null_mut(), &raw mut face),
+                VrnResult::NullArgument
+            );
+            assert_eq!(
+                vrn_viewport_pick(context, 0.0, 0.0, &raw mut node, ptr::null_mut()),
+                VrnResult::NullArgument
+            );
+            assert_eq!(
+                vrn_selection_clear(ptr::null_mut()),
+                VrnResult::NullArgument
+            );
+            vrn_context_destroy(context);
+        }
+    }
+
+    #[test]
+    fn clear_is_a_gpu_free_noop_before_any_tick() {
+        let context = vrn_context_create();
+        assert!(!context.is_null());
+        // SAFETY: just created, alive, single-threaded test; no tick ran,
+        // so no GPU work could have happened.
+        unsafe {
+            assert_eq!(vrn_selection_clear(context), VrnResult::Ok);
+            assert_eq!(live_selection(context), None);
+            vrn_context_destroy(context);
+        }
+    }
+
+    #[test]
+    fn miss_on_empty_scene_reports_the_nothing_selected_sentinel() {
+        let context = vrn_context_create();
+        assert!(!context.is_null());
+        let mut node = 99u64;
+        let mut face = 99u32;
+        // SAFETY: just created, alive, single-threaded test. No operators
+        // cooked, so the resolve short-circuits before any GPU work
+        // (deterministic even without an adapter).
+        unsafe {
+            assert_eq!(
+                vrn_viewport_pick(context, 0.0, 0.0, &raw mut node, &raw mut face),
+                VrnResult::Ok
+            );
+            vrn_context_destroy(context);
+        }
+        assert_eq!((node, face), (0, 0));
+    }
+
+    #[test]
+    fn out_of_range_miss_clears_a_live_selection() {
+        let context = vrn_context_create();
+        assert!(!context.is_null());
+        let cube = test_create_cube(context);
+        // SAFETY: just created, alive, single-threaded test.
+        unsafe {
+            // Cook directly through the lock: the recook is the seam this
+            // test needs, while the frame publish itches for a GPU. Fail
+            // here on a broken cook rather than in the plant below.
+            let mut ctx = (*context).0.lock().unwrap();
+            {
+                let VrnContext {
+                    scene,
+                    operator_graph,
+                    ..
+                } = &mut *ctx;
+                scene.recook_graph(operator_graph).unwrap();
+            }
+            assert!(
+                ctx.scene
+                    .cooked_entities()
+                    .iter()
+                    .any(|(id, _)| *id == NodeId(cube))
+            );
+            // Plant a selection through the lock: CPU asset ops only, no
+            // GPU needed.
+            ctx.scene
+                .set_selection(Pick {
+                    node: NodeId(cube),
+                    face: 0,
+                })
+                .unwrap();
+            drop(ctx);
+            assert_eq!(
+                live_selection(context),
+                Some(Pick {
+                    node: NodeId(cube),
+                    face: 0
+                })
+            );
+            // Out-of-range NDC never reaches the GPU: the pixel map misses
+            // first, so the miss path (clear + sentinel + Ok) is pinned
+            // without an adapter.
+            let mut node = 99u64;
+            let mut face = 99u32;
+            assert_eq!(
+                vrn_viewport_pick(context, 2.0, -2.0, &raw mut node, &raw mut face),
+                VrnResult::Ok
+            );
+            assert_eq!((node, face), (0, 0));
+            assert_eq!(live_selection(context), None);
+            // Clearing again is a no-op, still Ok.
+            assert_eq!(vrn_selection_clear(context), VrnResult::Ok);
+            vrn_context_destroy(context);
+        }
+    }
+
+    #[test]
+    fn pick_error_codes_follow_the_unknown_rejects_convention() {
+        // Caller-observable state problems reject; machinery faults report
+        // internal. Every variant pinned so a new `SceneError` cannot slip
+        // into the wrong code silently (the catch-all is Internal by
+        // default; move a variant above it deliberately or not at all).
+        for (error, expected) in [
+            (SceneError::NoGpuImage, VrnResult::InvalidArgument),
+            (SceneError::NoViewportCamera, VrnResult::InvalidArgument),
+            (SceneError::UnpickableMesh, VrnResult::InvalidArgument),
+            (
+                SceneError::NoCookedSelectionTarget { node: NodeId(7) },
+                VrnResult::InvalidArgument,
+            ),
+            (
+                SceneError::SelectionFaceOutOfRange {
+                    face: 40,
+                    triangles: 12,
+                },
+                VrnResult::InvalidArgument,
+            ),
+            (SceneError::UnknownEntity, VrnResult::Internal),
+            (
+                SceneError::MissingAttribute {
+                    name: "COLOR".to_owned(),
+                },
+                VrnResult::Internal,
+            ),
+            (
+                SceneError::AttributeShape {
+                    name: "COLOR".to_owned(),
+                    expected: "a vec3 channel",
+                },
+                VrnResult::Internal,
+            ),
+            (
+                SceneError::AttributeLength {
+                    name: "COLOR".to_owned(),
+                    expected: 8,
+                    actual: 4,
+                },
+                VrnResult::Internal,
+            ),
+            (
+                SceneError::IndexOutOfBounds {
+                    index: 9,
+                    vertex_count: 8,
+                },
+                VrnResult::Internal,
+            ),
+            (SceneError::Cook(CookError::Cycle), VrnResult::Internal),
+            (
+                SceneError::InvalidViewportSize {
+                    width: 0,
+                    height: 200,
+                },
+                VrnResult::Internal,
+            ),
+            (SceneError::StagingStrideOverflow, VrnResult::Internal),
+            (SceneError::DevicePollFailed, VrnResult::Internal),
+            (SceneError::MapCallbackLost, VrnResult::Internal),
+            (SceneError::MapFailed, VrnResult::Internal),
+            (
+                SceneError::FrameLengthMismatch {
+                    expected: 100,
+                    actual: 50,
+                },
+                VrnResult::Internal,
+            ),
+            (
+                SceneError::PickSpaceExhausted { count: 1 << 24 },
+                VrnResult::Internal,
+            ),
+            (
+                SceneError::PickPassNotReady { attempts: 10 },
+                VrnResult::Internal,
+            ),
+        ] {
+            assert_eq!(
+                pick_error_code(&error),
+                expected,
+                "wrong code for {error:?}"
+            );
         }
     }
 }
