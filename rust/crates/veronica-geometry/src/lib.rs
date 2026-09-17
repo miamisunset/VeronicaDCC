@@ -14,6 +14,7 @@
 mod cook;
 mod cube;
 mod error;
+mod face_id;
 mod payload;
 mod realize;
 
@@ -22,6 +23,10 @@ pub use cube::{
     CUBE_CENTER_KEY, CUBE_SIZE_KEY, CubeParams, DEFAULT_CUBE_CENTER, DEFAULT_CUBE_SIZE,
 };
 pub use error::CookError;
+pub use face_id::{
+    FACE_ID_BITS, FaceIdError, HIT_ALPHA, MAX_FACE_ORDINAL, MISS_ALPHA, MISS_PIXEL,
+    decode_face_ordinal, decode_pick_pixel, encode_face_ordinal, selection_survives_recook,
+};
 pub use payload::{
     AttributeData, EvaluatedMesh, GeometryPayload, ImplicitGeometry, PRIMVAR_NORMAL, PRIMVAR_UV,
 };

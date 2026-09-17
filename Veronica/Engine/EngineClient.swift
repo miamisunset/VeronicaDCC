@@ -107,6 +107,10 @@ nonisolated struct EngineClient: Sendable {
     /// Dolly toward `cursor` (NDC) by `logFactor` (positive zooms in).
     /// Fire-and-forget (see `viewportOrbit`).
     var viewportDolly: @Sendable (Double, CursorNDC) -> Void
+    /// Send a viewport tap at `cursor` (NDC) to the engine Pick path
+    /// (issue #59). Fire-and-forget (see `viewportOrbit`); the real FFI
+    /// pick lands in T5/T6, this seam's signature persists.
+    var sendTapNDC: @Sendable (CursorNDC) -> Void
     /// Frame the whole scene (snap to fit). Fire-and-forget.
     var viewportFrameAll: @Sendable () -> Void
 }
@@ -181,6 +185,9 @@ extension EngineClient: DependencyKey {
                     cursorYNDC: cursor.y
                 )
             },
+            // Seam only until T5 wires `vrn_viewport_pick`: records nothing,
+            // navigates nothing — the tap must already move no pixels.
+            sendTapNDC: { _ in },
             viewportFrameAll: { EngineBridge.viewportFrameAll() }
         )
     }()
@@ -198,6 +205,7 @@ extension EngineClient: DependencyKey {
         viewportOrbit: { _, _ in },
         viewportPan: { _, _ in },
         viewportDolly: { _, _ in },
+        sendTapNDC: { _ in },
         viewportFrameAll: {}
     )
 }

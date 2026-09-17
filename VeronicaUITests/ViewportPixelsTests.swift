@@ -1,3 +1,4 @@
+import CoreGraphics
 import XCTest
 
 /// Slice-2 oracle: the viewport stats advance across frames because Rust
@@ -109,9 +110,15 @@ final class ViewportPixelsTests: XCTestCase {
     /// plus overlay text (0.16% measured) by over an order of magnitude —
     /// and a mis-cropped region fails closed (dark desktop measures ~0%,
     /// below threshold).
+    ///
+    /// Hermetic by construction: launches with `--vrn-reset-graph` and
+    /// creates its own cube, so a persisted empty graph from
+    /// `NodeGraphFlowTests` (whose finale proves empty persistence) can no
+    /// longer leave this staring at a clear-only viewport.
     @MainActor
     func testViewportPaneShowsLitPixels() throws {
         let app = XCUIApplication()
+        app.launchArguments = ["--vrn-reset-graph"]
         app.launch()
 
         let tickCount = waitForViewportWarmUp(app)
@@ -119,6 +126,29 @@ final class ViewportPixelsTests: XCTestCase {
 
         let pane = element(app, "viewportPane")
         XCTAssertTrue(pane.waitForExistence(timeout: 5))
+
+        // Create the cube through the Geometry submenu at a canvas point
+        // (same flow as `CubeRecookLoopTests`): reset launches into the
+        // empty scene by decision, and only real geometry separates a lit
+        // viewport from the blackout this guards against.
+        let canvas = element(app, "nodeGraphPane")
+        XCTAssertTrue(canvas.waitForExistence(timeout: 10))
+        let target = canvas.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
+            .withOffset(CGVector(dx: 120, dy: 100))
+        target.click()
+        target.rightClick()
+        let geometry = app.menuItems["Geometry"]
+        XCTAssertTrue(geometry.waitForExistence(timeout: 5))
+        geometry.click()
+        let cubeItem = app.menuItems["Cube"]
+        XCTAssertTrue(cubeItem.waitForExistence(timeout: 5))
+        cubeItem.click()
+        XCTAssertTrue(element(app, "operatorBox-1").waitForExistence(timeout: 5))
+
+        // Frame the new geometry so the lit face fills the viewport.
+        pane.click()
+        app.typeKey("f", modifierFlags: [])
+        RunLoop.main.run(until: Date().addingTimeInterval(1.0))
 
         let shot = app.screenshot()
         let windowFrame = app.windows.firstMatch.frame

@@ -192,4 +192,83 @@ struct ViewportGestureMapTests {
         #expect(ViewportGestureMap.pinchDollyScale > 0)
         #expect(ViewportGestureMap.pinchDollyScale != ViewportGestureMap.wheelDollyScale)
     }
+
+    @Test func tapSlopThresholdIsPositive() {
+        #expect(ViewportGestureMap.tapThresholdPixels > 0)
+    }
+
+    @Test func cleanTapProducesTapAtReleaseNDC() {
+        let size = CGSize(width: 400, height: 300)
+        #expect(
+            ViewportGestureMap.tapAction(
+                pressPoint: CGPoint(x: 100, y: 100),
+                releasePoint: CGPoint(x: 100, y: 100),
+                size: size
+            ) == .tapAt(cursor: CursorNDC(x: 2 * 100 / 400 - 1, y: 2 * 100 / 300 - 1))
+        )
+    }
+
+    @Test func tapCarriesReleasePointNotPressPoint() {
+        // A press that wanders inside slop is still a tap, aimed where the
+        // button came up.
+        let size = CGSize(width: 400, height: 300)
+        #expect(
+            ViewportGestureMap.tapAction(
+                pressPoint: CGPoint(x: 200, y: 150),
+                releasePoint: CGPoint(x: 202, y: 151),
+                size: size
+            ) == .tapAt(cursor: CursorNDC(x: 2 * 202 / 400 - 1, y: 2 * 151 / 300 - 1))
+        )
+    }
+
+    @Test("press-release distance at the slop boundary", arguments: [
+        // Exactly at slop still taps; one pixel past it is a drag.
+        (CGPoint(x: 4, y: 0), true),
+        (CGPoint(x: 5, y: 0), false),
+        (CGPoint(x: 0, y: 4), true),
+        (CGPoint(x: 3, y: 3), false)
+    ])
+    func tapSlopBoundary(releaseOffset: CGPoint, expectedTap: Bool) {
+        let size = CGSize(width: 400, height: 300)
+        let press = CGPoint(x: 100, y: 100)
+        let release = CGPoint(x: press.x + releaseOffset.x, y: press.y + releaseOffset.y)
+        let action = ViewportGestureMap.tapAction(pressPoint: press, releasePoint: release, size: size)
+        if expectedTap {
+            #expect(action == .tapAt(cursor: CursorNDC(
+                x: 2 * release.x / size.width - 1,
+                y: 2 * release.y / size.height - 1
+            )))
+        } else {
+            #expect(action == nil)
+        }
+    }
+
+    @Test func orbitSizedMovementIsNotATap() {
+        // The existing orbit unit step (12, -7) must stay navigation-only.
+        let size = CGSize(width: 400, height: 300)
+        #expect(
+            ViewportGestureMap.tapAction(
+                pressPoint: CGPoint(x: 100, y: 100),
+                releasePoint: CGPoint(x: 112, y: 93),
+                size: size
+            ) == nil
+        )
+    }
+
+    @Test func tapRejectsEmptyViews() {
+        #expect(
+            ViewportGestureMap.tapAction(
+                pressPoint: CGPoint(x: 5, y: 5),
+                releasePoint: CGPoint(x: 5, y: 5),
+                size: CGSize(width: 0, height: 300)
+            ) == nil
+        )
+        #expect(
+            ViewportGestureMap.tapAction(
+                pressPoint: CGPoint(x: 5, y: 5),
+                releasePoint: CGPoint(x: 5, y: 5),
+                size: CGSize(width: 400, height: 0)
+            ) == nil
+        )
+    }
 }

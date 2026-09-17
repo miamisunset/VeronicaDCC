@@ -43,6 +43,10 @@ struct ViewportFeature {
         /// Dolly toward `cursor` (NDC) by `logFactor` (wheel, RMB-drag,
         /// Option+LMB).
         case dolly(logFactor: Double, cursor: CursorNDC)
+        /// Tap the viewport at `cursor` (NDC): Pick input (issue #59), not
+        /// navigation. The reducer forwards it to the engine seam; the tap
+        /// never moves the camera.
+        case tapAt(cursor: CursorNDC)
         /// Frame the whole scene (snap to fit, `F` key).
         case frameAll
     }
@@ -83,6 +87,11 @@ struct ViewportFeature {
             case let .dolly(logFactor, cursor):
                 let dolly = engine.viewportDolly
                 return .run { _ in dolly(logFactor, cursor) }
+            case let .tapAt(cursor):
+                // Pick intent, not navigation: no state change, no answer.
+                // Fire-and-forget like the nav intents above.
+                let tap = engine.sendTapNDC
+                return .run { _ in tap(cursor) }
             case .frameAll:
                 let frameAll = engine.viewportFrameAll
                 return .run { _ in frameAll() }

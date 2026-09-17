@@ -75,6 +75,22 @@ struct ViewportNavEffectTests {
         #expect(count == 1)
     }
 
+    @Test func tapAtInvokesClientWithNDCIntact() async {
+        let recorded = Mutex<[CursorNDC]>([])
+        let store = TestStore(initialState: ViewportFeature.State()) {
+            ViewportFeature()
+        } withDependencies: {
+            $0.engineClient.sendTapNDC = { cursor in
+                recorded.withLock { $0.append(cursor) }
+            }
+        }
+        let cursor = CursorNDC(x: 0.25, y: -0.5)
+        await store.send(.tapAt(cursor: cursor))
+        let taps = recorded.withLock { $0 }
+        #expect(taps.count == 1)
+        #expect(taps.first == cursor)
+    }
+
     /// Nav intents carry no observations: state (including stats) is
     /// untouched, so rapid drags never disturb the tick mirror.
     @Test func navIntentsLeaveStateUntouched() async {
@@ -86,6 +102,7 @@ struct ViewportNavEffectTests {
         await store.send(.orbitDelta(dx: 1, dy: 1))
         await store.send(.panDelta(dx: 1, dy: 1))
         await store.send(.dolly(logFactor: 0.01, cursor: CursorNDC(x: 0, y: 0)))
+        await store.send(.tapAt(cursor: CursorNDC(x: 0.25, y: -0.5)))
         await store.send(.frameAll)
     }
 }
