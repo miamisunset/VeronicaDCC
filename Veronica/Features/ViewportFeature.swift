@@ -26,6 +26,11 @@ struct ViewportFeature {
         var frameRate: Double = 0
         /// Last completed present cost, in microseconds.
         var presentMicroseconds: UInt64 = 0
+        /// Read-only mirror of the Rust Selection (issue #64): the picked
+        /// `(node, face)`, or `nil` when nothing is selected. Rust owns the
+        /// truth; a background miss clears both sides, an engine error
+        /// leaves the mirror untouched.
+        var selection: ViewportPick?
     }
 
     /// `Equatable` so `TestStore` can assert received actions by value.
@@ -47,6 +52,9 @@ struct ViewportFeature {
         /// navigation. The reducer forwards it to the engine seam; the tap
         /// never moves the camera.
         case tapAt(cursor: CursorNDC)
+        /// Engine answered a tap with the painted selection (`nil` is the
+        /// background-miss mirror: Rust cleared, Swift clears with it).
+        case pickResponse(TaskResult<ViewportPick?>)
         /// Frame the whole scene (snap to fit, `F` key).
         case frameAll
     }
@@ -88,10 +96,23 @@ struct ViewportFeature {
                 let dolly = engine.viewportDolly
                 return .run { _ in dolly(logFactor, cursor) }
             case let .tapAt(cursor):
-                // Pick intent, not navigation: no state change, no answer.
-                // Fire-and-forget like the nav intents above.
+                // Pick intent, not navigation: the camera never moves, but
+                // the Selection mirror now answers. The closure is
+                // snapshotted here (MainActor) because the `.run` body is
+                // nonisolated; the client hops to the engine queue itself.
                 let tap = engine.sendTapNDC
-                return .run { _ in tap(cursor) }
+                return .run { send in
+                    await send(.pickResponse(TaskResult { try await tap(cursor) }))
+                }
+            case let .pickResponse(.success(pick)):
+                // Hit paints, miss clears — both sides already agree, the
+                // mirror just catches up.
+                state.selection = pick
+                return .none
+            case .pickResponse(.failure):
+                // The engine state is untouched on error paths, so the
+                // mirror keeps its stale value rather than inventing one.
+                return .none
             case .frameAll:
                 let frameAll = engine.viewportFrameAll
                 return .run { _ in frameAll() }

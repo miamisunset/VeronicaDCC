@@ -66,6 +66,18 @@ nonisolated struct VideoFrame: Equatable, Sendable {
     var height: UInt64
 }
 
+/// Read-only mirror of one Rust Selection: the picked face identity.
+///
+/// `(node, face)` is the face-ordinal contract from ADR-0007 — the same
+/// pair `vrn_viewport_pick` returns. Swift never constructs scene content;
+/// this is observation only, cleared on a background miss (`nil`).
+nonisolated struct ViewportPick: Equatable, Sendable {
+    /// Rust-issued node id of the picked mesh.
+    var node: UInt64
+    /// Face ordinal (realized triangle index) within that mesh.
+    var face: UInt32
+}
+
 /// TCA dependency for the Rust engine. The live value will call `vrn_tick`
 /// plus the stats getters once `libveronica.a` is linked; until then it
 /// awaits the placeholder bridge on the engine queue.
@@ -108,9 +120,12 @@ nonisolated struct EngineClient: Sendable {
     /// Fire-and-forget (see `viewportOrbit`).
     var viewportDolly: @Sendable (Double, CursorNDC) -> Void
     /// Send a viewport tap at `cursor` (NDC) to the engine Pick path
-    /// (issue #59). Fire-and-forget (see `viewportOrbit`); the real FFI
-    /// pick lands in T5/T6, this seam's signature persists.
-    var sendTapNDC: @Sendable (CursorNDC) -> Void
+    /// (issue #59, FFI from T5/#63) and return the painted selection.
+    ///
+    /// `nil` is the background-miss mirror: Rust cleared the Selection and
+    /// Swift clears with it. Throws the engine error on stale targets or
+    /// GPU faults; the mock engine owns no scene, so it always misses.
+    var sendTapNDC: @Sendable (CursorNDC) async throws(GraphEngineError) -> ViewportPick?
     /// Frame the whole scene (snap to fit). Fire-and-forget.
     var viewportFrameAll: @Sendable () -> Void
 }
@@ -185,9 +200,14 @@ extension EngineClient: DependencyKey {
                     cursorYNDC: cursor.y
                 )
             },
-            // Seam only until T5 wires `vrn_viewport_pick`: records nothing,
-            // navigates nothing — the tap must already move no pixels.
-            sendTapNDC: { _ in },
+            // The mock owns no scene, so every tap is a background miss;
+            // the real engine paints the Selection through the FFI pick.
+            sendTapNDC: { (cursor: CursorNDC) async throws(GraphEngineError) -> ViewportPick? in
+                if GraphLaunchOptions.isMockEngineEnabled {
+                    return nil
+                }
+                return try await EngineBridge.viewportPick(at: cursor)
+            },
             viewportFrameAll: { EngineBridge.viewportFrameAll() }
         )
     }()
@@ -205,7 +225,7 @@ extension EngineClient: DependencyKey {
         viewportOrbit: { _, _ in },
         viewportPan: { _, _ in },
         viewportDolly: { _, _ in },
-        sendTapNDC: { _ in },
+        sendTapNDC: { _ in nil },
         viewportFrameAll: {}
     )
 }

@@ -77,11 +77,13 @@ struct ViewportNavEffectTests {
 
     @Test func tapAtInvokesClientWithNDCIntact() async {
         let recorded = Mutex<[CursorNDC]>([])
+        let pick = ViewportPick(node: 3, face: 5)
         let store = TestStore(initialState: ViewportFeature.State()) {
             ViewportFeature()
         } withDependencies: {
             $0.engineClient.sendTapNDC = { cursor in
                 recorded.withLock { $0.append(cursor) }
+                return pick
             }
         }
         let cursor = CursorNDC(x: 0.25, y: -0.5)
@@ -89,10 +91,63 @@ struct ViewportNavEffectTests {
         let taps = recorded.withLock { $0 }
         #expect(taps.count == 1)
         #expect(taps.first == cursor)
+        await store.receive(.pickResponse(.success(pick))) {
+            $0.selection = pick
+        }
+    }
+
+    /// A hit paints the mirror with the returned identity.
+    @Test func pickHitMirrorsReturnedIdentity() async {
+        let pick = ViewportPick(node: 1, face: 0)
+        let store = TestStore(initialState: ViewportFeature.State()) {
+            ViewportFeature()
+        } withDependencies: {
+            $0.engineClient.sendTapNDC = { _ in pick }
+        }
+        await store.send(.tapAt(cursor: CursorNDC(x: 0, y: 0)))
+        await store.receive(.pickResponse(.success(pick))) {
+            $0.selection = pick
+        }
+    }
+
+    /// A background miss clears the mirror (Rust cleared with it).
+    @Test func pickMissClearsMirror() async {
+        let store = TestStore(
+            initialState: ViewportFeature.State(selection: ViewportPick(node: 1, face: 0))
+        ) {
+            ViewportFeature()
+        } withDependencies: {
+            $0.engineClient.sendTapNDC = { _ in nil }
+        }
+        await store.send(.tapAt(cursor: CursorNDC(x: 0.9, y: 0.9)))
+        await store.receive(.pickResponse(.success(nil))) {
+            $0.selection = nil
+        }
+    }
+
+    /// An engine error leaves the mirror untouched (Rust state is
+    /// untouched on error paths, so the mirror keeps its value).
+    @Test func pickFailureKeepsMirror() async {
+        let held = ViewportPick(node: 2, face: 7)
+        let store = TestStore(initialState: ViewportFeature.State(selection: held)) {
+            ViewportFeature()
+        } withDependencies: {
+            $0.engineClient.sendTapNDC = { (_: CursorNDC) async throws(GraphEngineError) -> ViewportPick? in
+                throw GraphEngineError.ffiFailed(operation: "vrn_viewport_pick", code: 3)
+            }
+        }
+        await store.send(.tapAt(cursor: CursorNDC(x: 0, y: 0)))
+        await store.receive(
+            .pickResponse(
+                .failure(GraphEngineError.ffiFailed(operation: "vrn_viewport_pick", code: 3))
+            )
+        )
     }
 
     /// Nav intents carry no observations: state (including stats) is
-    /// untouched, so rapid drags never disturb the tick mirror.
+    /// untouched, so rapid drags never disturb the tick mirror. The tap
+    /// still answers through the pick seam (a miss here — the test client
+    /// selects nothing), but the answer changes no state either.
     @Test func navIntentsLeaveStateUntouched() async {
         let store = TestStore(
             initialState: ViewportFeature.State(tickCount: 5, entityCount: 3, frameCount: 2)
@@ -103,6 +158,7 @@ struct ViewportNavEffectTests {
         await store.send(.panDelta(dx: 1, dy: 1))
         await store.send(.dolly(logFactor: 0.01, cursor: CursorNDC(x: 0, y: 0)))
         await store.send(.tapAt(cursor: CursorNDC(x: 0.25, y: -0.5)))
+        await store.receive(.pickResponse(.success(nil)))
         await store.send(.frameAll)
     }
 }

@@ -201,6 +201,53 @@ nonisolated enum EngineBridge {
         }
     }
 
+    /// Pick the face under `cursor` (NDC, x/y in [-1, 1]) and paint the
+    /// engine Selection with it (issue #64, FFI from #63).
+    ///
+    /// Runs the on-demand ID pass and replaces the single Selection; a
+    /// background miss clears the Selection yet still returns `Ok`, so
+    /// `nil` here means "nothing selected" in both cases. Returns the
+    /// `(node, face)` identity on a hit. Non-Ok codes surface as
+    /// `.ffiFailed` (stale targets) or `.engineUnavailable` (nil context).
+    ///
+    /// Explicitly `nonisolated` (see `createOperator`).
+    nonisolated static func viewportPick(
+        at cursor: CursorNDC
+    ) async throws(GraphEngineError) -> ViewportPick? {
+        try await withCheckedThrowingContinuation { (continuation: PickContinuation) in
+            engineQueue.async {
+                guard let context = requireGraphContext(
+                    continuation,
+                    operation: "vrn_viewport_pick"
+                ) else {
+                    return
+                }
+                var outNode: UInt64 = 0
+                var outFace: UInt32 = 0
+                let code = vrnViewportPick(
+                    context,
+                    Float(cursor.x),
+                    Float(cursor.y),
+                    &outNode,
+                    &outFace
+                )
+                guard code == VrnResultCode.ok.rawValue else {
+                    continuation.resume(
+                        throwing: .ffiFailed(operation: "vrn_viewport_pick", code: code)
+                    )
+                    return
+                }
+                // `NodeId(0)` is the never-issued FFI sentinel: Rust cleared
+                // the Selection on this miss, so the mirror clears too.
+                guard outNode != 0 else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                continuation.resume(returning: ViewportPick(node: outNode, face: outFace))
+            }
+        }
+    }
+
     // MARK: - Operator graph (ADR-0002)
     /// `VrnResult` codes mirrored from `veronica-ffi`.
     ///
@@ -219,6 +266,10 @@ nonisolated enum EngineBridge {
 
     /// Checked continuations typed with the graph domain error.
     private typealias GraphContinuation<T> = CheckedContinuation<T, GraphEngineError>
+
+    /// Checked continuations for the pick path, which shares the graph
+    /// domain error (a failed pick is an engine failure, not a new kind).
+    private typealias PickContinuation = CheckedContinuation<ViewportPick?, GraphEngineError>
 
     // MARK: - Direct FFI declarations (`rust/crates/veronica-ffi/include/veronica.h`)
     //
@@ -284,6 +335,14 @@ nonisolated enum EngineBridge {
     @_silgen_name("vrn_viewport_frame_all")
     nonisolated private static func vrnViewportFrameAll(
         _ context: UnsafeMutableRawPointer?
+    ) -> Int32
+    @_silgen_name("vrn_viewport_pick")
+    nonisolated private static func vrnViewportPick(
+        _ context: UnsafeMutableRawPointer?,
+        _ ndcX: Float,
+        _ ndcY: Float,
+        _ outNode: UnsafeMutablePointer<UInt64>?,
+        _ outFace: UnsafeMutablePointer<UInt32>?
     ) -> Int32
     @_silgen_name("vrn_graph_create_operator")
     nonisolated private static func vrnGraphCreateOperator(

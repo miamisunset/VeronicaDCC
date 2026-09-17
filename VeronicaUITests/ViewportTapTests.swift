@@ -1,10 +1,13 @@
 import CoreGraphics
 import XCTest
 
-/// Issue-#59 oracle: taps are Pick input, not navigation — tapping the
-/// viewport moves no pixels (the engine seam is a no-op until T5/T6), while
-/// a real drag still orbits.
+/// Issue-#59 oracle: taps are Pick input, not navigation — tapping empty
+/// viewport space moves no pixels, while a real drag still orbits.
 ///
+/// Since issue #64 a tap on geometry legitimately paints a highlight (see
+/// `ViewportSelectionTests`), so the tap half taps a background miss (pane
+/// corner, clear color after frame-all): the miss clears the Selection and
+/// presents no new pixels, keeping this a pure navigation oracle.
 /// Setup mirrors `CubeRecookLoopTests` (create a cube through the Geometry
 /// submenu, frame it) so navigation has lit pixels to move: on an empty
 /// scene even a true orbit moves nothing and the two gestures would be
@@ -48,8 +51,15 @@ final class ViewportTapTests: XCTestCase {
         // Frame the new geometry and baseline the 1 m cube.
         let viewport = viewportElement(app, "viewportPane")
         XCTAssertTrue(viewport.waitForExistence(timeout: 5))
-        viewport.click()
+        let background = viewport.coordinate(withNormalizedOffset: CGVector(dx: 0.06, dy: 0.06))
+        background.click()
         app.typeKey("f", modifierFlags: [])
+        RunLoop.main.run(until: Date().addingTimeInterval(1.0))
+        // Normalize: the focus click above may itself have picked a face
+        // (the pre-frame default view can be close-up), so clear through a
+        // second background miss before baselining. A miss on an empty
+        // Selection is a no-op, so this is safe either way.
+        background.click()
         RunLoop.main.run(until: Date().addingTimeInterval(1.0))
         let windowFrame = app.windows.firstMatch.frame
         let beforeShot = app.screenshot()
@@ -59,9 +69,10 @@ final class ViewportTapTests: XCTestCase {
         )
         XCTAssertGreaterThan(before, 0.005, "cube never appeared in the viewport")
 
-        // A plain click is now a tap: it must navigate nothing — neither the
-        // bright count (established oracle) nor any actual pixel.
-        viewport.click()
+        // A plain click on empty space is a tap-miss: it must navigate
+        // nothing — neither the bright count (established oracle) nor any
+        // actual pixel — and select nothing either.
+        background.click()
         RunLoop.main.run(until: Date().addingTimeInterval(1.0))
         let afterTapShot = app.screenshot()
         let afterTap = try XCTUnwrap(
