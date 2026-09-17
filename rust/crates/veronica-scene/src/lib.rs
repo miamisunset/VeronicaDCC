@@ -33,10 +33,12 @@ mod camera;
 mod cook;
 mod gpu;
 mod mesh;
+mod pick;
 mod render;
 
 pub use cook::{CookedMesh, SourceOperator};
 pub use mesh::render_mesh_from_evaluated;
+pub use pick::Pick;
 pub use render::{
     FRAME_BYTES_PER_PIXEL, FRAME_HEIGHT, FRAME_WIDTH, MAX_VIEWPORT_EDGE, RenderFrame,
 };
@@ -122,6 +124,22 @@ pub enum SceneError {
         expected: usize,
         /// Bytes actually supplied.
         actual: usize,
+    },
+    /// A cooked mesh cannot be pick-meshed: non-triangle topology or a
+    /// vertex soup that is not whole triangles.
+    #[error("cooked mesh is not pickable as triangles")]
+    UnpickableMesh,
+    /// A pick count exceeds the 24-bit ID-buffer range.
+    #[error("pick identity space exhausted: {count} items exceed the 24-bit range")]
+    PickSpaceExhausted {
+        /// Items needing distinct IDs (triangles or entity slots).
+        count: usize,
+    },
+    /// A pick pass showed no painted pixel within its update budget.
+    #[error("pick pass produced no painted pixel after {attempts} updates")]
+    PickPassNotReady {
+        /// Updates waited before giving up.
+        attempts: u32,
     },
 }
 

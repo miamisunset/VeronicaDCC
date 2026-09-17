@@ -164,10 +164,13 @@ impl SceneWorld {
 
     /// Camera entity's [`Transform`].
     ///
+    /// Crate-visible: the pick pass clones the live camera onto its
+    /// transient ID camera.
+    ///
     /// # Errors
     ///
     /// Returns [`SceneError::NoViewportCamera`] when the viewport camera is gone.
-    fn viewport_camera(&mut self) -> Result<Entity, SceneError> {
+    pub(crate) fn viewport_camera(&mut self) -> Result<Entity, SceneError> {
         let world = self.app.world_mut();
         let mut cameras = world.query_filtered::<Entity, With<ViewportCamera>>();
         cameras
