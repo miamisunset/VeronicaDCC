@@ -187,7 +187,7 @@ nonisolated struct OperatorMirror: Codable, Equatable, Sendable, Identifiable {
     }
 }
 
-/// Whole-graph mirror decoded from `vrn_graph_snapshot` JSON (schema v2).
+/// Whole-graph mirror decoded from `vrn_graph_snapshot` JSON (schema v3).
 ///
 /// One format serves persistence and (future) undo: `GraphSnapshot` is what
 /// autosave writes and what launch-time `restore` reads back.
@@ -195,8 +195,10 @@ nonisolated struct OperatorMirror: Codable, Equatable, Sendable, Identifiable {
 /// Explicitly `nonisolated`: snapshots cross from background engine effects
 /// to the main actor (see `GraphPosition`).
 nonisolated struct GraphSnapshot: Codable, Equatable, Sendable {
-    /// Snapshot schema version. Always `2`; restore rejects anything else.
-    static let currentVersion = 2
+    /// Snapshot schema version. Always `3`, matching Rust's
+    /// `GRAPH_SNAPSHOT_VERSION`; Rust restores 2+3, and a v2 restore
+    /// clears the ephemeral live pick.
+    static let currentVersion = 3
 
     /// Schema version of this snapshot.
     var version: Int

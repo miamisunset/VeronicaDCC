@@ -5,7 +5,7 @@ import Testing
 
 @testable import Veronica
 
-/// Contract pins for the v2 snapshot schema: golden-fixture
+/// Contract pins for the v3 snapshot schema: golden-fixture
 /// drift, `f64` round-trips, registry shape, and canvas geometry.
 struct GraphSnapshotTests {
     /// Repo-relative URL of the golden fixture owned by `veronica-graph`.
@@ -13,7 +13,7 @@ struct GraphSnapshotTests {
         URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-            .appendingPathComponent("rust/crates/veronica-graph/tests/fixtures/graph-v2.json")
+            .appendingPathComponent("rust/crates/veronica-graph/tests/fixtures/graph-v3.json")
     }
 
     @Test func goldenFixtureDecodesAndRoundTrips() throws {
@@ -109,7 +109,7 @@ struct GraphSnapshotTests {
 
     @Test func missingEdgesDefaultsToEmpty() throws {
         let json = """
-        {"version": 2, "operators": []}
+        {"version": 3, "operators": []}
         """
         let decoded = try JSONDecoder().decode(GraphSnapshot.self, from: Data(json.utf8))
         #expect(decoded.version == GraphSnapshot.currentVersion)
@@ -142,7 +142,7 @@ struct GraphSnapshotTests {
 
     @Test func typedParametersDecodeAllFiveVariantsWithF64Parity() throws {
         let json = """
-        {"version": 2, "operators": [
+        {"version": 3, "operators": [
             {"id": 1, "kind": "container", "name": "P",
              "parent": null, "position": {"x": 1.0, "y": 2.0},
              "parameters": {
@@ -156,7 +156,7 @@ struct GraphSnapshotTests {
         """
         let decoded = try JSONDecoder().decode(GraphSnapshot.self, from: Data(json.utf8))
         #expect(decoded.version == GraphSnapshot.currentVersion)
-        #expect(GraphSnapshot.currentVersion == 2)
+        #expect(GraphSnapshot.currentVersion == 3)
         let parameters = try #require(decoded.operators.first?.parameters)
         #expect(parameters["label"] == .text("hello"))
         #expect(parameters["gain"] == .float(0.12345678901234568))
