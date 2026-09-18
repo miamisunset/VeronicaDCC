@@ -44,6 +44,13 @@ pub enum ImplicitGeometry {
 /// [`PRIMVAR_UV`]; custom channels use namespaced keys (e.g.
 /// `"veronica:wetness"`) so future producer nodes cannot collide with
 /// standards. All data is `f64`; the render handoff converts once.
+///
+/// [`EvaluatedMesh::tri_to_poly`] groups render triangles into modeling
+/// polygons (quads stay whole): entry `t` names the polygon owning triangle
+/// `t`, where triangle `t` is `indices[3 * t..3 * t + 3]` in emission order.
+/// An empty map means ungrouped (hand-built meshes); [`realize`](crate::realize)
+/// always populates it. The render handoff ignores the map — the engine
+/// mesh stays a triangle list — so grouping travels upstream only.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct EvaluatedMesh {
     /// Vertex positions in meters, Y-up right-handed.
@@ -52,6 +59,8 @@ pub struct EvaluatedMesh {
     pub indices: Vec<u32>,
     /// Named per-vertex channels, standard and custom.
     pub attributes: BTreeMap<String, AttributeData>,
+    /// One polygon id per triangle, in index order.
+    pub tri_to_poly: Vec<u32>,
 }
 
 /// One named per-vertex channel.
@@ -66,7 +75,9 @@ pub enum AttributeData {
 }
 
 impl EvaluatedMesh {
-    /// Create a mesh from its parts.
+    /// Create a mesh from its parts. The polygon map starts empty
+    /// (ungrouped); producers that know their topology attach it with
+    /// [`EvaluatedMesh::with_triangle_polygons`].
     #[must_use]
     pub fn new(
         positions: Vec<[f64; 3]>,
@@ -77,7 +88,24 @@ impl EvaluatedMesh {
             positions,
             indices,
             attributes,
+            tri_to_poly: Vec::new(),
         }
+    }
+
+    /// Attach the triangle-to-polygon map: one polygon id per triangle in
+    /// index order. Consumers (pick, mask, retention) rely on positional
+    /// correspondence, so debug builds assert the map length equals the
+    /// triangle count (`indices.len() / 3`); release builds trust it for
+    /// zero cost.
+    #[must_use]
+    pub fn with_triangle_polygons(mut self, tri_to_poly: Vec<u32>) -> Self {
+        debug_assert_eq!(
+            tri_to_poly.len(),
+            self.indices.len() / 3,
+            "polygon map must name every triangle exactly once"
+        );
+        self.tri_to_poly = tri_to_poly;
+        self
     }
 }
 

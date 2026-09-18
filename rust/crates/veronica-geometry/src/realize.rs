@@ -100,14 +100,18 @@ fn realize_cube(params: &CubeParams) -> EvaluatedMesh {
     let mut normals = Vec::with_capacity(24);
     let mut uvs = Vec::with_capacity(24);
     let mut indices = Vec::with_capacity(36);
+    // One polygon per cube face: each face's two triangles share its id,
+    // in face order.
+    let mut tri_to_poly = Vec::with_capacity(12);
     let mut base: u32 = 0;
-    for face in &faces {
+    for (face_id, face) in (0u32..).zip(&faces) {
         for (position, normal, uv) in face {
             positions.push(*position);
             normals.push(*normal);
             uvs.push(*uv);
         }
         indices.extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 3, base]);
+        tri_to_poly.extend_from_slice(&[face_id, face_id]);
         base += 4;
     }
 
@@ -121,6 +125,7 @@ fn realize_cube(params: &CubeParams) -> EvaluatedMesh {
         .into_iter()
         .collect(),
     )
+    .with_triangle_polygons(tri_to_poly)
 }
 
 /// One split-vertex soup corner: position, outward normal, and uv.
@@ -177,6 +182,11 @@ fn realize_sphere(params: &SphereParams) -> EvaluatedMesh {
     let mut normals = Vec::with_capacity(3 * triangles as usize);
     let mut uvs = Vec::with_capacity(3 * triangles as usize);
     let mut indices = Vec::with_capacity(3 * triangles as usize);
+    // Polygon grouping, one entry per emitted triangle in ordinal order:
+    // each pole-fan triangle owns its polygon id, each quad band's two
+    // triangles share one. Polygon ids run dense from zero in emission
+    // order (south fan, quad bands ring by ring, north fan).
+    let mut tri_to_poly = Vec::with_capacity(triangles as usize);
     let mut next: u32 = 0;
     let mut push_triangle = |a: Corner, b: Corner, c: Corner| {
         for (position, normal, uv) in [a, b, c] {
@@ -189,7 +199,7 @@ fn realize_sphere(params: &SphereParams) -> EvaluatedMesh {
     };
 
     // South pole fan: ordinals `0..segments`, joined to the adjacent
-    // (southernmost) ring.
+    // (southernmost) ring. Each fan triangle is its own polygon.
     let south_pole: Corner = ([cx, cy - radius, cz], [0.0, -1.0, 0.0], [0.0, 0.0]);
     for i in 0..segments {
         push_triangle(
@@ -197,9 +207,12 @@ fn realize_sphere(params: &SphereParams) -> EvaluatedMesh {
             ring_vertex(rings - 1, i + 1),
             ring_vertex(rings - 1, i),
         );
+        tri_to_poly.push(i);
     }
 
     // Quad bands, ring by ring. Empty when `rings == 2` (bare fans).
+    // Each quad's two triangles share one polygon id.
+    let mut poly = segments;
     for j in 1..rings - 1 {
         for i in 0..segments {
             let upper = ring_vertex(j, i);
@@ -208,14 +221,18 @@ fn realize_sphere(params: &SphereParams) -> EvaluatedMesh {
             let lower_next = ring_vertex(j + 1, i + 1);
             push_triangle(upper, lower, lower_next);
             push_triangle(upper, lower_next, upper_next);
+            tri_to_poly.extend_from_slice(&[poly, poly]);
+            poly += 1;
         }
     }
 
     // North pole fan: the closing `segments` ordinals, joined to the
-    // adjacent (northernmost) ring.
+    // adjacent (northernmost) ring. Each fan triangle is its own polygon.
     let north_pole: Corner = ([cx, cy + radius, cz], [0.0, 1.0, 0.0], [1.0, 1.0]);
     for i in 0..segments {
         push_triangle(north_pole, ring_vertex(1, i), ring_vertex(1, i + 1));
+        tri_to_poly.push(poly);
+        poly += 1;
     }
 
     EvaluatedMesh::new(
@@ -228,6 +245,7 @@ fn realize_sphere(params: &SphereParams) -> EvaluatedMesh {
         .into_iter()
         .collect(),
     )
+    .with_triangle_polygons(tri_to_poly)
 }
 
 #[cfg(test)]
@@ -343,6 +361,125 @@ mod tests {
             SphereParams::new(segments, rings, radius, DEFAULT_SPHERE_CENTER).unwrap(),
         ))
         .indices
+    }
+
+    /// Distinct polygon ids in ascending order.
+    fn distinct_sorted(map: &[u32]) -> Vec<u32> {
+        let mut sorted = map.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        sorted
+    }
+
+    /// Expected polygon count for a sphere resolution: one polygon per
+    /// quad-band pair plus one per pole-fan triangle (grilled Q3).
+    fn expected_sphere_polygons(segments: u32, rings: u32) -> u32 {
+        segments * (rings - 2) + 2 * segments
+    }
+
+    #[test]
+    fn cube_quad_pairs_share_one_polygon_each() {
+        // Arrange: the default cube, twelve triangles in face order.
+        // Act.
+        let mesh = realize(&ImplicitGeometry::Cube(CubeParams::default()));
+
+        // Assert: each face's two triangles share one id, six ids total.
+        assert_eq!(mesh.tri_to_poly.len(), 12);
+        assert_eq!(mesh.tri_to_poly, vec![0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5]);
+    }
+
+    #[test]
+    fn sphere_default_map_groups_bands_and_singles_fans() {
+        // Arrange: the documented defaults (32 segments, 16 rings).
+        // Act.
+        let params = SphereParams::default();
+        let mesh = realize(&ImplicitGeometry::Sphere(params));
+
+        // Assert: one entry per triangle; the south fan opens 1:1, the
+        // first quad band shares pairs, the north fan closes 1:1.
+        let segments = params.segments();
+        assert_eq!(
+            u32::try_from(mesh.tri_to_poly.len()).unwrap(),
+            params.triangle_count()
+        );
+        let south: Vec<u32> = (0..segments).collect();
+        assert_eq!(mesh.tri_to_poly[..segments as usize], south);
+        let first_quad = segments as usize;
+        assert_eq!(
+            mesh.tri_to_poly[first_quad],
+            mesh.tri_to_poly[first_quad + 1],
+            "a quad band's two triangles must share one polygon"
+        );
+        assert_ne!(
+            mesh.tri_to_poly[first_quad],
+            mesh.tri_to_poly[first_quad + 2],
+            "adjacent quads must not share a polygon"
+        );
+        let polys = expected_sphere_polygons(segments, params.rings());
+        let north: Vec<u32> = (polys - segments..polys).collect();
+        assert_eq!(
+            mesh.tri_to_poly[mesh.tri_to_poly.len() - segments as usize..],
+            north
+        );
+        assert_eq!(
+            u32::try_from(distinct_sorted(&mesh.tri_to_poly).len()).unwrap(),
+            polys,
+            "960 tris must group into 448 quads + 64 fan polys"
+        );
+    }
+
+    #[test]
+    fn sphere_minimum_resolution_is_all_single_fans() {
+        // Arrange: 5x2 is two bare fans, no quad bands (the S4 min-res
+        // oracle geometry).
+        // Act.
+        let mesh = realize(&ImplicitGeometry::Sphere(
+            SphereParams::new(5, 2, 0.5, DEFAULT_SPHERE_CENTER).unwrap(),
+        ));
+
+        // Assert: ten triangles, ten distinct 1:1 polygons.
+        assert_eq!(mesh.tri_to_poly, (0..10).collect::<Vec<u32>>());
+    }
+
+    #[test]
+    fn sphere_map_counts_match_contract_everywhere() {
+        // Arrange/Act/Assert: map length tracks the triangle budget and
+        // distinct ids track quads-plus-fans, minimum through maximum.
+        for (segments, rings) in [(3, 2), (4, 3), (8, 8), (32, 16), (128, 64)] {
+            let params = SphereParams::new(segments, rings, 0.5, DEFAULT_SPHERE_CENTER).unwrap();
+            let mesh = realize(&ImplicitGeometry::Sphere(params));
+            assert_eq!(
+                u32::try_from(mesh.tri_to_poly.len()).unwrap(),
+                params.triangle_count(),
+                "segments={segments} rings={rings}"
+            );
+            assert_eq!(
+                u32::try_from(distinct_sorted(&mesh.tri_to_poly).len()).unwrap(),
+                expected_sphere_polygons(
+                    u32::try_from(segments).unwrap(),
+                    u32::try_from(rings).unwrap()
+                ),
+                "segments={segments} rings={rings}"
+            );
+        }
+    }
+
+    #[test]
+    fn sphere_map_survives_radius_and_center_recook() {
+        // Arrange: polygon identity is topological, so parameter-only
+        // recooks (the retain half of the staleness rule) must keep it.
+        // Act.
+        let first = realize(&ImplicitGeometry::Sphere(SphereParams::default()));
+        let resized = realize(&ImplicitGeometry::Sphere(
+            SphereParams::new(32, 16, 2.0, DEFAULT_SPHERE_CENTER).unwrap(),
+        ));
+        let moved = realize(&ImplicitGeometry::Sphere(
+            SphereParams::new(32, 16, 0.5, [4.0, -2.0, 1.0]).unwrap(),
+        ));
+
+        // Assert.
+        assert_eq!(first.tri_to_poly, resized.tri_to_poly);
+        assert_eq!(first.tri_to_poly, moved.tri_to_poly);
     }
 
     #[test]
