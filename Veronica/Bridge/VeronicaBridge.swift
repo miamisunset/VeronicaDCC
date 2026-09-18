@@ -151,7 +151,7 @@ nonisolated enum EngineBridge {
     static func setViewportSize(width: UInt32, height: UInt32) {
         engineQueue.async {
             guard let context = unsafe graphContext.pointer else { return }
-                _ = unsafe vrnViewportSetSize(context, width, height)
+            _ = unsafe vrnViewportSetSize(context, width, height)
         }
     }
 
@@ -163,7 +163,7 @@ nonisolated enum EngineBridge {
     static func viewportOrbit(dxPixels: Double, dyPixels: Double) {
         engineQueue.async {
             guard let context = unsafe graphContext.pointer else { return }
-                _ = unsafe vrnViewportOrbit(context, Float(dxPixels), Float(dyPixels))
+            _ = unsafe vrnViewportOrbit(context, Float(dxPixels), Float(dyPixels))
         }
     }
 
@@ -174,7 +174,7 @@ nonisolated enum EngineBridge {
     static func viewportPan(dxPixels: Double, dyPixels: Double) {
         engineQueue.async {
             guard let context = unsafe graphContext.pointer else { return }
-                _ = unsafe vrnViewportPan(context, Float(dxPixels), Float(dyPixels))
+            _ = unsafe vrnViewportPan(context, Float(dxPixels), Float(dyPixels))
         }
     }
 
@@ -186,7 +186,7 @@ nonisolated enum EngineBridge {
     static func viewportDolly(logFactor: Double, cursorXNDC: Double, cursorYNDC: Double) {
         engineQueue.async {
             guard let context = unsafe graphContext.pointer else { return }
-                _ = unsafe vrnViewportDolly(context, Float(logFactor), Float(cursorXNDC), Float(cursorYNDC))
+            _ = unsafe vrnViewportDolly(context, Float(logFactor), Float(cursorXNDC), Float(cursorYNDC))
         }
     }
 
@@ -197,7 +197,7 @@ nonisolated enum EngineBridge {
     static func viewportFrameAll() {
         engineQueue.async {
             guard let context = unsafe graphContext.pointer else { return }
-                _ = unsafe vrnViewportFrameAll(context)
+            _ = unsafe vrnViewportFrameAll(context)
         }
     }
 

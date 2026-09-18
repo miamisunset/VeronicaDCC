@@ -19,7 +19,7 @@ struct GraphSnapshotTests {
     @Test func goldenFixtureDecodesAndRoundTrips() throws {
         let url = fixtureURL
         guard FileManager.default.fileExists(atPath: url.path) else {
-            withKnownIssue("Rust track has not delivered graph-v2.json yet") {
+            withKnownIssue("Rust track has not delivered graph-v3.json yet") {
                 Issue.record("missing golden fixture: \(url.path)")
             }
             return
@@ -118,7 +118,7 @@ struct GraphSnapshotTests {
 
     @Test func missingParametersDefaultsToEmpty() throws {
         let json = """
-        {"version": 2, "operators": [
+        {"version": 3, "operators": [
             {"id": 1, "kind": "container", "name": "P",
              "parent": null, "position": {"x": 1.0, "y": 2.0}}
         ], "edges": []}
@@ -187,7 +187,7 @@ struct GraphSnapshotTests {
     )
     func malformedParameterValuesAreRejected(payload: String) throws {
         let json = """
-        {"version": 2, "operators": [
+        {"version": 3, "operators": [
             {"id": 1, "kind": "container", "name": "P",
              "parent": null, "position": {"x": 0.0, "y": 0.0},
              "parameters": {"bad": \(payload)}}
@@ -201,7 +201,7 @@ struct GraphSnapshotTests {
     @Test func codableUsesDoubleNeverFloat() throws {
         // `position` must decode full `f64` precision, not `Float` mush.
         let json = """
-        {"version": 2, "operators": [
+        {"version": 3, "operators": [
             {"id": 1, "kind": "container", "name": "P",
              "parent": null, "position": {"x": 0.12345678901234568, "y": 0.0}}
         ], "edges": []}
