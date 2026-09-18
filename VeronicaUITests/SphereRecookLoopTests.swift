@@ -4,9 +4,9 @@ import XCTest
 /// Issue-#74 oracle: the Sphere slice end to end — create through the
 /// `Geometry` submenu, see viewport geometry appear, change a resolution and
 /// see pixels move; plus the T4 staleness gap's real test, untestable with
-/// the fixed-topology Cube (see `selection.rs:889-913`): a picked face
-/// survives a radius recook (same count) and clears on a segments recook
-/// (changed count).
+/// the fixed-topology Cube (see `changed_count_clears_selection_on_recook`
+/// in `selection.rs`): a picked face survives a radius recook (same count)
+/// and clears on a segments recook (changed count).
 ///
 /// Real engine only (the mock double owns no scene): launches with
 /// `--vrn-reset-graph` for isolation. Pixel oracles model on
@@ -239,7 +239,8 @@ final class SphereRecookLoopTests: XCTestCase {
     /// Creates a sphere through the Geometry submenu at a canvas point and
     /// waits for its operator box (shared `CubeRecookLoopTests` setup, one
     /// token swapped).
-    private func createSphere(_ app: XCUIApplication) {        let pane = viewportElement(app, "nodeGraphPane")
+    private func createSphere(_ app: XCUIApplication) {
+        let pane = viewportElement(app, "nodeGraphPane")
         XCTAssertTrue(pane.waitForExistence(timeout: 10))
         let target = pane.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
             .withOffset(CGVector(dx: 120, dy: 100))
