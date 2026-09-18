@@ -5,8 +5,8 @@ import XCTest
 /// `Geometry` submenu, see viewport geometry appear, change a resolution and
 /// see pixels move; plus the T4 staleness gap's real test, untestable with
 /// the fixed-topology Cube (see `changed_count_clears_selection_on_recook`
-/// in `selection.rs`): a picked face survives a radius recook (same count)
-/// and clears on a segments recook (changed count).
+/// in `selection.rs`): a picked polygon survives a radius recook (same
+/// count) and clears on a segments recook (changed count).
 ///
 /// Real engine only (the mock double owns no scene): launches with
 /// `--vrn-reset-graph` for isolation. Pixel oracles model on
@@ -14,6 +14,19 @@ import XCTest
 /// (pixel-difference fraction); the highlight oracle on
 /// `ViewportSelectionTests` (orange-pixel fraction, absolute thresholds).
 final class SphereRecookLoopTests: XCTestCase {
+    /// Whole-quad floor for `testQuadPickPaintsWholeQuad`: calibrated
+    /// 2026-09-17 (see the oracle comment there). Sits +13% above the
+    /// same-resolution single-triangle ceiling (0.0051) and -12% below the
+    /// quad floor (0.0066): thinner margins than the 0.005/0.001 pair, but
+    /// the quad cluster is tight (±1.6% across runs). If this ever flakes,
+    /// re-run the calibration sweep described in the test comment.
+    private static let quadPaintFloor = 0.0058
+
+    /// Whole-quad ceiling: two quads would read ~0.013 and a whole band
+    /// ~0.033, so 0.012 (+76% above the observed 0.0068 quad max) fails
+    /// only on genuine over-paint, which the floor alone would miss.
+    private static let quadPaintCeiling = 0.012
+
     override func setUpWithError() throws {
         continueAfterFailure = false
     }
@@ -116,23 +129,24 @@ final class SphereRecookLoopTests: XCTestCase {
         app.typeKey("f", modifierFlags: [])
         RunLoop.main.run(until: Date().addingTimeInterval(1.0))
 
-        // Min resolution first: at default 960 triangles one painted face
-        // is ~60 window pixels, unmeasurable against chrome. Segments 5 +
-        // rings 2 cook 10 huge faces, so a picked face reads ~1% orange
-        // (measured 0.0104 during triage) and the 0.005/0.001 thresholds
-        // below keep wide margins on both sides.
+        // Min resolution first: at default 960 triangles one painted
+        // polygon is ~60 window pixels, unmeasurable against chrome.
+        // Segments 5 + rings 2 cook 10 huge fan triangles = 10 polygons
+        // 1:1, so a picked polygon reads ~1% orange (measured 0.0104
+        // during triage) and the 0.005/0.001 thresholds below keep wide
+        // margins on both sides.
         try driveMinResolution(app)
 
         // Pick off the seam: the i=0 vertex meridian faces the camera by
         // construction, so a pane-center tap straddles the duplicated seam
         // and the MSAA blend deselects. NDC x=+0.15 sits deep inside the
-        // first segment's face (same measured 0.0104).
-        let picked = try pickOffSeamFace(app, in: windowFrame)
-        XCTAssertGreaterThan(picked, 0.005, "tap highlighted no face: \(picked)")
+        // first segment's polygon (same measured 0.0104).
+        let picked = try pickOffSeamPolygon(app, in: windowFrame)
+        XCTAssertGreaterThan(picked, 0.005, "tap highlighted no polygon: \(picked)")
 
         // Grow radius 0.5 -> 1.0 through the generic float field: the
-        // recook keeps the triangle count, so the Selection is retained on
-        // the same face ordinal and the orange persists (grown ~4x).
+        // recook keeps the polygon count, so the Selection is retained on
+        // the same polygon id and the orange persists (grown ~4x).
         let box1 = viewportElement(app, "operatorBox-1")
         XCTAssertTrue(box1.waitForExistence(timeout: 5))
         box1.click()
@@ -140,9 +154,9 @@ final class SphereRecookLoopTests: XCTestCase {
         XCTAssertTrue(radiusField.waitForExistence(timeout: 5))
         try setField(app, radiusField, to: "1.0")
         // Leave the field through the node graph, NOT the viewport: a
-        // viewport click here would re-pick the grown face and repaint the
-        // Selection even if the recook had dropped it, making this a false
-        // positive for exactly the retention it claims to pin.
+        // viewport click here would re-pick the grown polygon and repaint
+        // the Selection even if the recook had dropped it, making this a
+        // false positive for exactly the retention it claims to pin.
         box1.click()
         RunLoop.main.run(until: Date().addingTimeInterval(2.0))
 
@@ -172,14 +186,15 @@ final class SphereRecookLoopTests: XCTestCase {
         app.typeKey("f", modifierFlags: [])
         RunLoop.main.run(until: Date().addingTimeInterval(1.0))
 
-        // Same min-resolution + off-seam pick as the radius test: one face
-        // reads ~1% orange, so clearing back to chrome is unmistakable.
+        // Same min-resolution + off-seam pick as the radius test: one
+        // polygon reads ~1% orange, so clearing back to chrome is
+        // unmistakable.
         try driveMinResolution(app)
-        let picked = try pickOffSeamFace(app, in: windowFrame)
-        XCTAssertGreaterThan(picked, 0.005, "tap highlighted no face: \(picked)")
+        let picked = try pickOffSeamPolygon(app, in: windowFrame)
+        XCTAssertGreaterThan(picked, 0.005, "tap highlighted no polygon: \(picked)")
 
         // Coarsen segments 5 -> 8 through the generic integer field: the
-        // recook changes the triangle total (10 -> 16), so the stored pick
+        // recook changes the polygon total (10 -> 16), so the stored pick
         // no longer describes this mesh and the Selection clears. Commit
         // through the node graph (see the radius test): a viewport click
         // would re-pick and hide the clearing this test exists to pin.
@@ -199,33 +214,99 @@ final class SphereRecookLoopTests: XCTestCase {
         XCTAssertLessThan(cleared, 0.001, "segments change kept the highlight: \(cleared)")
     }
 
-    /// Drives the sphere to minimum resolution (segments 5, rings 2 = 10
-    /// triangles) through the generic integer fields and waits for the
-    /// recook, so one picked face is window-measurable. The editor echoes
+    @MainActor
+    func testQuadPickPaintsWholeQuad() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["--vrn-reset-graph"]
+        app.launch()
+
+        let warmed = waitForViewportWarmUp(app)
+        XCTAssertGreaterThanOrEqual(warmed, 120, "engine never warmed up")
+        createSphere(app)
+
+        let windowFrame = app.windows.firstMatch.frame
+        let viewport = viewportElement(app, "viewportPane")
+        XCTAssertTrue(viewport.waitForExistence(timeout: 5))
+        // Focus via a background miss so focusing selects nothing, then
+        // frame the new geometry.
+        viewport.coordinate(withNormalizedOffset: CGVector(dx: 0.06, dy: 0.06)).click()
+        app.typeKey("f", modifierFlags: [])
+        RunLoop.main.run(until: Date().addingTimeInterval(1.0))
+
+        // Quad-band resolution: segments 5 + rings 3 cook 20 triangles in
+        // 15 polygons (10 fan singles + 5 quad pairs, see SPHERE_QUAD_JSON
+        // in `selection.rs`). With one quad band between the two fan rows,
+        // the vertical-middle tap (dy 0.5) lands inside the quad band — the
+        // same off-seam dx as `pickOffSeamPolygon`.
+        try driveQuadBandResolution(app)
+        let painted = try pickOffSeamPolygon(app, in: windowFrame)
+
+        // Whole-quad oracle (polygon epoch #79): the P1 `tri_to_poly`
+        // grouping maps the resolved triangle to its polygon, so one tap
+        // paints both band triangles, not one. Calibrated 2026-09-17
+        // (same window geometry as the 0.0104 triage datum, which still
+        // reproduces exactly): an equatorial quad at 5x3 reads 0.0066-0.0068
+        // window-wide (6 samples across 2 runs), while a single triangle at
+        // this resolution — the 5x3 polar fan — reads 0.0051.
+        // `quadPaintFloor` sits between the two (+13% above the triangle
+        // ceiling, -12% below the quad floor); a one-triangle paint of the
+        // equatorial band would read ~0.003 and fail here. The Rust
+        // backstop is `painted == 6` in `selection.rs`
+        // (`sphere_quad_pick_paints_both_triangles`), which pins the mask
+        // exactly; this oracle pins the pixels — floor against under-paint,
+        // ceiling against over-paint (a whole band or mesh).
+        XCTAssertGreaterThan(
+            painted,
+            Self.quadPaintFloor,
+            "tap painted one triangle, not the quad: \(painted)"
+        )
+        XCTAssertLessThan(
+            painted,
+            Self.quadPaintCeiling,
+            "tap over-painted past one quad: \(painted)"
+        )
+    }
+
+    /// Drives the sphere to a resolution (segments + rings) through the
+    /// generic integer fields and waits for the recook. The editor echoes
     /// both commits back from the mirror.
-    private func driveMinResolution(_ app: XCUIApplication) throws {
+    private func driveResolution(_ app: XCUIApplication, segments: String, rings: String) throws {
         let box1 = viewportElement(app, "operatorBox-1")
         XCTAssertTrue(box1.waitForExistence(timeout: 5))
         box1.click()
         let segmentsField = viewportElement(app, "parameterField-segments")
         XCTAssertTrue(segmentsField.waitForExistence(timeout: 5))
-        try setField(app, segmentsField, to: "5")
+        try setField(app, segmentsField, to: segments)
         let ringsField = viewportElement(app, "parameterField-rings")
         XCTAssertTrue(ringsField.waitForExistence(timeout: 5))
-        try setField(app, ringsField, to: "2")
+        try setField(app, ringsField, to: rings)
         // Commit through the node graph (see the radius test): a viewport
-        // click here could pick a face and paint the Selection before the
-        // baseline pick below.
+        // click here could pick a polygon and paint the Selection before
+        // the baseline pick below.
         box1.click()
         RunLoop.main.run(until: Date().addingTimeInterval(2.0))
-        XCTAssertEqual(segmentsField.value as? String, "5")
-        XCTAssertEqual(ringsField.value as? String, "2")
+        XCTAssertEqual(segmentsField.value as? String, segments)
+        XCTAssertEqual(ringsField.value as? String, rings)
     }
 
-    /// Taps one face off the camera-facing seam and returns the orange
+    /// Drives the sphere to quad-band resolution (segments 5, rings 3 =
+    /// 20 triangles in 15 polygons: 10 fans + 5 quad pairs) so the
+    /// equatorial tap below lands inside the quad band.
+    private func driveQuadBandResolution(_ app: XCUIApplication) throws {
+        try driveResolution(app, segments: "5", rings: "3")
+    }
+
+    /// Drives the sphere to minimum resolution (segments 5, rings 2 = 10
+    /// fan triangles = 10 polygons 1:1) so one picked polygon is
+    /// window-measurable.
+    private func driveMinResolution(_ app: XCUIApplication) throws {
+        try driveResolution(app, segments: "5", rings: "2")
+    }
+
+    /// Taps one polygon off the camera-facing seam and returns the orange
     /// fraction after the pick settles. See the radius test for why the
     /// tap sits at NDC x=+0.15 instead of the pane center.
-    private func pickOffSeamFace(_ app: XCUIApplication, in windowFrame: CGRect) throws -> Double {
+    private func pickOffSeamPolygon(_ app: XCUIApplication, in windowFrame: CGRect) throws -> Double {
         let viewport = viewportElement(app, "viewportPane")
         XCTAssertTrue(viewport.waitForExistence(timeout: 5))
         viewport.coordinate(withNormalizedOffset: CGVector(dx: 0.575, dy: 0.5)).click()

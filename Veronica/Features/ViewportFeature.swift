@@ -38,7 +38,7 @@ struct ViewportFeature {
         /// Last completed present cost, in microseconds.
         var presentMicroseconds: UInt64 = 0
         /// Read-only mirror of the Rust Selection (issue #64): the picked
-        /// `(node, face)`, or `nil` when nothing is selected. Rust owns the
+        /// `(node, polygon)`, or `nil` when nothing is selected. Rust owns the
         /// truth; a background miss clears both sides, an engine error
         /// leaves the mirror untouched.
         var selection: ViewportPick?
