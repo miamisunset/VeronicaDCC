@@ -336,7 +336,16 @@ mod tests {
     /// Default cube snapshot: one unit cube at the origin.
     const CUBE_JSON: &str = r#"{"version":2,"operators":[
         {"id":1,"kind":"cube","name":"Box","parent":null,
-         "position":{"x":0.0,"y":0.0},"parameters":{}}
+         "position":{"x":0.0,"y":0.0},
+         "parameters":{}}
+    ],"edges":[]}"#;
+
+    /// Default sphere snapshot: 0.5 m radius at the origin, no parameter
+    /// overrides (absent keys exercise the documented parse defaults).
+    const SPHERE_JSON: &str = r#"{"version":2,"operators":[
+        {"id":1,"kind":"sphere","name":"Ball","parent":null,
+         "position":{"x":0.0,"y":0.0},
+         "parameters":{}}
     ],"edges":[]}"#;
 
     /// Beauty-pass clear color at the frame center before the cube draws.
@@ -372,6 +381,49 @@ mod tests {
         let _ = world.spawn_base_scene();
         world.recook_graph(&cube_graph()).unwrap();
         world
+    }
+
+    /// Cooked world under test: base scene plus one default sphere.
+    fn sphere_world() -> SceneWorld {
+        let snapshot: GraphSnapshot = serde_json::from_str(SPHERE_JSON).unwrap();
+        let mut graph = OperatorGraph::new();
+        graph.restore(snapshot).unwrap();
+        let mut world = SceneWorld::new_headless();
+        let _ = world.spawn_base_scene();
+        world.recook_graph(&graph).unwrap();
+        world
+    }
+
+    /// Minimum-resolution sphere snapshot: segments 5, rings 2, 10
+    /// triangles — faces big enough for pixel-meaningful highlight tests.
+    const SPHERE_MIN_JSON: &str = r#"{"version":2,"operators":[
+        {"id":1,"kind":"sphere","name":"Ball","parent":null,
+         "position":{"x":0.0,"y":0.0},
+         "parameters":{"segments":{"integer":5},"rings":{"integer":2}}}
+    ],"edges":[]}"#;
+
+    /// Minimum-resolution sphere with doubled radius (same 10 triangles).
+    const SPHERE_MIN_RADIUS_JSON: &str = r#"{"version":2,"operators":[
+        {"id":1,"kind":"sphere","name":"Ball","parent":null,
+         "position":{"x":0.0,"y":0.0},
+         "parameters":{"segments":{"integer":5},"rings":{"integer":2},
+                        "radius":{"float":1.0}}}
+    ],"edges":[]}"#;
+
+    /// Coarsened sphere: segments 8, rings 2, 16 triangles — a real
+    /// triangle-count change against the minimum-resolution cook.
+    const SPHERE_COARSE_JSON: &str = r#"{"version":2,"operators":[
+        {"id":1,"kind":"sphere","name":"Ball","parent":null,
+         "position":{"x":0.0,"y":0.0},
+         "parameters":{"segments":{"integer":8},"rings":{"integer":2}}}
+    ],"edges":[]}"#;
+
+    /// Operator graph restored from `json`.
+    fn sphere_graph(json: &str) -> OperatorGraph {
+        let snapshot: GraphSnapshot = serde_json::from_str(json).unwrap();
+        let mut graph = OperatorGraph::new();
+        graph.restore(snapshot).unwrap();
+        graph
     }
 
     /// Hand-built two-triangle mesh: four vertices, `U32` indices.
@@ -785,6 +837,31 @@ mod tests {
     }
 
     #[test]
+    fn sphere_pick_paints_highlight_pixels() {
+        // Arrange: warm beauty frame on the default sphere. The warmup
+        // helper waits for a non-clear center pixel, which the centered
+        // sphere satisfies like the cube does.
+        let mut world = sphere_world();
+        let plain = warm_beauty_until_cube(&mut world);
+
+        // Act: resolve a real center-tap pick, then select it — the same
+        // two calls the FFI pick makes back to back.
+        let pick = world
+            .resolve_pick(0.0, 0.0)
+            .unwrap()
+            .expect("center tap must hit the sphere");
+        world.set_selection(pick).unwrap();
+        let highlighted = settled_frame(&mut world);
+
+        // Assert: the painted face changes the presented frame.
+        assert_ne!(
+            highlighted.pixels(),
+            plain.pixels(),
+            "selecting a sphere face must tint the frame"
+        );
+    }
+
+    #[test]
     fn recook_same_topology_keeps_highlight_pixels() {
         // Arrange: highlighted frame on the cube.
         let mut world = cube_world();
@@ -884,6 +961,78 @@ mod tests {
             "center tap must resolve to a front face, got {}",
             pick.face
         );
+    }
+
+    #[test]
+    fn sphere_radius_recook_retains_highlight_on_same_face() {
+        // Arrange: face 0 selected on the minimum-resolution sphere (10
+        // triangles, so the mask is exactly one face of three vertices).
+        let mut world = sphere_world();
+        world.recook_graph(&sphere_graph(SPHERE_MIN_JSON)).unwrap();
+        world
+            .set_selection(Pick {
+                node: NodeId(1),
+                face: 0,
+            })
+            .unwrap();
+
+        // Act: recook with doubled radius — same node, same count.
+        world
+            .recook_graph(&sphere_graph(SPHERE_MIN_RADIUS_JSON))
+            .unwrap();
+
+        // Assert: the pick survives on the same face ordinal with exactly
+        // one face of mask — the T4 retention half, pinned through a real
+        // geometry change no fixed-topology operator can produce.
+        assert_eq!(
+            world.selection(),
+            Some(Pick {
+                node: NodeId(1),
+                face: 0
+            })
+        );
+        let entity = world
+            .cooked_entities()
+            .into_iter()
+            .find_map(|(id, entity)| (id == NodeId(1)).then_some(entity))
+            .expect("sphere still cooked");
+        let painted = mask_of(world.cooked_mesh(entity).unwrap())
+            .into_iter()
+            .filter(|v| *v == 1f32.to_bits())
+            .count();
+        assert_eq!(painted, 3, "exactly one face stays masked");
+    }
+
+    #[test]
+    fn sphere_resolution_recook_clears_highlight_on_real_count_change() {
+        // Arrange: face 0 selected on the minimum-resolution sphere.
+        let mut world = sphere_world();
+        world.recook_graph(&sphere_graph(SPHERE_MIN_JSON)).unwrap();
+        world
+            .set_selection(Pick {
+                node: NodeId(1),
+                face: 0,
+            })
+            .unwrap();
+        assert_eq!(
+            world.selection(),
+            Some(Pick {
+                node: NodeId(1),
+                face: 0
+            })
+        );
+
+        // Act: recook with more segments — same node, 10 triangles become
+        // 16, a real count change (no forged totals).
+        world
+            .recook_graph(&sphere_graph(SPHERE_COARSE_JSON))
+            .unwrap();
+
+        // Assert: the stale pick clears rather than surviving on a mesh
+        // whose topology it no longer describes — the case
+        // `changed_count_clears_selection_on_recook` could only forge with
+        // the fixed-topology Cube.
+        assert_eq!(world.selection(), None);
     }
 
     #[test]
