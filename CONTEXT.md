@@ -128,16 +128,19 @@ the same idea).
 
 ## Face
 
-One triangle of realized geometry. Identity is the face ordinal: triangle
-*k* of an Operator's realized mesh. _Avoid_: polygon (implies N-gons,
-which the soup has none of).
+One polygon of realized geometry (a quad-band pair or single fan
+triangle, per the P1 `tri_to_poly` grouping). Identity is the polygon id
+returned by Pick and held by Selection. _Avoid_: triangle ordinal
+(pre-#79 wire; now an implementation detail of realize/pick internals),
+polygon only where N-gons are implied (the soup still has none — a
+polygon is a pair or a fan single).
 
 ## Pick
 
-The operation mapping one viewport tap to one Face identity, computed
-Rust-side, plus that resulting identity. A tap on empty space is a Pick
-that hits nothing. _Avoid_: select (the verb is reserved for Selection
-state changes).
+The operation mapping one viewport tap to one polygon identity
+(`Face`), computed Rust-side via the `tri_to_poly` grouping, plus that
+resulting identity. A tap on empty space is a Pick that hits nothing.
+_Avoid_: select (the verb is reserved for Selection state changes).
 
 ## Selection
 

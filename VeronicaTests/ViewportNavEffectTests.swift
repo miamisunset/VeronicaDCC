@@ -77,7 +77,7 @@ struct ViewportNavEffectTests {
 
     @Test func tapAtInvokesClientWithNDCIntact() async {
         let recorded = Mutex<[CursorNDC]>([])
-        let pick = ViewportPick(node: 3, face: 5)
+        let pick = ViewportPick(node: 3, polygon: 5)
         let store = TestStore(initialState: ViewportFeature.State()) {
             ViewportFeature()
         } withDependencies: {
@@ -98,7 +98,7 @@ struct ViewportNavEffectTests {
 
     /// A hit paints the mirror with the returned identity.
     @Test func pickHitMirrorsReturnedIdentity() async {
-        let pick = ViewportPick(node: 1, face: 0)
+        let pick = ViewportPick(node: 1, polygon: 0)
         let store = TestStore(initialState: ViewportFeature.State()) {
             ViewportFeature()
         } withDependencies: {
@@ -113,7 +113,7 @@ struct ViewportNavEffectTests {
     /// A background miss clears the mirror (Rust cleared with it).
     @Test func pickMissClearsMirror() async {
         let store = TestStore(
-            initialState: ViewportFeature.State(selection: ViewportPick(node: 1, face: 0))
+            initialState: ViewportFeature.State(selection: ViewportPick(node: 1, polygon: 0))
         ) {
             ViewportFeature()
         } withDependencies: {
@@ -128,7 +128,7 @@ struct ViewportNavEffectTests {
     /// An engine error leaves the mirror untouched (Rust state is
     /// untouched on error paths, so the mirror keeps its value).
     @Test func pickFailureKeepsMirror() async {
-        let held = ViewportPick(node: 2, face: 7)
+        let held = ViewportPick(node: 2, polygon: 7)
         let store = TestStore(initialState: ViewportFeature.State(selection: held)) {
             ViewportFeature()
         } withDependencies: {
@@ -202,8 +202,8 @@ struct ViewportNavEffectTests {
         let latest = try #require(parked.withLock { $0.first(where: { $0.cursor == second }) })
         // The superseded answer is dropped (its effect was cancelled); only
         // the newest tap paints the mirror.
-        stale.continuation.resume(returning: ViewportPick(node: 1, face: 0))
-        let pick = ViewportPick(node: 2, face: 3)
+        stale.continuation.resume(returning: ViewportPick(node: 1, polygon: 0))
+        let pick = ViewportPick(node: 2, polygon: 3)
         latest.continuation.resume(returning: pick)
         await store.receive(.pickResponse(.success(pick))) {
             $0.selection = pick

@@ -54,7 +54,7 @@ final class ViewportSelectionTests: XCTestCase {
             viewportOrangePixelFraction(of: app.screenshot(), in: windowFrame),
             "could not map the app window into the screenshot"
         )
-        XCTAssertGreaterThan(picked, 0.02, "tap highlighted no face: \(picked)")
+        XCTAssertGreaterThan(picked, 0.02, "tap highlighted no polygon: \(picked)")
 
         // Tap empty space again: the miss clears the Selection, the warmth
         // goes away with it.
@@ -93,11 +93,11 @@ final class ViewportSelectionTests: XCTestCase {
             viewportOrangePixelFraction(of: app.screenshot(), in: windowFrame),
             "could not map the app window into the screenshot"
         )
-        XCTAssertGreaterThan(picked, 0.02, "tap highlighted no face: \(picked)")
+        XCTAssertGreaterThan(picked, 0.02, "tap highlighted no polygon: \(picked)")
 
         // Grow every size axis 1 -> 2 through the generic triple-field
         // (see `CubeRecookLoopTests`): the recook retains the Selection on
-        // the same face ordinal, so the orange persists at the same scale.
+        // the same polygon id, so the orange persists at the same scale.
         let box1 = viewportElement(app, "operatorBox-1")
         XCTAssertTrue(box1.waitForExistence(timeout: 5))
         box1.click()

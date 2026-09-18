@@ -32,7 +32,8 @@ BVH-accelerated CPU raycast was rejected: it buys a permanent second
 representation of every mesh plus recook-invalidation bookkeeping for zero
 lasting benefit once the GPU path exists.
 
-**Identity is a face ordinal**: `(node_id, triangle_index)` into the
+**Identity is a face ordinal** (pre-#79 wire; superseded by the polygon
+epoch below but kept as the design record): `(node_id, triangle_index)` into the
 realized mesh, 24-bit RGB-encodable. Highlight is retained across recooks
 while a node's triangle count is unchanged and cleared on topology change
 — safe today (a Cube recook never changes its 12 triangles) and a
@@ -73,3 +74,12 @@ highlight code survive untouched.
   (`CONTEXT.md`); `Group` stays undefined until the persistence slice.
 - Out of scope by design: Group operator, Transform/PolyExtrude
   consumers, point/edge scopes, multi-select, hover, half-edge store.
+
+## Polygon epoch (#79, v2→v3)
+
+Identity is now the polygon id: the P1 `tri_to_poly` grouping maps the
+resolved triangle first (P2 rekeyed pick, mask, and retention to
+polygons), so a tapped quad reports one shared id. `out_face` names a
+polygon; `SelectionFaceOutOfRange` keeps its name and guards the polygon
+range. Snapshot v3 accepts v2+v3, with a v2 restore clearing the
+ephemeral live pick. Swift mirrors the pair as `(node, polygon)`.

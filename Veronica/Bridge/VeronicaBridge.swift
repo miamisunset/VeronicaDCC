@@ -201,13 +201,15 @@ nonisolated enum EngineBridge {
         }
     }
 
-    /// Pick the face under `cursor` (NDC, x/y in [-1, 1]) and paint the
-    /// engine Selection with it (issue #64, FFI from #63).
+    /// Pick the polygon under `cursor` (NDC, x/y in [-1, 1]) and paint the
+    /// engine Selection with it (issue #64, FFI from #63; polygon epoch
+    /// #79: the P1 `tri_to_poly` grouping maps the resolved triangle, so
+    /// a tapped quad reports one shared polygon id).
     ///
     /// Runs the on-demand ID pass and replaces the single Selection; a
     /// background miss clears the Selection yet still returns `Ok`, so
     /// `nil` here means "nothing selected" in both cases. Returns the
-    /// `(node, face)` identity on a hit. Non-Ok codes surface as
+    /// `(node, polygon)` identity on a hit. Non-Ok codes surface as
     /// `.ffiFailed` (stale targets) or `.engineUnavailable` (nil context).
     ///
     /// Explicitly `nonisolated` (see `createOperator`).
@@ -223,13 +225,13 @@ nonisolated enum EngineBridge {
                     return
                 }
                 var outNode: UInt64 = 0
-                var outFace: UInt32 = 0
+                var outPolygon: UInt32 = 0
                 let code = vrnViewportPick(
                     context,
                     Float(cursor.x),
                     Float(cursor.y),
                     &outNode,
-                    &outFace
+                    &outPolygon
                 )
                 guard code == VrnResultCode.ok.rawValue else {
                     continuation.resume(
@@ -243,7 +245,7 @@ nonisolated enum EngineBridge {
                     continuation.resume(returning: nil)
                     return
                 }
-                continuation.resume(returning: ViewportPick(node: outNode, face: outFace))
+                continuation.resume(returning: ViewportPick(node: outNode, polygon: outPolygon))
             }
         }
     }
@@ -342,7 +344,7 @@ nonisolated enum EngineBridge {
         _ ndcX: Float,
         _ ndcY: Float,
         _ outNode: UnsafeMutablePointer<UInt64>?,
-        _ outFace: UnsafeMutablePointer<UInt32>?
+        _ outPolygon: UnsafeMutablePointer<UInt32>?
     ) -> Int32
     @_silgen_name("vrn_graph_create_operator")
     nonisolated private static func vrnGraphCreateOperator(
@@ -671,7 +673,8 @@ nonisolated enum EngineBridge {
         }
     }
 
-    /// Replaces the whole DAG from a snapshot. Rejects `version != 2` in Rust.
+    /// Replaces the whole DAG from a snapshot. Rust accepts `version` 2+3
+    /// (v2 restore clears the ephemeral live pick; see snapshot v3).
     ///
     /// Explicitly `nonisolated` (see `createOperator`).
     nonisolated static func restoreGraphSnapshot(_ snapshot: GraphSnapshot) async throws(GraphEngineError) {

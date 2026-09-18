@@ -66,16 +66,19 @@ nonisolated struct VideoFrame: Equatable, Sendable {
     var height: UInt64
 }
 
-/// Read-only mirror of one Rust Selection: the picked face identity.
+/// Read-only mirror of one Rust Selection: the picked polygon identity.
 ///
-/// `(node, face)` is the face-ordinal contract from ADR-0007 — the same
-/// pair `vrn_viewport_pick` returns. Swift never constructs scene content;
-/// this is observation only, cleared on a background miss (`nil`).
+/// `(node, polygon)` is the polygon-identity contract from ADR-0007
+/// (polygon epoch #79, snapshot v3) — the same pair `vrn_viewport_pick`
+/// returns. The P1 `tri_to_poly` grouping maps the resolved triangle
+/// first, so a tapped quad reports one shared id. Swift never constructs
+/// scene content; this is observation only, cleared on a background miss
+/// (`nil`).
 nonisolated struct ViewportPick: Equatable, Sendable {
     /// Rust-issued node id of the picked mesh.
     var node: UInt64
-    /// Face ordinal (realized triangle index) within that mesh.
-    var face: UInt32
+    /// Polygon id within that mesh (was triangle ordinal pre-#79).
+    var polygon: UInt32
 }
 
 /// TCA dependency for the Rust engine. The live value will call `vrn_tick`
@@ -108,7 +111,7 @@ nonisolated struct EngineClient: Sendable {
     /// Fetch the whole-graph mirror. Owns the allocate/free boundary — the
     /// raw FFI pointer never escapes `EngineBridge`.
     var requestSnapshot: @Sendable () async throws(GraphEngineError) -> GraphSnapshot
-    /// Replace the whole DAG from a snapshot. Rejects `version != 2`.
+    /// Replace the whole DAG from a snapshot. Rust accepts `version` 2+3.
     var restoreSnapshot: @Sendable (GraphSnapshot) async throws(GraphEngineError) -> Void
     /// Orbit the viewport camera by a drag delta in pixels. Fire-and-forget
     /// (issue #41): hops to the engine queue inside `EngineBridge`.
