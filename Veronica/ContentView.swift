@@ -42,6 +42,12 @@ struct ContentView: View {
             }
         }
         .navigationTitle("Veronica")
+        .onAppear {
+            // UI-test geometry pin (issue #94): no-op without the flag.
+            if WindowLaunchOptions.hasFlag {
+                WindowLaunchOptions.applyPinnedSize()
+            }
+        }
     }
 
     /// Bevy viewport: fixed first in every arrangement.

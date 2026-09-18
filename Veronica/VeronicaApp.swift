@@ -12,8 +12,17 @@ import SwiftUI
 struct VeronicaApp: App {
     /// Shared root store: windows and the Panes menu send into the same
     /// feature state, so menu items and toolbar buttons stay in sync.
-    let store = Store(initialState: AppFeature.State()) {
-        AppFeature()
+    let store: StoreOf<AppFeature>
+
+    init() {
+        // UI-test geometry pin (issue #94): clear before any window exists,
+        // while restoration can still be preempted. No-op without the flag.
+        if WindowLaunchOptions.hasFlag {
+            WindowLaunchOptions.clearRestoredFrames()
+        }
+        store = Store(initialState: AppFeature.State()) {
+            AppFeature()
+        }
     }
 
     var body: some Scene {
