@@ -71,8 +71,13 @@ func viewportBrightPixelFraction(of shot: XCUIScreenshot, in windowFrame: CGRect
     return Double(bright) / Double(count)
 }
 
-/// Fraction of `windowFrame` pixels reading as selection-warm (the
+/// Fraction of `cropRect` pixels reading as selection-warm (the
 /// primvar highlight tint, issue #64), sampled like `viewportBrightPixelFraction`.
+///
+/// `cropRect` is any window-space rect in points (top-left origin): the
+/// window frame for window-wide oracles, the viewport pane frame for
+/// pane-cropped ones (issue #94 decoupled the quad oracle from pane shares
+/// and chrome by cropping to the viewport).
 ///
 /// Warm means red-dominant over blue (`R-B > 40`, `G-B > 20`): the tint is
 /// a light peach whose blue channel reaches ~190, so an absolute blue cap
@@ -80,10 +85,11 @@ func viewportBrightPixelFraction(of shot: XCUIScreenshot, in windowFrame: CGRect
 /// reads near-equal channels and the dark chrome reads near-zero. Window
 /// chrome contributes only the traffic lights (~1e-4); a picked face
 /// covers ~7% window-wide, so the oracle thresholds sit orders of
-/// magnitude clear on both sides. Window-wide by the same AX-tree
-/// necessity as the bright oracle.
-func viewportOrangePixelFraction(of shot: XCUIScreenshot, in windowFrame: CGRect) -> Double? {
-    guard let crop = croppedWindowPixels(of: shot, in: windowFrame) else {
+/// magnitude clear on both sides. Window-wide callers keep the AX-tree
+/// rationale of the bright oracle (the MTKView never surfaces); pane-
+/// cropped callers pass the viewport pane frame instead (issue #94).
+func viewportOrangePixelFraction(of shot: XCUIScreenshot, in cropRect: CGRect) -> Double? {
+    guard let crop = croppedWindowPixels(of: shot, in: cropRect) else {
         return nil
     }
     // Stride-sample: every 8th pixel is plenty for a fraction.
@@ -156,13 +162,13 @@ private struct WindowCrop {
     var height: Int
 }
 
-/// Crop `shot` to `windowFrame` (see `viewportBrightPixelFraction` for the
+/// Crop `shot` to `cropRect` (see `viewportBrightPixelFraction` for the
 /// mapping), or `nil` when the shot cannot be mapped.
 private func croppedWindowPixels(
     of shot: XCUIScreenshot,
-    in windowFrame: CGRect
+    in cropRect: CGRect
 ) -> WindowCrop? {
-    guard windowFrame.width > 0, windowFrame.height > 0,
+    guard cropRect.width > 0, cropRect.height > 0,
         let screenSize = NSScreen.main?.frame.size, screenSize.width > 0,
         let image = NSImage(data: shot.pngRepresentation),
         let source = image.cgImage(forProposedRect: nil, context: nil, hints: nil)
@@ -171,10 +177,10 @@ private func croppedWindowPixels(
     }
     let scale = CGFloat(source.width) / screenSize.width
     let pixelRect = CGRect(
-        x: Int(windowFrame.minX * scale),
-        y: Int(windowFrame.minY * scale),
-        width: Int(windowFrame.width * scale),
-        height: Int(windowFrame.height * scale)
+        x: Int(cropRect.minX * scale),
+        y: Int(cropRect.minY * scale),
+        width: Int(cropRect.width * scale),
+        height: Int(cropRect.height * scale)
     ).intersection(CGRect(x: 0, y: 0, width: source.width, height: source.height))
     guard !pixelRect.isNull, pixelRect.width >= 4, pixelRect.height >= 4,
         let cropped = source.cropping(to: pixelRect)
