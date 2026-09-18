@@ -20,8 +20,12 @@ final class SphereRecookLoopTests: XCTestCase {
     /// oracle in this file launches at this size via `--vrn-window-size`
     /// (see `WindowLaunchOptions`) and asserts it landed below.
     private static let testWindowSize = CGSize(width: 1280, height: 800)
-    /// Launch arguments shared by every oracle in this file.
-    private static let testLaunchArguments = ["--vrn-reset-graph", "--vrn-window-size=1280x800"]
+    /// Launch arguments shared by every oracle in this file, derived from
+    /// `testWindowSize` so the pin and the flag cannot drift apart.
+    private static let testLaunchArguments = [
+        "--vrn-reset-graph",
+        "--vrn-window-size=\(Int(testWindowSize.width))x\(Int(testWindowSize.height))"
+    ]
 
     /// Fails loudly when the geometry pin missed: measuring at drifted
     /// geometry would silently recalibrate every threshold below.
@@ -279,8 +283,13 @@ final class SphereRecookLoopTests: XCTestCase {
         // equatorial band would read ~0.014 and fail here. The Rust
         // backstop is `painted == 6` in `selection.rs`
         // (`sphere_quad_pick_paints_both_triangles`), which pins the mask
-        // exactly; this oracle pins the pixels — floor against under-paint,
-        // ceiling against over-paint (a whole band or mesh).
+        // exactly — verified `cargo test -p veronica-scene` (105 pass) on
+        // the fix branch — and `Selection` holds a single
+        // `Option<StoredPick>` with replace semantics, so two simultaneous
+        // quads are impossible through the selection path: the 0.0134 was
+        // measurement, not mask. This oracle pins the pixels — floor
+        // against under-paint, ceiling against over-paint (a whole band
+        // or mesh).
         XCTAssertGreaterThan(
             painted,
             Self.quadPaintFloor,
