@@ -4,10 +4,9 @@
 # drops new defaults.
 strict: true
 
-included:
-  - Veronica
-  - VeronicaTests
-  - VeronicaUITests
+# No `included:` allowlist by design: every Swift file not in `excluded:`
+# is linted, so future subprojects inherit these rules automatically
+# (nearest config wins per directory; test dirs subtract force rules).
 excluded:
   - DerivedData
   - .build
