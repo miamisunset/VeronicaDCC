@@ -98,6 +98,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = FA3FC59A3059989200A21D85 /* Build configuration list for PBXNativeTarget "Veronica" */;
 			buildPhases = (
+				FA3FC5C23059D1000A21D85 /* Rebuild Rust (cargo) */,
 				FA3FC5773059989200A21D85 /* Sources */,
 				FA3FC5783059989200A21D85 /* Frameworks */,
 				FA3FC5793059989200A21D85 /* Resources */,
@@ -222,6 +223,24 @@
 		};
 /* End PBXResourcesBuildPhase section */
 
+/* Begin PBXShellScriptBuildPhase section */
+		FA3FC5C23059D1000A21D85 /* Rebuild Rust (cargo) */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+			);
+			name = "Rebuild Rust (cargo)";
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -eu\n# Rebuild the Rust static library Xcode links (rust/target/release/libveronica.a\n# in ALL configs). Cargo no-ops when fresh, so the steady-state cost is one\n# freshness check. Without this, Run-from-Xcode silently links stale Rust (#89).\n# Cargo `warning:` lines flow into the build log, where Xcode surfaces them.\nif ! command -v cargo >/dev/null 2>&1; then\nexport PATH=\"$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH\"\nfi\nif ! command -v cargo >/dev/null 2>&1; then\necho \"error: cargo not found - install the Rust toolchain from https://rustup.rs to build Veronica\" >&2\nexit 1\nfi\ncd \"${SRCROOT}/rust\" || { echo \"error: rust/ directory not found at ${SRCROOT}/rust\" >&2; exit 1; }\nexec cargo build --release -p veronica-ffi\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
 		FA3FC5773059989200A21D85 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
@@ -292,7 +311,7 @@
 				DEVELOPMENT_TEAM = K485M39256;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GCC_DYNAMIC_NO_PIC = NO;
 				GCC_NO_COMMON_BLOCKS = YES;
@@ -356,7 +375,7 @@
 				DEVELOPMENT_TEAM = K485M39256;
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GCC_NO_COMMON_BLOCKS = YES;
 				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;

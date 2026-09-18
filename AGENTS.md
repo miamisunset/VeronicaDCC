@@ -29,7 +29,7 @@ No `Cargo.toml`, no Rust bridge, no node-graph/viewport code yet. First backend 
 - Single UI test (XCTest): `xcodebuild ... test -only-testing:VeronicaUITests/<ClassName>/<testName>`
 - Default configuration is Release when `-configuration` is omitted; pass `-configuration Debug` for dev builds.
 - Rust toolchain present (rustc/cargo 1.98.x) but unused until a crate is added. Once added: `cargo test -p <crate>` for backend-only checks.
-- Xcode links `rust/target/release/libveronica.a` in ALL configs (Debug included), so Run-from-Xcode stays smooth: rebuild it via `cargo build --release -p veronica-ffi` from `rust/` after any Rust change, or the app silently runs stale Rust.
+- Xcode links `rust/target/release/libveronica.a` in ALL configs (Debug included). The `Rebuild Rust (cargo)` build phase runs `cargo build --release -p veronica-ffi` on every build (cargo no-ops when fresh; `ENABLE_USER_SCRIPT_SANDBOXING` is deliberately `NO` so cargo can reach the toolchain/target dir — see #90), so Run-from-Xcode never links stale Rust and cargo warnings surface in the build log. Manual `cargo build --release -p veronica-ffi` from `rust/` is still the fast path for Rust-only iteration.
 
 ## Project quirks (do not guess wrong)
 - `Veronica/`, `VeronicaTests/`, `VeronicaUITests/` are `PBXFileSystemSynchronizedRootGroup` — files are auto-added by filesystem. Never hand-edit `project.pbxproj` to add sources.
@@ -37,7 +37,7 @@ No `Cargo.toml`, no Rust bridge, no node-graph/viewport code yet. First backend 
 - Tests differ: `VeronicaTests` uses Swift Testing (`@Test`, `#expect`), `VeronicaUITests` uses XCTest + `XCUIApplication`. Don't mix frameworks.
 - App is sandboxed (`ENABLE_APP_SANDBOX=YES`, `ENABLE_USER_SELECTED_FILES=readonly`) with hardened runtime. File access outside the sandbox needs entitlements + open-panel flow — procedural cache/graph files must account for this.
 - Deployment target `MACOSX_DEPLOYMENT_TARGET=27.0`, `SDKROOT=macosx`, bundle `com.github.miamisunset.Veronica`. Keep new targets consistent.
-- `ENABLE_USER_SCRIPT_SANDBOXING=YES` — custom build phases needing network/fs access will fail unless allowlisted.
+- `ENABLE_USER_SCRIPT_SANDBOXING=NO` (deliberate, see #90 — the `Rebuild Rust (cargo)` phase needs toolchain/target-dir fs access the script sandbox denies). This covers build phases only; the app sandbox (`ENABLE_APP_SANDBOX=YES` above) is untouched. Do not flip back to `YES` without replacing the cargo phase. The flag lives on the project-level configs (all targets inherit it) — there is no target-scoped alternative.
 
 ## Rust best practices (mandated, researched 2026)
 Sources: Azure SDK for Rust guidelines (`azure.github.io/azure-sdk`), `rust-skills`.
