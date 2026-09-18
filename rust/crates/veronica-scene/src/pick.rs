@@ -11,7 +11,10 @@
 //! 2. **Face pass.** Only on an entity hit: the hit operator's cooked mesh
 //!    is unwelded into [`id_mesh_from_cooked`] (triangle *k* becomes three
 //!    private vertices all carrying `encode_face_ordinal(k)`) and rendered
-//!    under a white unlit material. Same tap texel resolves the triangle.
+//!    under a white unlit material. Same tap texel resolves the triangle,
+//!    which the payload grouping maps to its polygon before the pick
+//!    returns — the GPU space stays triangles, the pick identity is a
+//!    polygon (the triangle ordinal never leaves this module).
 //!
 //! Each pass ticks until its target shows painted pixels ([`frame_painted`],
 //! bounded by [`PICK_PASS_UPDATE_BUDGET`]): a fresh transient camera needs
@@ -54,7 +57,7 @@
 //! rebuild every pipeline including beauty's), so this stays a documented
 //! limitation until dense-mesh picking earns its own design.
 
-use crate::{SceneError, SceneWorld, gpu, render::FRAME_BYTES_PER_PIXEL};
+use crate::{SceneError, SceneWorld, cook::CookedMesh, gpu, render::FRAME_BYTES_PER_PIXEL};
 use bevy_asset::{Assets, Handle, RenderAssetUsages};
 use bevy_camera::{
     Camera, Camera3d, CameraOutputMode, ClearColorConfig, Hdr, Projection, RenderTarget,
@@ -88,13 +91,15 @@ const PICK_RENDER_LAYER: usize = 1;
 /// frame as a background tap.
 const PICK_PASS_UPDATE_BUDGET: u32 = 10;
 
-/// A resolved tap: the operator whose mesh was hit, and which triangle of
-/// its realized mesh (glossary `Face`, ADR-0007 identity contract).
+/// A resolved tap: the operator whose mesh was hit, and which polygon of
+/// its grouping (glossary `Face`, ADR-0007 identity contract as rekeyed in
+/// P2 — the `face` slot carries the polygon id end to end; P3 formalizes
+/// the wire meaning).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Pick {
     /// Source operator of the hit mesh.
     pub node: NodeId,
-    /// Triangle ordinal into the operator's realized mesh.
+    /// Polygon id into the operator's grouping.
     pub face: u32,
 }
 
@@ -358,6 +363,25 @@ fn face_in_range(face: u32, triangle_total: usize) -> bool {
     (face as usize) < triangle_total
 }
 
+/// Map a resolved triangle ordinal to its polygon id through the payload
+/// grouping. An empty grouping reads as identity (the payload carried no
+/// map, so ungrouped cooks keep their triangle identity end to end).
+///
+/// # Errors
+///
+/// Returns [`SceneError::UnpickableMesh`] when a non-empty grouping has no
+/// entry for the ordinal (truncated map — corrupt cook, loud rather than
+/// a guessed identity).
+fn polygon_for_ordinal(tri_to_poly: &[u32], ordinal: u32) -> Result<u32, SceneError> {
+    if tri_to_poly.is_empty() {
+        return Ok(ordinal);
+    }
+    tri_to_poly
+        .get(ordinal as usize)
+        .copied()
+        .ok_or(SceneError::UnpickableMesh)
+}
+
 /// One cooked mesh eligible for the entity pass: everything the transient
 /// overlays need, snapshotted up front so the pass never re-queries live
 /// entities mid-flight.
@@ -371,6 +395,9 @@ struct PickableMesh {
     mesh: Handle<Mesh>,
     /// World transform, copied so overlays cover the beauty mesh exactly.
     transform: Transform,
+    /// Payload grouping for the triangle-to-polygon map at resolve time;
+    /// empty reads as identity (polygon == triangle).
+    tri_to_poly: Vec<u32>,
 }
 
 /// One transient asset uploaded for a pick pass, removed at teardown.
@@ -447,19 +474,25 @@ impl SceneWorld {
     }
 
     /// Cooked entities reduced to what the entity pass needs: node id, GPU
-    /// mesh handle, and world transform. Entities without a render mesh are
-    /// skipped — slots index this list, never the raw cook order.
+    /// mesh handle, world transform, and the payload grouping. Entities
+    /// without a render mesh are skipped — slots index this list, never
+    /// the raw cook order.
     fn pickable_meshes(&mut self, cooked: &[(NodeId, Entity)]) -> Vec<PickableMesh> {
         let mut pickables = Vec::with_capacity(cooked.len());
         for (node, entity) in cooked {
             let world = self.app.world();
             let mesh = world.get::<Mesh3d>(*entity).map(|handle| handle.0.clone());
             let transform = world.get::<Transform>(*entity).copied().unwrap_or_default();
+            let tri_to_poly = world
+                .get::<CookedMesh>(*entity)
+                .map(|held| held.tri_to_poly.clone())
+                .unwrap_or_default();
             if let Some(mesh) = mesh {
                 pickables.push(PickableMesh {
                     node: *node,
                     mesh,
                     transform,
+                    tri_to_poly,
                 });
             }
         }
@@ -701,9 +734,14 @@ impl SceneWorld {
         }
         let face = decode_face_ordinal([face_pixel[0], face_pixel[1], face_pixel[2]]);
         // Range backstop: a seam-blended triple can decode past the mesh.
+        // The backstop stays triangle-granular (the GPU resolved a
+        // triangle); the identity below is polygon-granular.
         if !face_in_range(face, face_total) {
             return Ok(None);
         }
+        // Triangle ordinal to polygon id through the payload grouping
+        // (identity for ungrouped cooks, loud on a corrupt map).
+        let face = polygon_for_ordinal(&pickable.tri_to_poly, face)?;
         Ok(Some(Pick {
             node: pickable.node,
             face,
@@ -956,6 +994,21 @@ mod tests {
         assert!(!face_in_range(12, 12));
         assert!(!face_in_range(u32::MAX, 12));
         assert!(!face_in_range(0, 0));
+    }
+
+    #[test]
+    fn ordinal_to_polygon_maps_grouped_shares_identity_ungrouped() {
+        // Grouped: quad pair shares one id; fan singles map 1:1.
+        assert_eq!(polygon_for_ordinal(&[0, 0, 1, 2], 0), Ok(0));
+        assert_eq!(polygon_for_ordinal(&[0, 0, 1, 2], 1), Ok(0));
+        assert_eq!(polygon_for_ordinal(&[0, 0, 1, 2], 3), Ok(2));
+        // Empty grouping reads as identity (ungrouped cooks).
+        assert_eq!(polygon_for_ordinal(&[], 5), Ok(5));
+        // Truncated grouping fails loud, never a guessed identity.
+        assert_eq!(
+            polygon_for_ordinal(&[0, 0], 7),
+            Err(SceneError::UnpickableMesh)
+        );
     }
 
     #[test]
@@ -1287,8 +1340,8 @@ mod tests {
     #[test]
     fn quarter_orbit_tap_hits_side_face() {
         // Arrange: default cube; swing the camera 90 degrees toward +X
-        // (pi/2 at 0.005 rad/px) so the right face (+X, ordinals 4–5)
-        // centers under the tap.
+        // (pi/2 at 0.005 rad/px) so the right face (+X, triangles 4–5,
+        // polygon 2) centers under the tap.
         let mut world = cube_world();
         world
             .orbit_camera(std::f32::consts::FRAC_PI_2 / 0.005, 0.0)
@@ -1303,11 +1356,7 @@ mod tests {
             panic!("center tap must hit the orbited cube");
         };
         assert_eq!(pick.node, NodeId(1));
-        assert!(
-            pick.face == 4 || pick.face == 5,
-            "right face, got {}",
-            pick.face
-        );
+        assert_eq!(pick.face, 2, "right-face polygon, got {}", pick.face);
     }
 
     #[test]
@@ -1321,16 +1370,12 @@ mod tests {
         // Act.
         let pick = world.resolve_pick(0.0, 0.0).unwrap();
 
-        // Assert: back face (ordinals 2–3), same node.
+        // Assert: back face (triangles 2–3, polygon 1), same node.
         let Some(pick) = pick else {
             panic!("center tap must hit the turned cube");
         };
         assert_eq!(pick.node, NodeId(1));
-        assert!(
-            pick.face == 2 || pick.face == 3,
-            "back face, got {}",
-            pick.face
-        );
+        assert_eq!(pick.face, 1, "back-face polygon, got {}", pick.face);
     }
     /// Beauty clear bytes (BGRA) when nothing draws: Bevy's default
     /// `ClearColor` (`srgb_u8(43, 44, 47)`) through the `Bgra8UnormSrgb`

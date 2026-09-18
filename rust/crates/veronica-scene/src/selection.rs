@@ -1,7 +1,7 @@
 //! Rust-owned Selection with primvar highlight.
 //!
 //! [`Selection`] is a world resource holding at most one [`Pick`]: the tap
-//! the ID pass resolved (see `pick`), plus the target's triangle total at
+//! the ID pass resolved (see `pick`), plus the target's polygon total at
 //! select time. Nothing here touches the graph — selection is ephemeral UI
 //! state, never serialized — and Swift only ever mirrors it read-only (the
 //! FFI slice lands in T5).
@@ -25,16 +25,18 @@
 //! pass already warms. The mask stays the source of truth either way, so an
 //! emissive binding later would consume the same primvar unchanged.
 //!
-//! Staleness follows the T2 contract: the pick survives recooks while its
-//! node's triangle count is unchanged and clears on any topology change
-//! (enforced in [`SceneWorld::retain_selection_across_recook`], which
+//! Staleness follows the T2 contract at polygon granularity: the pick
+//! survives recooks while its node's polygon count is unchanged and clears
+//! on any topology change (enforced in
+//! [`SceneWorld::retain_selection_across_recook`], which
 //! [`SceneWorld::recook_graph`](crate::SceneWorld::recook_graph) runs after
 //! every successful reconciliation).
 //!
-//! Face granularity rides the soup's split vertices: implicit geometry
-//! realizes with one vertex run per face, so tinting a face's three vertices
-//! highlights exactly that face. Meshes with shared vertices would bleed the
-//! tint onto neighbors — accepted for the faces-only MVP scope.
+//! Polygon granularity rides the soup's split vertices via the payload
+//! grouping: tinting every member triangle's corners highlights exactly
+//! that polygon (a quad pair paints six vertices). Meshes with shared
+//! vertices would bleed the tint onto neighbors — accepted for the
+//! faces-only MVP scope.
 
 use bevy_asset::Assets;
 use bevy_ecs::prelude::*;
@@ -63,16 +65,17 @@ pub const SELECTION_BASE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 /// gray PBR shading of the default key-lit scene.
 pub const SELECTION_TINT: [f32; 4] = [1.0, 0.42, 0.08, 1.0];
 
-/// A stored pick plus the target's triangle total at select time — the two
+/// A stored pick plus the target's polygon total at select time — the two
 /// facts the staleness rule compares after each recook.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct StoredPick {
     /// Source operator of the hit mesh.
     node: NodeId,
-    /// Triangle ordinal into the operator's realized mesh.
+    /// Polygon id into the operator's grouping (travels the `Pick.face`
+    /// slot; P3 formalizes the wire meaning).
     face: u32,
-    /// Triangles the target held when the pick was stored.
-    triangles: usize,
+    /// Polygons the target held when the pick was stored.
+    polygons: usize,
 }
 
 /// Ephemeral single selection: the resolved tap, if any.
@@ -127,32 +130,82 @@ pub fn paint_base_mesh(mesh: &mut Mesh) {
     );
 }
 
-/// Write the selection mask plus tint for `face` into `mesh` (CPU side).
+/// Polygons named by a grouping over `triangles` triangles: one past the
+/// highest grouped id (ids run dense from zero per the P1 contract), or
+/// the triangle total when the payload carried no map (identity).
 ///
-/// Returns the mesh's triangle total for the caller to store alongside the
-/// pick. Only the face's own vertices are touched, so the highlight is
-/// exactly face-granular on split-vertex geometry.
+/// A change detector for the staleness rule, not an identity: any topology
+/// edit moves the count, which is all retention compares.
+#[must_use]
+fn polygon_total(triangles: usize, tri_to_poly: &[u32]) -> usize {
+    if tri_to_poly.is_empty() {
+        triangles
+    } else {
+        tri_to_poly.iter().max().map_or(0, |max| *max as usize + 1)
+    }
+}
+
+/// Write the selection mask plus tint for polygon `face` into `mesh` (CPU side).
+///
+/// Every member triangle's corners are tinted, so a quad pick paints the
+/// whole quad (six vertices on split-vertex soup, with no shared-vertex
+/// bleed). An empty grouping reads as identity: `face` names its own
+/// triangle, which keeps hand-built and ungrouped cooks pickable.
+///
+/// Returns the mesh's triangle total for the caller to pair with the
+/// polygon total from [`polygon_total`].
 ///
 /// # Errors
 ///
 /// Returns [`SceneError::UnpickableMesh`] when the mesh carries no `U32`
-/// index run to map the ordinal through, and
-/// [`SceneError::SelectionFaceOutOfRange`] when `face` names no triangle.
-pub fn write_selection_mask(mesh: &mut Mesh, face: u32) -> Result<usize, SceneError> {
+/// index run to map ordinals through, or when the grouping names triangles
+/// past the index run; [`SceneError::SelectionFaceOutOfRange`] when `face`
+/// names no polygon (the error still reports the triangle total — the
+/// variant's wire meaning is P3's to formalize).
+pub fn write_selection_mask(
+    mesh: &mut Mesh,
+    face: u32,
+    tri_to_poly: &[u32],
+) -> Result<usize, SceneError> {
     let triangles = cooked_triangle_count(mesh).ok_or(SceneError::UnpickableMesh)?;
-    if (face as usize) >= triangles {
+    if (face as usize) >= polygon_total(triangles, tri_to_poly) {
         return Err(SceneError::SelectionFaceOutOfRange { face, triangles });
     }
     let Some(Indices::U32(indices)) = mesh.indices() else {
         // Unreachable: counted above from the same index run.
         return Err(SceneError::UnpickableMesh);
     };
-    let base = (face as usize) * 3;
-    let face_vertices = [
-        indices[base] as usize,
-        indices[base + 1] as usize,
-        indices[base + 2] as usize,
-    ];
+    // Member ordinals of the polygon, in index order.
+    let mut members = Vec::new();
+    if tri_to_poly.is_empty() {
+        members.push(face as usize);
+    } else {
+        for (ordinal, poly) in tri_to_poly.iter().enumerate() {
+            if *poly == face {
+                members.push(ordinal);
+            }
+        }
+    }
+    if members.is_empty() {
+        // Gapped grouping: the count check passed but no triangle names
+        // this polygon — storing it would desync resource and pixels, so
+        // reject like any other unnamable face.
+        return Err(SceneError::SelectionFaceOutOfRange { face, triangles });
+    }
+    let mut face_vertices = Vec::with_capacity(members.len() * 3);
+    for ordinal in members {
+        if ordinal >= triangles {
+            // The grouping names more triangles than the index run holds:
+            // corrupt map, loud rather than a torn write.
+            return Err(SceneError::UnpickableMesh);
+        }
+        let base = ordinal * 3;
+        face_vertices.extend_from_slice(&[
+            indices[base] as usize,
+            indices[base + 1] as usize,
+            indices[base + 2] as usize,
+        ]);
+    }
     let vertices = mesh.count_vertices();
     if face_vertices.iter().any(|vertex| *vertex >= vertices) {
         // The handoff bounds-checks indices, so this names a bug upstream,
@@ -200,19 +253,23 @@ impl SceneWorld {
     /// entity belongs to `pick.node`, [`SceneError::UnpickableMesh`] when
     /// the target has no mappable index run, and
     /// [`SceneError::SelectionFaceOutOfRange`] when `pick.face` names no
-    /// triangle of the target.
+    /// polygon of the target.
     pub fn set_selection(&mut self, pick: Pick) -> Result<(), SceneError> {
         let previous = self.app.world().resource::<Selection>().pick;
         let entity = self
             .selection_target_entity(pick.node)
             .ok_or(SceneError::NoCookedSelectionTarget { node: pick.node })?;
-        let triangles = {
+        let polygons = {
             let mut cooked = self
                 .app
                 .world_mut()
                 .get_mut::<CookedMesh>(entity)
                 .ok_or(SceneError::NoCookedSelectionTarget { node: pick.node })?;
-            write_selection_mask(&mut cooked.0, pick.face)?
+            // Reborrow through the guard once so the mesh and its grouping
+            // borrow disjointly (mask paint plus polygon count, one lookup).
+            let cooked: &mut CookedMesh = &mut cooked;
+            let triangles = write_selection_mask(&mut cooked.mesh, pick.face, &cooked.tri_to_poly)?;
+            polygon_total(triangles, &cooked.tri_to_poly)
         };
         self.refresh_gpu_mesh(entity);
         // Single-pick replace across nodes: the new target paints first (so
@@ -225,14 +282,14 @@ impl SceneWorld {
             && let Some(old_entity) = self.selection_target_entity(old.node)
         {
             if let Some(mut cooked) = self.app.world_mut().get_mut::<CookedMesh>(old_entity) {
-                paint_base_mesh(&mut cooked.0);
+                paint_base_mesh(&mut cooked.mesh);
             }
             self.refresh_gpu_mesh(old_entity);
         }
         self.app.world_mut().resource_mut::<Selection>().pick = Some(StoredPick {
             node: pick.node,
             face: pick.face,
-            triangles,
+            polygons,
         });
         Ok(())
     }
@@ -249,7 +306,7 @@ impl SceneWorld {
             let entity = self.selection_target_entity(stored.node);
             if let Some(entity) = entity {
                 if let Some(mut cooked) = self.app.world_mut().get_mut::<CookedMesh>(entity) {
-                    paint_base_mesh(&mut cooked.0);
+                    paint_base_mesh(&mut cooked.mesh);
                 }
                 self.refresh_gpu_mesh(entity);
             }
@@ -265,9 +322,10 @@ impl SceneWorld {
     }
 
     /// Re-apply the stored pick onto freshly cooked entities after a
-    /// recook: same node alive with an unchanged triangle count keeps its
-    /// highlight on the same face; a missing node or changed count clears
-    /// the pick (T2 staleness rule, enforced here rather than trusted).
+    /// recook: same node alive with an unchanged polygon count keeps its
+    /// highlight on the same polygon; a missing node or changed count clears
+    /// the pick (T2 staleness rule at polygon granularity, enforced here
+    /// rather than trusted).
     pub(crate) fn retain_selection_across_recook(&mut self) {
         let Some(stored) = self.app.world().resource::<Selection>().pick else {
             return;
@@ -276,18 +334,20 @@ impl SceneWorld {
             node: stored.node,
             face: stored.face,
         };
-        let unchanged = self.cooked_triangle_total(stored.node) == Some(stored.triangles);
+        let unchanged = self.cooked_polygon_total(stored.node) == Some(stored.polygons);
         let restored = unchanged && self.set_selection(pick).is_ok();
         if !restored {
             self.app.world_mut().resource_mut::<Selection>().pick = None;
         }
     }
 
-    /// Live triangle total for `node`'s cooked mesh, or `None` when the
+    /// Live polygon total for `node`'s cooked mesh, or `None` when the
     /// node has no cooked entity or no mappable index run.
-    fn cooked_triangle_total(&mut self, node: NodeId) -> Option<usize> {
+    fn cooked_polygon_total(&mut self, node: NodeId) -> Option<usize> {
         let entity = self.selection_target_entity(node)?;
-        cooked_triangle_count(self.cooked_mesh(entity)?)
+        let mesh = self.cooked_mesh(entity)?;
+        let triangles = cooked_triangle_count(mesh)?;
+        Some(polygon_total(triangles, self.cooked_polygons(entity)?))
     }
 
     /// Copy the mask plus COLOR binding from the CPU [`CookedMesh`] onto
@@ -298,10 +358,10 @@ impl SceneWorld {
         let world = self.app.world();
         let mask = world
             .get::<CookedMesh>(entity)
-            .and_then(|cooked| cooked.0.attribute(SELECTION_MASK_ATTRIBUTE).cloned());
+            .and_then(|cooked| cooked.mesh.attribute(SELECTION_MASK_ATTRIBUTE).cloned());
         let colors = world
             .get::<CookedMesh>(entity)
-            .and_then(|cooked| cooked.0.attribute(Mesh::ATTRIBUTE_COLOR).cloned());
+            .and_then(|cooked| cooked.mesh.attribute(Mesh::ATTRIBUTE_COLOR).cloned());
         let handle = world.get::<Mesh3d>(entity).map(|mesh| mesh.0.clone());
         // Every paint path runs before its refresh on a live cooked entity,
         // so a missing channel or handle names a broken invariant — loud in
@@ -416,6 +476,24 @@ mod tests {
         {"id":1,"kind":"sphere","name":"Ball","parent":null,
          "position":{"x":0.0,"y":0.0},
          "parameters":{"segments":{"integer":8},"rings":{"integer":2}}}
+    ],"edges":[]}"#;
+
+    /// Quad-band sphere: segments 5, rings 3 — 20 triangles in 15 polygons
+    /// (10 fan singles plus 5 quad pairs), so polygon granularity is
+    /// observable: the south fan owns polygons 0..5, the first quad band
+    /// owns polygon 5 (triangles 5 and 6).
+    const SPHERE_QUAD_JSON: &str = r#"{"version":2,"operators":[
+        {"id":1,"kind":"sphere","name":"Ball","parent":null,
+         "position":{"x":0.0,"y":0.0},
+         "parameters":{"segments":{"integer":5},"rings":{"integer":3}}}
+    ],"edges":[]}"#;
+
+    /// Quad-band sphere with doubled radius (same 15 polygons).
+    const SPHERE_QUAD_RADIUS_JSON: &str = r#"{"version":2,"operators":[
+        {"id":1,"kind":"sphere","name":"Ball","parent":null,
+         "position":{"x":0.0,"y":0.0},
+         "parameters":{"segments":{"integer":5},"rings":{"integer":3},
+                        "radius":{"float":1.0}}}
     ],"edges":[]}"#;
 
     /// Operator graph restored from `json`.
@@ -554,10 +632,11 @@ mod tests {
 
     #[test]
     fn mask_writer_tints_only_hit_face_vertices() {
-        // Arrange + act: face 1 uses vertices 1, 2, 3.
+        // Arrange + act: face 1 uses vertices 1, 2, 3 (explicit identity
+        // grouping: two triangles, two polygons).
         let mut mesh = two_triangle_mesh();
         paint_base_mesh(&mut mesh);
-        let triangles = write_selection_mask(&mut mesh, 1).unwrap();
+        let triangles = write_selection_mask(&mut mesh, 1, &[0, 1]).unwrap();
 
         // Assert: total reported, mask set exactly on the hit face, tint
         // exactly on its vertices, base everywhere else.
@@ -591,7 +670,7 @@ mod tests {
         // Act + assert: the error names the face and the total, and the
         // mesh keeps its base paint (no torn write).
         assert_eq!(
-            write_selection_mask(&mut mesh, 2),
+            write_selection_mask(&mut mesh, 2, &[0, 1]),
             Err(SceneError::SelectionFaceOutOfRange {
                 face: 2,
                 triangles: 2
@@ -604,6 +683,25 @@ mod tests {
             }
             .to_string(),
             "selection face 2 is out of range for 2 triangles"
+        );
+        assert_eq!(mask_of(&mesh), vec![0f32.to_bits(); 4]);
+    }
+
+    #[test]
+    fn gapped_grouping_fails_loudly_without_torn_write() {
+        // Arrange: grouping [0,0,2,2] names no polygon 1 (corrupt map —
+        // no producer emits gaps, so the plant is direct).
+        let mut mesh = two_triangle_mesh();
+        paint_base_mesh(&mut mesh);
+
+        // Act + assert: the missing polygon rejects with the mesh
+        // untouched, never an empty highlight.
+        assert_eq!(
+            write_selection_mask(&mut mesh, 1, &[0, 0, 2, 2]),
+            Err(SceneError::SelectionFaceOutOfRange {
+                face: 1,
+                triangles: 2
+            })
         );
         assert_eq!(mask_of(&mesh), vec![0f32.to_bits(); 4]);
     }
@@ -645,8 +743,8 @@ mod tests {
             })
             .unwrap();
 
-        // Assert: resource mirrors the pick, mask marks exactly face 0's
-        // vertices (indices 0, 1, 2 for the first triangle).
+        // Assert: resource mirrors the pick, mask marks exactly polygon 0's
+        // vertices (triangles 0 and 1 share the face's four corners).
         assert_eq!(
             world.selection(),
             Some(Pick {
@@ -657,8 +755,8 @@ mod tests {
         let (_, entity) = world.cooked_entities()[0];
         let mesh = world.cooked_mesh(entity).unwrap();
         let mask = mask_of(mesh);
-        assert_eq!(mask.iter().filter(|v| **v == 1f32.to_bits()).count(), 3);
-        assert_eq!(&mask[..3], &[1f32.to_bits(); 3]);
+        assert_eq!(mask.iter().filter(|v| **v == 1f32.to_bits()).count(), 4);
+        assert_eq!(&mask[..4], &[1f32.to_bits(); 4]);
         assert_eq!(colors_of(mesh)[0], bits4(SELECTION_TINT));
 
         // Act: clear, then clear again (idempotent no-op).
@@ -691,8 +789,9 @@ mod tests {
             })
             .unwrap();
 
-        // Assert: single-pick semantics — the old face's vertices are base
-        // again, exactly one face worth of vertices is marked.
+        // Assert: single-pick semantics — the old polygon's vertices are
+        // base again, exactly one polygon (two triangles sharing four
+        // corners) worth of mask is marked.
         assert_eq!(
             world.selection(),
             Some(Pick {
@@ -702,7 +801,7 @@ mod tests {
         );
         let (_, entity) = world.cooked_entities()[0];
         let mask = mask_of(world.cooked_mesh(entity).unwrap());
-        assert_eq!(mask.iter().filter(|v| **v == 1f32.to_bits()).count(), 3);
+        assert_eq!(mask.iter().filter(|v| **v == 1f32.to_bits()).count(), 4);
         assert_eq!(&mask[..3], &[0f32.to_bits(); 3]);
     }
 
@@ -720,7 +819,8 @@ mod tests {
         // Act: reconcile against the unchanged graph.
         world.recook_graph(&cube_graph()).unwrap();
 
-        // Assert: the pick survives on the same face with a fresh mask.
+        // Assert: the pick survives on the same polygon with a fresh mask
+        // (polygon 0 covers two triangles sharing four corners).
         assert_eq!(
             world.selection(),
             Some(Pick {
@@ -730,7 +830,7 @@ mod tests {
         );
         let (_, entity) = world.cooked_entities()[0];
         let mask = mask_of(world.cooked_mesh(entity).unwrap());
-        assert_eq!(mask.iter().filter(|v| **v == 1f32.to_bits()).count(), 3);
+        assert_eq!(mask.iter().filter(|v| **v == 1f32.to_bits()).count(), 4);
     }
 
     #[test]
@@ -910,7 +1010,8 @@ mod tests {
             .unwrap();
 
         // Assert: single-pick replace — node 1's mesh is fully base again,
-        // node 2 carries exactly one face of mask, resource reports node 2.
+        // node 2 carries exactly one polygon of mask (two triangles sharing
+        // four corners), resource reports node 2.
         assert_eq!(
             world.selection(),
             Some(Pick {
@@ -932,7 +1033,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         masks.sort_by_key(|(id, _)| id.0);
-        assert_eq!(masks, vec![(NodeId(1), 0), (NodeId(2), 3)]);
+        assert_eq!(masks, vec![(NodeId(1), 0), (NodeId(2), 4)]);
     }
 
     #[test]
@@ -965,8 +1066,9 @@ mod tests {
 
     #[test]
     fn sphere_radius_recook_retains_highlight_on_same_face() {
-        // Arrange: face 0 selected on the minimum-resolution sphere (10
-        // triangles, so the mask is exactly one face of three vertices).
+        // Arrange: polygon 0 selected on the minimum-resolution sphere (10
+        // fan singles, so the mask is exactly one polygon of three
+        // vertices — the 1:1 fan case).
         let mut world = sphere_world();
         world.recook_graph(&sphere_graph(SPHERE_MIN_JSON)).unwrap();
         world
@@ -981,9 +1083,10 @@ mod tests {
             .recook_graph(&sphere_graph(SPHERE_MIN_RADIUS_JSON))
             .unwrap();
 
-        // Assert: the pick survives on the same face ordinal with exactly
-        // one face of mask — the T4 retention half, pinned through a real
-        // geometry change no fixed-topology operator can produce.
+        // Assert: the pick survives on the same polygon ordinal with
+        // exactly one polygon of mask — the T4 retention half, pinned
+        // through a real geometry change no fixed-topology operator can
+        // produce.
         assert_eq!(
             world.selection(),
             Some(Pick {
@@ -1036,6 +1139,140 @@ mod tests {
     }
 
     #[test]
+    fn mask_writer_expands_grouped_polygon_to_all_member_triangles() {
+        // Arrange: two triangles sharing polygon 7 (grouped path, no cook).
+        let mut mesh = two_triangle_mesh();
+        paint_base_mesh(&mut mesh);
+        let triangles = write_selection_mask(&mut mesh, 7, &[7, 7]).unwrap();
+
+        // Assert: both triangles' vertices tinted — the whole polygon
+        // paints, with no bleed possible past the member set.
+        assert_eq!(triangles, 2);
+        assert_eq!(mask_of(&mesh), vec![1f32.to_bits(); 4]);
+        assert_eq!(colors_of(&mesh), vec![bits4(SELECTION_TINT); 4]);
+    }
+
+    #[test]
+    fn sphere_fan_pick_paints_exactly_one_triangle() {
+        // Arrange: minimum-resolution sphere, all pole fans (polygon 0 is
+        // triangle 0, 1:1).
+        let mut world = sphere_world();
+        world.recook_graph(&sphere_graph(SPHERE_MIN_JSON)).unwrap();
+        world
+            .set_selection(Pick {
+                node: NodeId(1),
+                face: 0,
+            })
+            .unwrap();
+
+        // Assert: exactly one triangle of mask — the fan single.
+        let entity = world
+            .cooked_entities()
+            .into_iter()
+            .find_map(|(id, entity)| (id == NodeId(1)).then_some(entity))
+            .expect("sphere still cooked");
+        let painted = mask_of(world.cooked_mesh(entity).unwrap())
+            .into_iter()
+            .filter(|v| *v == 1f32.to_bits())
+            .count();
+        assert_eq!(painted, 3, "a fan pick paints one triangle");
+    }
+
+    #[test]
+    fn sphere_quad_pick_paints_both_triangles() {
+        // Arrange: default sphere (32 segments put the first quad-band
+        // polygon at id 32, covering triangles 32 and 33).
+        let mut world = sphere_world();
+        world
+            .set_selection(Pick {
+                node: NodeId(1),
+                face: 32,
+            })
+            .unwrap();
+
+        // Assert: both member triangles masked — six vertices, and the
+        // neighboring fan single (triangle 31) untouched.
+        let entity = world
+            .cooked_entities()
+            .into_iter()
+            .find_map(|(id, entity)| (id == NodeId(1)).then_some(entity))
+            .expect("sphere still cooked");
+        let mask = mask_of(world.cooked_mesh(entity).unwrap());
+        let painted = mask.iter().filter(|v| **v == 1f32.to_bits()).count();
+        assert_eq!(painted, 6, "a quad pick paints the whole quad");
+    }
+
+    #[test]
+    fn sphere_quad_radius_recook_retains_whole_quad() {
+        // Arrange: polygon 5 selected on the quad-band sphere (first quad
+        // pair: triangles 5 and 6, six vertices masked).
+        let mut world = sphere_world();
+        world.recook_graph(&sphere_graph(SPHERE_QUAD_JSON)).unwrap();
+        world
+            .set_selection(Pick {
+                node: NodeId(1),
+                face: 5,
+            })
+            .unwrap();
+
+        // Act: recook with doubled radius — same node, same 15 polygons.
+        world
+            .recook_graph(&sphere_graph(SPHERE_QUAD_RADIUS_JSON))
+            .unwrap();
+
+        // Assert: the pick survives on the same polygon with the whole
+        // quad still masked — the retain half at polygon granularity.
+        assert_eq!(
+            world.selection(),
+            Some(Pick {
+                node: NodeId(1),
+                face: 5
+            })
+        );
+        let entity = world
+            .cooked_entities()
+            .into_iter()
+            .find_map(|(id, entity)| (id == NodeId(1)).then_some(entity))
+            .expect("sphere still cooked");
+        let painted = mask_of(world.cooked_mesh(entity).unwrap())
+            .into_iter()
+            .filter(|v| *v == 1f32.to_bits())
+            .count();
+        assert_eq!(painted, 6, "the retained quad stays fully masked");
+    }
+
+    #[test]
+    fn sphere_quad_resolution_recook_clears_on_polygon_count_change() {
+        // Arrange: polygon 5 selected on the quad-band sphere (15 polygons).
+        let mut world = sphere_world();
+        world.recook_graph(&sphere_graph(SPHERE_QUAD_JSON)).unwrap();
+        world
+            .set_selection(Pick {
+                node: NodeId(1),
+                face: 5,
+            })
+            .unwrap();
+        assert_eq!(
+            world.selection(),
+            Some(Pick {
+                node: NodeId(1),
+                face: 5
+            })
+        );
+
+        // Act: recook coarser — same node, 15 polygons become 16, a real
+        // polygon-count change (20 triangles become 16 alongside).
+        world
+            .recook_graph(&sphere_graph(SPHERE_COARSE_JSON))
+            .unwrap();
+
+        // Assert: the stale pick clears rather than surviving on a mesh
+        // whose grouping it no longer describes — the clear half at
+        // polygon granularity.
+        assert_eq!(world.selection(), None);
+    }
+
+    #[test]
     fn changed_count_clears_selection_on_recook() {
         // Arrange: face 0 selected, then the stored total is forged stale
         // (same-module plant: the fixed-topology Cube operator cannot
@@ -1050,7 +1287,7 @@ mod tests {
         world.app.world_mut().resource_mut::<Selection>().pick = Some(StoredPick {
             node: NodeId(1),
             face: 0,
-            triangles: 999,
+            polygons: 999,
         });
 
         // Act: reconcile against the unchanged graph.
@@ -1064,7 +1301,9 @@ mod tests {
     #[test]
     fn unrestorable_face_clears_selection_on_recook() {
         // Arrange: stored face forged past the mesh (retention re-resolves
-        // through `set_selection`, which must reject it).
+        // through `set_selection`, which must reject it). The forged
+        // polygon total matches the live cube (6 polygons) so the test
+        // still exercises the rejection path, not the count-mismatch path.
         let mut world = cube_world();
         world
             .set_selection(Pick {
@@ -1075,7 +1314,7 @@ mod tests {
         world.app.world_mut().resource_mut::<Selection>().pick = Some(StoredPick {
             node: NodeId(1),
             face: 40,
-            triangles: 12,
+            polygons: 6,
         });
 
         // Act.

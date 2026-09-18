@@ -52,12 +52,18 @@ pub struct SourceOperator(
 ///
 /// Stored as a component so the mesh is observable ECS state — queryable,
 /// inspectable, and ready for the render slice to bind — rather than a
-/// value buried in a Rust-side map.
+/// value buried in a Rust-side map. The polygon grouping travels with it:
+/// pick, mask, and retention all key on polygons, so the cooked entity
+/// carries the payload's map next to the engine mesh it describes.
 #[derive(Debug, Component)]
-pub struct CookedMesh(
+pub struct CookedMesh {
     /// Engine mesh produced by the realize-plus-handoff path.
-    pub Mesh,
-);
+    pub mesh: Mesh,
+    /// Triangle-to-polygon map from the realized payload, in index order;
+    /// empty when the payload carried none (external `Evaluated` cooks),
+    /// which reads as identity (polygon == triangle).
+    pub tri_to_poly: Vec<u32>,
+}
 
 impl SceneWorld {
     /// Cook every geometry operator in `graph` and hold the resulting
@@ -99,7 +105,7 @@ impl SceneWorld {
             // plus white binding, so the VERTEX_COLORS pipeline is uniform
             // across cooks and clearing is a return to this exact state.
             paint_base_mesh(&mut mesh);
-            meshes.push((id, mesh));
+            meshes.push((id, mesh, evaluated.tri_to_poly));
         }
         // Nothing to upload or spawn: return before touching the asset
         // store, so an empty cook (container-only or empty graph) creates
@@ -113,7 +119,7 @@ impl SceneWorld {
             let world = self.app.world_mut();
             let mut assets = world.resource_mut::<Assets<Mesh>>();
             let mut handles = Vec::with_capacity(meshes.len());
-            for (_, mesh) in &meshes {
+            for (_, mesh, _) in &meshes {
                 handles.push(assets.add(mesh.clone()));
             }
             handles
@@ -124,14 +130,14 @@ impl SceneWorld {
             materials.add(StandardMaterial::default())
         };
         let mut spawned = Vec::with_capacity(meshes.len());
-        for ((id, mesh), handle) in meshes.into_iter().zip(handles) {
+        for ((id, mesh, tri_to_poly), handle) in meshes.into_iter().zip(handles) {
             let entity = self
                 .app
                 .world_mut()
                 .spawn((
                     SceneTag,
                     SourceOperator(id),
-                    CookedMesh(mesh),
+                    CookedMesh { mesh, tri_to_poly },
                     Mesh3d(handle),
                     MeshMaterial3d(material.clone()),
                     Transform::default(),
@@ -227,7 +233,18 @@ impl SceneWorld {
         self.app
             .world()
             .get::<CookedMesh>(entity)
-            .map(|held| &held.0)
+            .map(|held| &held.mesh)
+    }
+
+    /// Borrow the cooked grouping held by `entity`, if it is alive and
+    /// cooked. Empty reads as identity (polygon == triangle) for payloads
+    /// that carried no map.
+    #[must_use]
+    pub fn cooked_polygons(&self, entity: Entity) -> Option<&[u32]> {
+        self.app
+            .world()
+            .get::<CookedMesh>(entity)
+            .map(|held| held.tri_to_poly.as_slice())
     }
 }
 
