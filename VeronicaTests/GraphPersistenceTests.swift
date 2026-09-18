@@ -232,6 +232,15 @@ struct MockGraphEngineTests {
             // The pre-retype v1 schema is rejected loudly, never misread.
             try await engine.restore(GraphSnapshot(version: 1, operators: []))
         }
+        // The previous wire version restores like current (Rust accepts
+        // both); only older schemas are rejected.
+        try await engine.restore(GraphSnapshot(version: 2, operators: [
+            OperatorMirror(
+                id: 7, kind: "container", name: "Hero", parent: nil,
+                position: GraphPosition(x: 120, y: 80)
+            )
+        ]))
+        #expect(await engine.snapshot().operators.first?.name == "Hero")
         try await engine.restore(GraphSnapshot(operators: [
             OperatorMirror(
                 id: 7, kind: "container", name: "Hero", parent: nil,

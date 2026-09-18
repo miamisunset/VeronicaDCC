@@ -16,7 +16,7 @@ nonisolated struct GraphPosition: Codable, Equatable, Sendable {
     var y: Double
 }
 
-/// Typed value of one operator parameter (wire v2, ADR-0002 snapshot JSON v2).
+/// Typed value of one operator parameter (ADR-0002 snapshot JSON).
 ///
 /// Closed set mirroring Rust's `ParamValue`: exactly one lowercase-tagged
 /// payload travels on the wire (`{"text": "…"}`, `{"float": 1.5}`,
@@ -134,7 +134,7 @@ nonisolated enum ParameterValue: Codable, Equatable, Sendable {
     }
 }
 
-/// Read-only mirror of one Rust-owned operator (ADR-0002 snapshot JSON v2).
+/// Read-only mirror of one Rust-owned operator (ADR-0002 snapshot JSON).
 ///
 /// Swift never constructs graph content; it mirrors what `vrn_graph_snapshot`
 /// reports and sends mutation intents back across the FFI boundary.
@@ -187,7 +187,7 @@ nonisolated struct OperatorMirror: Codable, Equatable, Sendable, Identifiable {
     }
 }
 
-/// Whole-graph mirror decoded from `vrn_graph_snapshot` JSON (schema v2).
+/// Whole-graph mirror decoded from `vrn_graph_snapshot` JSON (schema v3).
 ///
 /// One format serves persistence and (future) undo: `GraphSnapshot` is what
 /// autosave writes and what launch-time `restore` reads back.
@@ -195,8 +195,15 @@ nonisolated struct OperatorMirror: Codable, Equatable, Sendable, Identifiable {
 /// Explicitly `nonisolated`: snapshots cross from background engine effects
 /// to the main actor (see `GraphPosition`).
 nonisolated struct GraphSnapshot: Codable, Equatable, Sendable {
-    /// Snapshot schema version. Always `2`; restore rejects anything else.
-    static let currentVersion = 2
+    /// Snapshot schema version. Always `3`, matching Rust's
+    /// `GRAPH_SNAPSHOT_VERSION`; Rust restores 2+3, and a v2 restore
+    /// clears the ephemeral live pick.
+    static let currentVersion = 3
+
+    /// Previous wire version, still accepted on restore (mirrors Rust's
+    /// `GRAPH_SNAPSHOT_PREVIOUS_VERSION`); a previous-version restore
+    /// clears the ephemeral live pick.
+    static let previousWireVersion = 2
 
     /// Schema version of this snapshot.
     var version: Int

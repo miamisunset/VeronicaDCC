@@ -6,7 +6,7 @@ import Foundation
 /// `GraphLaunchOptions`). Validation mirrors ADR-0002 so the double
 /// cross-checks the contract: strict `"container"`/`"cube"`/`"sphere"` kinds, known-id
 /// moves/renames/deletes, non-blank names, existing parents, Rust-issued
-/// ids from 1, `version == 2` restores, cascading deletes.
+/// ids from 1, current/previous-wire restores, cascading deletes.
 ///
 /// Retained as the hermetic UI-test double (mock mode is the default test
 /// path) alongside the real-engine mode: both run the same flow, and the
@@ -130,11 +130,15 @@ actor MockGraphEngine {
         GraphSnapshot(operators: operators.values.sorted { $0.id < $1.id })
     }
 
-    /// Replaces the whole DAG. Rejects `version != 2`, zero ids, blank
-    /// names, blank parameter keys, and dangling parent/edge references —
-    /// mirroring Rust so the double never accepts what the engine rejects.
+    /// Replaces the whole DAG. Rejects unsupported `version` (only the
+    /// current and previous wire versions restore, mirroring Rust), zero
+    /// ids, blank names, blank parameter keys, and dangling parent/edge
+    /// references — mirroring Rust so the double never accepts what the
+    /// engine rejects.
     func restore(_ snapshot: GraphSnapshot) throws(GraphEngineError) {
-        guard snapshot.version == GraphSnapshot.currentVersion else {
+        let supported = snapshot.version == GraphSnapshot.currentVersion
+            || snapshot.version == GraphSnapshot.previousWireVersion
+        guard supported else {
             throw .ffiFailed(operation: "vrn_graph_restore", code: 2)
         }
         let ids = Set(snapshot.operators.map(\.id))

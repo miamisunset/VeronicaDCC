@@ -39,12 +39,15 @@ final class ViewportNavView: MTKView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        if window != nil, keyMonitor == nil {
+        // `NSView.window` is `unowned(unsafe)`: reading it needs an explicit
+        // marker. Sound here — MainActor-isolated, nil-checked, app lifetime.
+        let hostWindow = unsafe window
+        if hostWindow != nil, keyMonitor == nil {
             keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
                 guard let self, self.consumeKeyEvent(event) else { return event }
                 return nil
             }
-        } else if window == nil {
+        } else if hostWindow == nil {
             detachKeyMonitor()
         }
     }
@@ -68,7 +71,7 @@ final class ViewportNavView: MTKView {
     override func mouseDown(with event: NSEvent) {
         // Clicking a bare NSView does not claim focus on its own; without
         // this the `F` shortcut would need a second Tab/click.
-        _ = window?.makeFirstResponder(self)
+        _ = unsafe window?.makeFirstResponder(self)
         beginDrag(event, button: .left)
     }
 
@@ -140,7 +143,7 @@ final class ViewportNavView: MTKView {
     /// in a rename field must never reframe the viewport.
     func consumeKeyEvent(_ event: NSEvent) -> Bool {
         guard event.type == .keyDown else { return false }
-        if let host = window {
+        if let host = unsafe window {
             if let target = event.window, target != host {
                 return false
             }
