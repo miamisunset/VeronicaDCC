@@ -363,6 +363,25 @@ fn face_in_range(face: u32, triangle_total: usize) -> bool {
     (face as usize) < triangle_total
 }
 
+/// Map a resolved triangle ordinal to its polygon id through the payload
+/// grouping. An empty grouping reads as identity (the payload carried no
+/// map, so ungrouped cooks keep their triangle identity end to end).
+///
+/// # Errors
+///
+/// Returns [`SceneError::UnpickableMesh`] when a non-empty grouping has no
+/// entry for the ordinal (truncated map — corrupt cook, loud rather than
+/// a guessed identity).
+fn polygon_for_ordinal(tri_to_poly: &[u32], ordinal: u32) -> Result<u32, SceneError> {
+    if tri_to_poly.is_empty() {
+        return Ok(ordinal);
+    }
+    tri_to_poly
+        .get(ordinal as usize)
+        .copied()
+        .ok_or(SceneError::UnpickableMesh)
+}
+
 /// One cooked mesh eligible for the entity pass: everything the transient
 /// overlays need, snapshotted up front so the pass never re-queries live
 /// entities mid-flight.
@@ -720,14 +739,9 @@ impl SceneWorld {
         if !face_in_range(face, face_total) {
             return Ok(None);
         }
-        // Triangle ordinal to polygon id through the payload grouping. An
-        // empty map reads as identity (payload carried no grouping), so
-        // ungrouped cooks keep their triangle identity end to end.
-        let face = pickable
-            .tri_to_poly
-            .get(face as usize)
-            .copied()
-            .unwrap_or(face);
+        // Triangle ordinal to polygon id through the payload grouping
+        // (identity for ungrouped cooks, loud on a corrupt map).
+        let face = polygon_for_ordinal(&pickable.tri_to_poly, face)?;
         Ok(Some(Pick {
             node: pickable.node,
             face,
@@ -980,6 +994,21 @@ mod tests {
         assert!(!face_in_range(12, 12));
         assert!(!face_in_range(u32::MAX, 12));
         assert!(!face_in_range(0, 0));
+    }
+
+    #[test]
+    fn ordinal_to_polygon_maps_grouped_shares_identity_ungrouped() {
+        // Grouped: quad pair shares one id; fan singles map 1:1.
+        assert_eq!(polygon_for_ordinal(&[0, 0, 1, 2], 0), Ok(0));
+        assert_eq!(polygon_for_ordinal(&[0, 0, 1, 2], 1), Ok(0));
+        assert_eq!(polygon_for_ordinal(&[0, 0, 1, 2], 3), Ok(2));
+        // Empty grouping reads as identity (ungrouped cooks).
+        assert_eq!(polygon_for_ordinal(&[], 5), Ok(5));
+        // Truncated grouping fails loud, never a guessed identity.
+        assert_eq!(
+            polygon_for_ordinal(&[0, 0], 7),
+            Err(SceneError::UnpickableMesh)
+        );
     }
 
     #[test]

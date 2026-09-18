@@ -186,6 +186,12 @@ pub fn write_selection_mask(
             }
         }
     }
+    if members.is_empty() {
+        // Gapped grouping: the count check passed but no triangle names
+        // this polygon — storing it would desync resource and pixels, so
+        // reject like any other unnamable face.
+        return Err(SceneError::SelectionFaceOutOfRange { face, triangles });
+    }
     let mut face_vertices = Vec::with_capacity(members.len() * 3);
     for ordinal in members {
         if ordinal >= triangles {
@@ -677,6 +683,25 @@ mod tests {
             }
             .to_string(),
             "selection face 2 is out of range for 2 triangles"
+        );
+        assert_eq!(mask_of(&mesh), vec![0f32.to_bits(); 4]);
+    }
+
+    #[test]
+    fn gapped_grouping_fails_loudly_without_torn_write() {
+        // Arrange: grouping [0,0,2,2] names no polygon 1 (corrupt map —
+        // no producer emits gaps, so the plant is direct).
+        let mut mesh = two_triangle_mesh();
+        paint_base_mesh(&mut mesh);
+
+        // Act + assert: the missing polygon rejects with the mesh
+        // untouched, never an empty highlight.
+        assert_eq!(
+            write_selection_mask(&mut mesh, 1, &[0, 0, 2, 2]),
+            Err(SceneError::SelectionFaceOutOfRange {
+                face: 1,
+                triangles: 2
+            })
         );
         assert_eq!(mask_of(&mesh), vec![0f32.to_bits(); 4]);
     }
