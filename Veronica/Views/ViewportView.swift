@@ -353,12 +353,12 @@ struct ViewportMetalHost: NSViewRepresentable {
         /// takes it unretained, so no retain/release crosses the boundary.
         func adopt(frame: VideoFrame?) {
             guard let frame, frame.surfaceAddress != cachedAddress else { return }
-            guard let raw = UnsafeRawPointer(bitPattern: UInt(frame.surfaceAddress)),
+            guard let raw = unsafe UnsafeRawPointer(bitPattern: UInt(frame.surfaceAddress)),
                   let device
             else {
                 return
             }
-            let surface = Unmanaged<IOSurface>.fromOpaque(raw).takeUnretainedValue()
+            let surface = unsafe Unmanaged<IOSurface>.fromOpaque(raw).takeUnretainedValue()
             let descriptor = MTLTextureDescriptor.texture2DDescriptor(
                 pixelFormat: .bgra8Unorm,
                 width: Int(frame.width),
@@ -424,7 +424,10 @@ struct ViewportMetalHost: NSViewRepresentable {
         // the FFI call (a GPU target rebuild) fires only on real resizes.
         // `setViewportSize` hops to the engine queue itself, so this stays
         // MainActor-cheap and never blocks the frame.
-        let scale = nsView.window?.backingScaleFactor ?? 1
+        // `NSView.window` is `unowned(unsafe)` (see ViewportNavView): the
+        // marker is sound — MainActor-isolated read of the live layout.
+        let windowScale = unsafe nsView.window?.backingScaleFactor
+        let scale = windowScale ?? 1
         if let intent = viewportSizeIntent(
             bounds: nsView.bounds.size,
             scale: scale,

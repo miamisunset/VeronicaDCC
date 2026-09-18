@@ -89,14 +89,14 @@ nonisolated enum EngineBridge {
     private static func runTick() async -> SceneStats {
         await withCheckedContinuation { continuation in
             engineQueue.async {
-                guard let context = graphContext.pointer else {
+                guard let context = unsafe graphContext.pointer else {
                     continuation.resume(
                         returning: SceneStats(tickCount: 0, entityCount: 0, frame: nil)
                     )
                     return
                 }
                 let tickStartNanos = DispatchTime.now().uptimeNanoseconds
-                guard vrnTick(context) == VrnResultCode.ok.rawValue else {
+                guard unsafe vrnTick(context) == VrnResultCode.ok.rawValue else {
                     continuation.resume(
                         returning: SceneStats(tickCount: 0, entityCount: 0, frame: nil)
                     )
@@ -111,13 +111,13 @@ nonisolated enum EngineBridge {
                 var surface: UnsafeMutableRawPointer?
                 var width: UInt32 = 0
                 var height: UInt32 = 0
-                _ = vrnTickCount(context, &tick)
-                _ = vrnEntityCount(context, &entities)
-                let frameCode = vrnFrameSurface(context, &surface, &width, &height)
+                _ = unsafe vrnTickCount(context, &tick)
+                _ = unsafe vrnEntityCount(context, &entities)
+                let frameCode = unsafe vrnFrameSurface(context, &surface, &width, &height)
                 let frame: VideoFrame?
-                if frameCode == VrnResultCode.ok.rawValue, let surface {
+                if frameCode == VrnResultCode.ok.rawValue, let rawSurface = unsafe surface {
                     frame = VideoFrame(
-                        surfaceAddress: UInt64(UInt(bitPattern: surface)),
+                        surfaceAddress: UInt64(UInt(bitPattern: rawSurface)),
                         width: UInt64(width),
                         height: UInt64(height)
                     )
@@ -127,7 +127,7 @@ nonisolated enum EngineBridge {
                 var update: UInt64 = 0
                 var readback: UInt64 = 0
                 var upload: UInt64 = 0
-                _ = vrnTickTimings(context, &update, &readback, &upload)
+                _ = unsafe vrnTickTimings(context, &update, &readback, &upload)
                 continuation.resume(
                     returning: SceneStats(
                         tickCount: tick,
@@ -150,8 +150,8 @@ nonisolated enum EngineBridge {
     /// orders intents against ticks, so no extra synchronization is needed.
     static func setViewportSize(width: UInt32, height: UInt32) {
         engineQueue.async {
-            guard let context = graphContext.pointer else { return }
-            _ = vrnViewportSetSize(context, width, height)
+            guard let context = unsafe graphContext.pointer else { return }
+                _ = unsafe vrnViewportSetSize(context, width, height)
         }
     }
 
@@ -162,8 +162,8 @@ nonisolated enum EngineBridge {
     /// `veronica-scene`.
     static func viewportOrbit(dxPixels: Double, dyPixels: Double) {
         engineQueue.async {
-            guard let context = graphContext.pointer else { return }
-            _ = vrnViewportOrbit(context, Float(dxPixels), Float(dyPixels))
+            guard let context = unsafe graphContext.pointer else { return }
+                _ = unsafe vrnViewportOrbit(context, Float(dxPixels), Float(dyPixels))
         }
     }
 
@@ -173,8 +173,8 @@ nonisolated enum EngineBridge {
     /// the gesture (MMB-drag, Command+LMB) to pixels.
     static func viewportPan(dxPixels: Double, dyPixels: Double) {
         engineQueue.async {
-            guard let context = graphContext.pointer else { return }
-            _ = vrnViewportPan(context, Float(dxPixels), Float(dyPixels))
+            guard let context = unsafe graphContext.pointer else { return }
+                _ = unsafe vrnViewportPan(context, Float(dxPixels), Float(dyPixels))
         }
     }
 
@@ -185,8 +185,8 @@ nonisolated enum EngineBridge {
     /// scaling, clamping, and the pivot pull live in `veronica-scene`.
     static func viewportDolly(logFactor: Double, cursorXNDC: Double, cursorYNDC: Double) {
         engineQueue.async {
-            guard let context = graphContext.pointer else { return }
-            _ = vrnViewportDolly(context, Float(logFactor), Float(cursorXNDC), Float(cursorYNDC))
+            guard let context = unsafe graphContext.pointer else { return }
+                _ = unsafe vrnViewportDolly(context, Float(logFactor), Float(cursorXNDC), Float(cursorYNDC))
         }
     }
 
@@ -196,8 +196,8 @@ nonisolated enum EngineBridge {
     /// animated; preserves view direction; no meshed entities is a no-op.
     static func viewportFrameAll() {
         engineQueue.async {
-            guard let context = graphContext.pointer else { return }
-            _ = vrnViewportFrameAll(context)
+            guard let context = unsafe graphContext.pointer else { return }
+                _ = unsafe vrnViewportFrameAll(context)
         }
     }
 
@@ -218,7 +218,7 @@ nonisolated enum EngineBridge {
     ) async throws(GraphEngineError) -> ViewportPick? {
         try await withCheckedThrowingContinuation { (continuation: PickContinuation) in
             engineQueue.async {
-                guard let context = requireGraphContext(
+                guard let context = unsafe requireGraphContext(
                     continuation,
                     operation: "vrn_viewport_pick"
                 ) else {
@@ -226,7 +226,7 @@ nonisolated enum EngineBridge {
                 }
                 var outNode: UInt64 = 0
                 var outPolygon: UInt32 = 0
-                let code = vrnViewportPick(
+                let code = unsafe vrnViewportPick(
                     context,
                     Float(cursor.x),
                     Float(cursor.y),
@@ -408,13 +408,13 @@ nonisolated enum EngineBridge {
     /// The pointer itself is immutable after creation and Rust serializes
     /// every context access behind its internal `Mutex`, so sharing it
     /// across Swift concurrency domains is sound.
-    private struct SharedGraphContext: @unchecked Sendable {
+    @unsafe private struct SharedGraphContext: @unchecked Sendable {
         /// Opaque `VrnContext` pointer, or `nil` on allocation failure.
         let pointer: UnsafeMutableRawPointer?
     }
 
     /// Shared Rust context, created once on first graph call.
-    private static let graphContext = SharedGraphContext(pointer: vrnContextCreate())
+    private static let graphContext = unsafe SharedGraphContext(pointer: vrnContextCreate())
 
     /// Returns the shared Rust context, resuming `continuation` with
     /// `.engineUnavailable` (and returning `nil`) when allocation failed.
@@ -425,11 +425,11 @@ nonisolated enum EngineBridge {
         _ continuation: GraphContinuation<T>,
         operation: String
     ) -> UnsafeMutableRawPointer? {
-        guard let context = graphContext.pointer else {
+        guard let context = unsafe graphContext.pointer else {
             continuation.resume(throwing: .engineUnavailable(operation: operation))
             return nil
         }
-        return context
+        return unsafe context
     }
 
     /// Creates an operator of `kind` under `parent` (`nil` maps to the `0`
@@ -444,7 +444,7 @@ nonisolated enum EngineBridge {
     ) async throws(GraphEngineError) -> UInt64 {
         try await withCheckedThrowingContinuation { (continuation: GraphContinuation<UInt64>) in
             engineQueue.async {
-                guard let context = requireGraphContext(
+                guard let context = unsafe requireGraphContext(
                     continuation,
                     operation: "vrn_graph_create_operator"
                 ) else {
@@ -452,7 +452,7 @@ nonisolated enum EngineBridge {
                 }
                 let result: Result<UInt64, GraphEngineError> = kind.withCString { kindPtr in
                     var outId: UInt64 = 0
-                    let code = vrnGraphCreateOperator(
+                    let code = unsafe vrnGraphCreateOperator(
                         context,
                         kindPtr,
                         parent ?? 0,
@@ -479,13 +479,13 @@ nonisolated enum EngineBridge {
     ) async throws(GraphEngineError) {
         try await withCheckedThrowingContinuation { (continuation: GraphContinuation<Void>) in
             engineQueue.async {
-                guard let context = requireGraphContext(
+                guard let context = unsafe requireGraphContext(
                     continuation,
                     operation: "vrn_graph_move_operator"
                 ) else {
                     return
                 }
-                let code = vrnGraphMoveOperator(context, id, position.x, position.y)
+                let code = unsafe vrnGraphMoveOperator(context, id, position.x, position.y)
                 guard code == VrnResultCode.ok.rawValue else {
                     continuation.resume(
                         throwing: .ffiFailed(operation: "vrn_graph_move_operator", code: code)
@@ -503,14 +503,14 @@ nonisolated enum EngineBridge {
     nonisolated static func renameOperator(id: UInt64, name: String) async throws(GraphEngineError) {
         try await withCheckedThrowingContinuation { (continuation: GraphContinuation<Void>) in
             engineQueue.async {
-                guard let context = requireGraphContext(
+                guard let context = unsafe requireGraphContext(
                     continuation,
                     operation: "vrn_graph_rename_operator"
                 ) else {
                     return
                 }
                 let result: Result<Void, GraphEngineError> = name.withCString { namePtr in
-                    let code = vrnGraphRenameOperator(context, id, namePtr)
+                    let code = unsafe vrnGraphRenameOperator(context, id, namePtr)
                     guard code == VrnResultCode.ok.rawValue else {
                         return .failure(
                             .ffiFailed(operation: "vrn_graph_rename_operator", code: code)
@@ -529,13 +529,13 @@ nonisolated enum EngineBridge {
     nonisolated static func deleteOperator(id: UInt64) async throws(GraphEngineError) {
         try await withCheckedThrowingContinuation { (continuation: GraphContinuation<Void>) in
             engineQueue.async {
-                guard let context = requireGraphContext(
+                guard let context = unsafe requireGraphContext(
                     continuation,
                     operation: "vrn_graph_delete_operator"
                 ) else {
                     return
                 }
-                let code = vrnGraphDeleteOperator(context, id)
+                let code = unsafe vrnGraphDeleteOperator(context, id)
                 guard code == VrnResultCode.ok.rawValue else {
                     continuation.resume(
                         throwing: .ffiFailed(operation: "vrn_graph_delete_operator", code: code)
@@ -558,7 +558,7 @@ nonisolated enum EngineBridge {
     ) async throws(GraphEngineError) {
         try await withCheckedThrowingContinuation { (continuation: GraphContinuation<Void>) in
             engineQueue.async {
-                guard let context = requireGraphContext(
+                guard let context = unsafe requireGraphContext(
                     continuation,
                     operation: "setParameter"
                 ) else {
@@ -566,7 +566,7 @@ nonisolated enum EngineBridge {
                 }
                 let result: Result<Void, GraphEngineError> = key.withCString { keyPtr in
                     value.withCString { valuePtr in
-                        let code = vrnGraphSetParameter(context, id, keyPtr, valuePtr)
+                        let code = unsafe vrnGraphSetParameter(context, id, keyPtr, valuePtr)
                         guard code == VrnResultCode.ok.rawValue else {
                             return .failure(
                                 .ffiFailed(operation: "setParameter", code: code)
@@ -603,7 +603,7 @@ nonisolated enum EngineBridge {
         }
         try await withCheckedThrowingContinuation { (continuation: GraphContinuation<Void>) in
             engineQueue.async {
-                guard let context = requireGraphContext(
+                guard let context = unsafe requireGraphContext(
                     continuation,
                     operation: "setParameterTyped"
                 ) else {
@@ -611,7 +611,7 @@ nonisolated enum EngineBridge {
                 }
                 let result: Result<Void, GraphEngineError> = key.withCString { keyPtr in
                     valueJSON.withCString { valuePtr in
-                        let code = vrnGraphSetParameterTyped(context, id, keyPtr, valuePtr)
+                        let code = unsafe vrnGraphSetParameterTyped(context, id, keyPtr, valuePtr)
                         guard code == VrnResultCode.ok.rawValue else {
                             return .failure(
                                 .ffiFailed(operation: "setParameterTyped", code: code)
@@ -633,21 +633,21 @@ nonisolated enum EngineBridge {
     nonisolated static func requestGraphSnapshot() async throws(GraphEngineError) -> GraphSnapshot {
         let json = try await withCheckedThrowingContinuation { (continuation: GraphContinuation<String>) in
             engineQueue.async {
-                guard let context = requireGraphContext(
+                guard let context = unsafe requireGraphContext(
                     continuation,
                     operation: "vrn_graph_snapshot"
                 ) else {
                     return
                 }
                 var out: UnsafeMutablePointer<CChar>?
-                let code = vrnGraphSnapshot(context, &out)
+                let code = unsafe vrnGraphSnapshot(context, &out)
                 guard code == VrnResultCode.ok.rawValue else {
                     continuation.resume(
                         throwing: .ffiFailed(operation: "vrn_graph_snapshot", code: code)
                     )
                     return
                 }
-                guard let raw = out else {
+                guard let raw = unsafe out else {
                     continuation.resume(
                         throwing: .ffiFailed(
                             operation: "vrn_graph_snapshot",
@@ -656,8 +656,8 @@ nonisolated enum EngineBridge {
                     )
                     return
                 }
-                defer { vrnStringFree(raw) }
-                guard let string = String(validatingCString: raw) else {
+                defer { unsafe vrnStringFree(raw) }
+                guard let string = unsafe String(validatingCString: raw) else {
                     continuation.resume(
                         throwing: .snapshotDecodingFailed("snapshot is not valid UTF-8")
                     )
@@ -689,14 +689,14 @@ nonisolated enum EngineBridge {
         }
         try await withCheckedThrowingContinuation { (continuation: GraphContinuation<Void>) in
             engineQueue.async {
-                guard let context = requireGraphContext(
+                guard let context = unsafe requireGraphContext(
                     continuation,
                     operation: "vrn_graph_restore"
                 ) else {
                     return
                 }
                 let result: Result<Void, GraphEngineError> = json.withCString { jsonPtr in
-                    let code = vrnGraphRestore(context, jsonPtr)
+                    let code = unsafe vrnGraphRestore(context, jsonPtr)
                     guard code == VrnResultCode.ok.rawValue else {
                         return .failure(
                             .ffiFailed(operation: "vrn_graph_restore", code: code)
