@@ -663,6 +663,14 @@ fn pick_error_code(error: &SceneError) -> VrnResult {
 /// selected". Runs its own render work internally — call off the Swift
 /// `MainActor` like every tick.
 ///
+/// The `out_face` slot names a polygon id, not a triangle ordinal (#79):
+/// the payload grouping maps the resolved triangle to its polygon before
+/// the pick is stored and reported, so tapping either member triangle of a
+/// quad reports the one shared id. [`SceneError::SelectionFaceOutOfRange`]
+/// keeps its name deliberately — it guards the polygon range now, and
+/// renaming would churn the pinned error-code contract below for no wire
+/// change.
+///
 /// [`SceneError`] mapping follows [`pick_error_code`]: stale-target and
 /// pre-tick states reject, GPU faults report internal.
 ///
@@ -1067,9 +1075,17 @@ pub unsafe extern "C" fn vrn_graph_snapshot(
 
 /// Replace the whole graph from versioned JSON (launch-load path).
 ///
-/// Rejects `version != 1` and malformed payloads with
-/// [`VrnResult::InvalidArgument`]; the pre-image is pushed only when restore
-/// succeeds, so a bad file neither destroys state nor pollutes history.
+/// Accepts the current wire version and the previous one; anything else —
+/// and malformed payloads — rejects with [`VrnResult::InvalidArgument`].
+/// Version acceptance lives in the graph core (single source of truth);
+/// the pre-image is pushed only when restore succeeds, so a bad file
+/// neither destroys state nor pollutes history.
+///
+/// Restoring a previous-version snapshot applies the polygon-epoch
+/// migration: the live selection is cleared, because a stored pick from
+/// before the polygon wire would otherwise survive as a misread polygon
+/// id. Selection is ephemeral per the glossary — geometry restores
+/// normally, nothing stored needs preserving.
 ///
 /// # Safety
 ///
@@ -1092,10 +1108,10 @@ pub unsafe extern "C" fn vrn_graph_restore(
     let Ok(snapshot): Result<GraphSnapshot, _> = serde_json::from_str(text) else {
         return VrnResult::InvalidArgument;
     };
-    // Reject the known-bad version before pushing any history.
-    if snapshot.version != GRAPH_SNAPSHOT_VERSION {
-        return VrnResult::InvalidArgument;
-    }
+    // The graph core owns version acceptance (current + previous wire), so
+    // a known-bad version still rejects before any history is pushed. The
+    // version is captured for the polygon-epoch migration below.
+    let restored_version = snapshot.version;
     // SAFETY: non-null pointer from `vrn_context_create`, still alive.
     let mutex = unsafe { &(*context).0 };
     let Ok(mut ctx) = mutex.lock() else {
@@ -1105,6 +1121,11 @@ pub unsafe extern "C" fn vrn_graph_restore(
     match ctx.operator_graph.restore(snapshot) {
         Ok(()) => {
             ctx.graph_history.push(before);
+            if restored_version < GRAPH_SNAPSHOT_VERSION {
+                // Previous-wire restore: drop the live pick — it predates
+                // polygon identities and must never resurface as one.
+                ctx.scene.clear_selection();
+            }
             VrnResult::Ok
         }
         Err(_) => VrnResult::InvalidArgument,
@@ -1142,6 +1163,29 @@ fn morph_weights_ffi_layout(weights: &MorphWeights) -> usize {
     weights.weights.len()
 }
 
+/// Create a default operator of `kind` at the root, returning its fresh id.
+///
+/// Test-only helper: several tick/frame tests need real cooked geometry now
+/// that the scene ships without built-in content.
+///
+/// # Panics
+///
+/// Panics when the create call fails; that means the FFI graph path is
+/// broken, not the test input.
+#[cfg(test)]
+fn test_create_operator(context: *mut VrnContextHandle, kind: &str) -> u64 {
+    let kind = CString::new(kind).unwrap();
+    let mut id = 0u64;
+    // SAFETY: live context, single-threaded test; string outlives the call.
+    unsafe {
+        assert_eq!(
+            vrn_graph_create_operator(context, kind.as_ptr().cast_mut(), 0, 0.0, 0.0, &raw mut id),
+            VrnResult::Ok
+        );
+    }
+    id
+}
+
 /// Create a default cube operator at the root, returning its fresh id.
 ///
 /// Test-only helper: several tick/frame tests need real cooked geometry now
@@ -1153,16 +1197,21 @@ fn morph_weights_ffi_layout(weights: &MorphWeights) -> usize {
 /// broken, not the test input.
 #[cfg(test)]
 fn test_create_cube(context: *mut VrnContextHandle) -> u64 {
-    let kind = CString::new("cube").unwrap();
-    let mut id = 0u64;
-    // SAFETY: live context, single-threaded test; string outlives the call.
-    unsafe {
-        assert_eq!(
-            vrn_graph_create_operator(context, kind.as_ptr().cast_mut(), 0, 0.0, 0.0, &raw mut id),
-            VrnResult::Ok
-        );
-    }
-    id
+    test_create_operator(context, "cube")
+}
+
+/// Create a default sphere operator at the root, returning its fresh id.
+///
+/// Test-only helper: the polygon-epoch FFI tests need grouped (quad-band)
+/// cooked geometry.
+///
+/// # Panics
+///
+/// Panics when the create call fails; that means the FFI graph path is
+/// broken, not the test input.
+#[cfg(test)]
+fn test_create_sphere(context: *mut VrnContextHandle) -> u64 {
+    test_create_operator(context, "sphere")
 }
 
 #[cfg(test)]
@@ -1490,10 +1539,12 @@ mod viewport_tests {
 #[cfg(test)]
 mod selection_tests {
     use super::*;
+    use bevy_mesh::VertexAttributeValues;
+    use std::collections::HashSet;
     use std::ptr;
     use veronica_core::NodeId;
     use veronica_geometry::CookError;
-    use veronica_scene::Pick;
+    use veronica_scene::{Pick, SELECTION_MASK_ATTRIBUTE};
 
     /// Live selection identity through the context lock.
     ///
@@ -1708,6 +1759,236 @@ mod selection_tests {
                 expected,
                 "wrong code for {error:?}"
             );
+        }
+    }
+
+    /// Recook through the context lock: the recook is the seam under test
+    /// while frame publish itches for a GPU (same split as
+    /// `out_of_range_miss_clears_a_live_selection`).
+    ///
+    /// # Panics
+    ///
+    /// Panics when the lock is poisoned or the cook fails; both indicate a
+    /// broken test setup, not fallible production input.
+    fn recook(context: *mut VrnContextHandle) {
+        // SAFETY: live context, single-threaded test; lock is unpoisoned.
+        unsafe {
+            let mut ctx = (*context).0.lock().unwrap();
+            let VrnContext {
+                scene,
+                operator_graph,
+                ..
+            } = &mut *ctx;
+            scene.recook_graph(operator_graph).unwrap();
+        }
+    }
+
+    /// Snapshot the context and return the JSON as an owned string.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the snapshot call fails or the payload is not UTF-8;
+    /// both indicate a broken FFI boundary, not a test input problem.
+    fn snapshot_json(context: *mut VrnContextHandle) -> String {
+        let mut raw: *mut c_char = ptr::null_mut();
+        // SAFETY: live context, single-threaded test; slot is live.
+        unsafe {
+            assert_eq!(vrn_graph_snapshot(context, &raw mut raw), VrnResult::Ok);
+            assert!(!raw.is_null());
+            let text = CStr::from_ptr(raw).to_str().unwrap().to_owned();
+            vrn_string_free(raw);
+            text
+        }
+    }
+
+    /// Live operator count through the context lock.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the lock is poisoned; that indicates a broken test
+    /// setup, not fallible production input.
+    fn operator_count(context: *mut VrnContextHandle) -> usize {
+        // SAFETY: live context, single-threaded test; lock is unpoisoned.
+        unsafe { (*context).0.lock().unwrap().operator_graph.len() }
+    }
+
+    /// First grouped polygon on a cooked sphere: the first polygon id that
+    /// repeats in index order (the south-fan ids are all singletons, so the
+    /// first repeat is the first quad-band pair). Read off the live payload
+    /// grouping — the layout itself is P1's contract, this test only needs
+    /// *a* grouped polygon.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the node has no cooked entity or grouping, or when no
+    /// polygon repeats; all indicate a broken cook, not a test input
+    /// problem.
+    fn first_quad_polygon(context: *mut VrnContextHandle, node: u64) -> u32 {
+        // SAFETY: live context, single-threaded test; lock is unpoisoned.
+        unsafe {
+            let mut ctx = (*context).0.lock().unwrap();
+            let entity = ctx
+                .scene
+                .cooked_entities()
+                .into_iter()
+                .find(|(id, _)| *id == NodeId(node))
+                .unwrap()
+                .1;
+            let grouping = ctx.scene.cooked_polygons(entity).unwrap().to_vec();
+            let mut seen = HashSet::new();
+            *grouping.iter().find(|id| !seen.insert(*id)).unwrap()
+        }
+    }
+
+    /// Count of fully-tinted mask vertices on `node`'s cooked mesh. Mask
+    /// values are copied literals, never computed, so bits are the honest
+    /// compare (same discipline as the scene mask tests).
+    ///
+    /// # Panics
+    ///
+    /// Panics when the node has no cooked entity or the mask channel is
+    /// absent; both indicate a broken cook, not a test input problem.
+    fn tinted_mask_vertices(context: *mut VrnContextHandle, node: u64) -> usize {
+        // SAFETY: live context, single-threaded test; lock is unpoisoned.
+        unsafe {
+            let mut ctx = (*context).0.lock().unwrap();
+            let entity = ctx
+                .scene
+                .cooked_entities()
+                .into_iter()
+                .find(|(id, _)| *id == NodeId(node))
+                .unwrap()
+                .1;
+            match ctx
+                .scene
+                .cooked_mesh(entity)
+                .unwrap()
+                .attribute(SELECTION_MASK_ATTRIBUTE)
+            {
+                Some(VertexAttributeValues::Float32(mask)) => mask
+                    .iter()
+                    .filter(|value| value.to_bits() == 1f32.to_bits())
+                    .count(),
+                other => panic!("mask channel must be f32, found {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn sphere_polygon_pick_covers_the_whole_quad() {
+        let context = vrn_context_create();
+        assert!(!context.is_null());
+        let sphere = test_create_sphere(context);
+        recook(context);
+        let poly = first_quad_polygon(context, sphere);
+        // SAFETY: just created, alive, single-threaded test.
+        unsafe {
+            let mut ctx = (*context).0.lock().unwrap();
+            ctx.scene
+                .set_selection(Pick {
+                    node: NodeId(sphere),
+                    face: poly,
+                })
+                .unwrap();
+            drop(ctx);
+            // The stored pick names the polygon, and the mask covers both
+            // member triangles (6 soup vertices): the polygon id is visible
+            // in FFI-held state and paint alike, with no pixel math and no
+            // adapter. The tap-to-out-slot leg writes `pick.face` verbatim
+            // (`vrn_viewport_pick`), so this pins the contract end to end.
+            assert_eq!(
+                live_selection(context),
+                Some(Pick {
+                    node: NodeId(sphere),
+                    face: poly
+                })
+            );
+            assert_eq!(tinted_mask_vertices(context, sphere), 6);
+            vrn_context_destroy(context);
+        }
+    }
+
+    #[test]
+    fn previous_wire_restore_clears_the_live_pick() {
+        let context = vrn_context_create();
+        assert!(!context.is_null());
+        let sphere = test_create_sphere(context);
+        recook(context);
+        let poly = first_quad_polygon(context, sphere);
+        // SAFETY: just created, alive, single-threaded test.
+        unsafe {
+            let mut ctx = (*context).0.lock().unwrap();
+            ctx.scene
+                .set_selection(Pick {
+                    node: NodeId(sphere),
+                    face: poly,
+                })
+                .unwrap();
+            drop(ctx);
+        }
+        assert!(live_selection(context).is_some());
+        // Downgrade the snapshot to the previous wire version: geometry
+        // identical, provenance pre-polygon. Rewritten through the parsed
+        // `Value` rather than string surgery, so the downgrade survives any
+        // serialization formatting change.
+        let mut downgraded: serde_json::Value =
+            serde_json::from_str(&snapshot_json(context)).unwrap();
+        downgraded["version"] = serde_json::json!(GRAPH_SNAPSHOT_VERSION - 1);
+        let json = serde_json::to_string(&downgraded).unwrap();
+        // SAFETY: just created, alive, single-threaded test; string outlives
+        // the call.
+        unsafe {
+            let payload = CString::new(json).unwrap();
+            assert_eq!(
+                vrn_graph_restore(context, payload.as_ptr().cast_mut()),
+                VrnResult::Ok
+            );
+        }
+        // Geometry survived; the pre-polygon pick did not (and must never
+        // resurface as a misread polygon id).
+        assert_eq!(live_selection(context), None);
+        assert_eq!(tinted_mask_vertices(context, sphere), 0);
+        assert_eq!(operator_count(context), 1);
+        // SAFETY: just created, alive, single-threaded test.
+        unsafe {
+            vrn_context_destroy(context);
+        }
+    }
+
+    #[test]
+    fn current_wire_restore_round_trips_the_polygon_pick() {
+        let context = vrn_context_create();
+        assert!(!context.is_null());
+        let sphere = test_create_sphere(context);
+        recook(context);
+        let poly = first_quad_polygon(context, sphere);
+        let pick = Pick {
+            node: NodeId(sphere),
+            face: poly,
+        };
+        // SAFETY: just created, alive, single-threaded test.
+        unsafe {
+            let mut ctx = (*context).0.lock().unwrap();
+            ctx.scene.set_selection(pick).unwrap();
+            drop(ctx);
+            let json = snapshot_json(context);
+            let payload = CString::new(json).unwrap();
+            assert_eq!(
+                vrn_graph_restore(context, payload.as_ptr().cast_mut()),
+                VrnResult::Ok
+            );
+        }
+        // The restore itself leaves the live pick alone ...
+        assert_eq!(live_selection(context), Some(pick));
+        // ... and retention re-applies it across the restore-driven recook:
+        // a cleared pick would repaint to base (0 tinted), so 6 still
+        // tinted proves the polygon pick survived the round trip.
+        recook(context);
+        assert_eq!(live_selection(context), Some(pick));
+        assert_eq!(tinted_mask_vertices(context, sphere), 6);
+        // SAFETY: just created, alive, single-threaded test.
+        unsafe {
+            vrn_context_destroy(context);
         }
     }
 }
