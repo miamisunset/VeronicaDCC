@@ -2987,6 +2987,7 @@ dependencies = [
 name = "veronica-ffi"
 version = "0.1.0"
 dependencies = [
+ "bevy_mesh",
  "cbindgen",
  "serde_json",
  "thiserror 2.0.20",

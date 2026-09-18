@@ -12,11 +12,19 @@ use veronica_core::NodeId;
 
 /// `version` tag written into every [`GraphSnapshot`].
 ///
-/// Version 2 carries typed parameter values ([`ParamValue`]). Restores reject
-/// any other value — including version 1, which is not migrated — and Swift
-/// persists the same JSON verbatim, so both sides drift-fail loudly instead
-/// of misreading each other (ADR-0002).
-pub const GRAPH_SNAPSHOT_VERSION: u32 = 2;
+/// Version 3 is the polygon-epoch wire: selection identities name polygons
+/// (#79). Restores accept version 3 and version 2 — a v2 snapshot restores
+/// its geometry normally while the caller applies the polygon migration
+/// (the scene drops stored picks; selection is ephemeral per the
+/// glossary). Version 1 stays rejected, and Swift persists the same JSON
+/// verbatim, so both sides drift-fail loudly instead of misreading each
+/// other (ADR-0002).
+pub const GRAPH_SNAPSHOT_VERSION: u32 = 3;
+
+/// Previous wire version still accepted by [`OperatorGraph::restore`].
+/// Private: callers only ever compare against [`GRAPH_SNAPSHOT_VERSION`]
+/// (current) or hold a snapshot whose version predates it (migrate).
+const GRAPH_SNAPSHOT_PREVIOUS_VERSION: u32 = GRAPH_SNAPSHOT_VERSION - 1;
 
 /// Name assigned to an operator at creation (ADR-0002).
 pub const DEFAULT_OPERATOR_NAME: &str = "Container";
@@ -511,14 +519,20 @@ impl OperatorGraph {
     ///
     /// # Errors
     ///
-    /// Returns [`GraphError::UnsupportedVersion`] when `snapshot.version` is
-    /// not [`GRAPH_SNAPSHOT_VERSION`], [`GraphError::DuplicateNode`] for a
-    /// repeated id, [`GraphError::EmptyName`] for a blank entry name,
+    /// Returns [`GraphError::UnsupportedVersion`] when `snapshot.version`
+    /// is neither [`GRAPH_SNAPSHOT_VERSION`] nor the previous wire version,
+    /// [`GraphError::DuplicateNode`] for a repeated id,
+    /// [`GraphError::EmptyName`] for a blank entry name,
     /// [`GraphError::EmptyParameterKey`] for a blank parameter key, or
     /// [`GraphError::UnknownNode`] for a zero id or a dangling
     /// parent/edge reference.
     pub fn restore(&mut self, snapshot: GraphSnapshot) -> Result<(), GraphError> {
-        if snapshot.version != GRAPH_SNAPSHOT_VERSION {
+        // The previous wire version stays readable: v2 geometry restores
+        // normally, and the polygon-epoch migration (dropping stored picks)
+        // lives with the selection owner, never the graph core.
+        if snapshot.version != GRAPH_SNAPSHOT_VERSION
+            && snapshot.version != GRAPH_SNAPSHOT_PREVIOUS_VERSION
+        {
             return Err(GraphError::UnsupportedVersion(snapshot.version));
         }
         let ids: HashSet<NodeId> = snapshot.operators.iter().map(|o| o.id).collect();
@@ -722,6 +736,28 @@ mod operator_tests {
             );
             assert!(graph.is_empty());
         }
+    }
+
+    #[test]
+    fn restore_accepts_previous_wire_version() {
+        // Arrange: a v2 snapshot (pre-polygon wire) carrying one cube.
+        let mut graph = OperatorGraph::new();
+        let snapshot = GraphSnapshot {
+            version: GRAPH_SNAPSHOT_PREVIOUS_VERSION,
+            operators: vec![Operator::new(
+                NodeId(1),
+                OperatorKind::Cube,
+                "Box",
+                None,
+                position(0.0, 0.0),
+            )],
+            edges: vec![],
+        };
+        // Act + assert: geometry restores normally; the polygon migration
+        // (dropping stored picks) is the selection owner's job, not the
+        // graph core's.
+        graph.restore(snapshot).unwrap();
+        assert_eq!(graph.len(), 1);
     }
 
     #[test]

@@ -50,4 +50,5 @@ serde_json.workspace = true
 cbindgen.workspace = true
 
 [dev-dependencies]
+bevy_mesh.workspace = true
 veronica-geometry.workspace = true

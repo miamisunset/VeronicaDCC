@@ -1,6 +1,7 @@
-//! Wire-version pins (ADR-0002): v1 is rejected, v2 is the golden fixture.
-//! Both language tracks verify the same files; if the JSON drifts, both
-//! gates fail.
+//! Wire-version pins (ADR-0002): v1 is rejected, v2 is the previous wire
+//! (restores with the polygon migration applied by the selection owner),
+//! v3 is the golden fixture. Both language tracks verify the same files;
+//! if the JSON drifts, both gates fail.
 //!
 //! The Swift twin loads the same files repo-relative via `#filePath`.
 
@@ -21,14 +22,16 @@ fn v1_fixture_is_rejected_not_migrated() {
 }
 
 /// The v2 fixture decodes into typed parameters, including one operator
-/// without a parameters key (additive reads tolerate it).
+/// without a parameters key (additive reads tolerate it). v2 is the
+/// previous wire: it pins version 2 (not current) and still restores —
+/// the polygon migration lives with the selection owner, never the graph.
 #[test]
 fn v2_fixture_decodes_typed_parameters() {
     let snapshot: GraphSnapshot =
         serde_json::from_str(include_str!("fixtures/graph-v2.json")).unwrap();
 
-    assert_eq!(snapshot.version, GRAPH_SNAPSHOT_VERSION);
     assert_eq!(snapshot.version, 2);
+    assert_ne!(snapshot.version, GRAPH_SNAPSHOT_VERSION);
     assert!(snapshot.edges.is_empty());
     assert_eq!(snapshot.operators.len(), 2);
 
@@ -63,7 +66,25 @@ fn v2_fixture_decodes_typed_parameters() {
     assert_eq!(sidekick.parent, Some(NodeId(7)));
     assert!(sidekick.parameters.is_empty());
 
-    // The decoded graph restores cleanly.
+    // The decoded graph restores cleanly (previous-wire acceptance).
+    let mut graph = veronica_graph::OperatorGraph::new();
+    graph.restore(snapshot).unwrap();
+    assert_eq!(graph.len(), 2);
+}
+
+/// The v3 fixture is the current golden: same shape as v2, current
+/// version, restores cleanly. Typed-parameter decode stays pinned by the
+/// v2 test above; this one pins the wire tag both tracks agree on.
+#[test]
+fn v3_fixture_is_the_current_golden() {
+    let snapshot: GraphSnapshot =
+        serde_json::from_str(include_str!("fixtures/graph-v3.json")).unwrap();
+
+    assert_eq!(snapshot.version, GRAPH_SNAPSHOT_VERSION);
+    assert_eq!(snapshot.version, 3);
+    assert!(snapshot.edges.is_empty());
+    assert_eq!(snapshot.operators.len(), 2);
+
     let mut graph = veronica_graph::OperatorGraph::new();
     graph.restore(snapshot).unwrap();
     assert_eq!(graph.len(), 2);
