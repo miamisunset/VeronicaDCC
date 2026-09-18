@@ -93,11 +93,17 @@ impl EvaluatedMesh {
     }
 
     /// Attach the triangle-to-polygon map: one polygon id per triangle in
-    /// index order. Callers must keep the map length equal to the triangle
-    /// count (`indices.len() / 3`); consumers (pick, mask, retention) rely
-    /// on positional correspondence, not on a length check.
+    /// index order. Consumers (pick, mask, retention) rely on positional
+    /// correspondence, so debug builds assert the map length equals the
+    /// triangle count (`indices.len() / 3`); release builds trust it for
+    /// zero cost.
     #[must_use]
     pub fn with_triangle_polygons(mut self, tri_to_poly: Vec<u32>) -> Self {
+        debug_assert_eq!(
+            tri_to_poly.len(),
+            self.indices.len() / 3,
+            "polygon map must name every triangle exactly once"
+        );
         self.tri_to_poly = tri_to_poly;
         self
     }
