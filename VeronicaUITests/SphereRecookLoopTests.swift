@@ -28,7 +28,9 @@ final class SphereRecookLoopTests: XCTestCase {
     ]
 
     /// Fails loudly when the geometry pin missed: measuring at drifted
-    /// geometry would silently recalibrate every threshold below.
+    /// geometry would silently recalibrate every threshold below. The 8pt
+    /// tolerance absorbs title-bar/scale rounding in the reported frame; a
+    /// missed pin is hundreds of points off, so nothing real hides in it.
     private func requirePinnedWindow(_ app: XCUIApplication) {
         let frame = app.windows.firstMatch.frame
         XCTAssertEqual(frame.width, Self.testWindowSize.width, accuracy: 8, "window pin missed")

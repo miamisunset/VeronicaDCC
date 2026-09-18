@@ -63,6 +63,10 @@ nonisolated enum WindowLaunchOptions {
         guard let size = pinnedSize else { return }
         Task { @MainActor in
             guard let window = NSApp.keyWindow ?? NSApp.windows.first(where: \.isVisible) else {
+                // Fail visibly, not silently: without a window the pin never
+                // lands, and the test-side `requirePinnedWindow` assert is
+                // the backstop that turns this log into a loud failure.
+                NSLog("WindowLaunchOptions: no visible window; size pin not applied")
                 return
             }
             var frame = window.frame

@@ -85,8 +85,9 @@ func viewportBrightPixelFraction(of shot: XCUIScreenshot, in windowFrame: CGRect
 /// reads near-equal channels and the dark chrome reads near-zero. Window
 /// chrome contributes only the traffic lights (~1e-4); a picked face
 /// covers ~7% window-wide, so the oracle thresholds sit orders of
-/// magnitude clear on both sides. Window-wide by the same AX-tree
-/// necessity as the bright oracle.
+/// magnitude clear on both sides. Window-wide callers keep the AX-tree
+/// rationale of the bright oracle (the MTKView never surfaces); pane-
+/// cropped callers pass the viewport pane frame instead (issue #94).
 func viewportOrangePixelFraction(of shot: XCUIScreenshot, in cropRect: CGRect) -> Double? {
     guard let crop = croppedWindowPixels(of: shot, in: cropRect) else {
         return nil
