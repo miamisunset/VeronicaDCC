@@ -806,6 +806,15 @@ mod tests {
          "parameters":{}}
     ],"edges":[]}"#;
 
+    /// Default sphere at the origin: 0.5 m radius, no parameter overrides
+    /// (absent keys exercise the documented parse defaults: 32 segments,
+    /// 16 rings, 960 triangles).
+    const SPHERE_JSON: &str = r#"{"version":2,"operators":[
+        {"id":1,"kind":"sphere","name":"Ball","parent":null,
+         "position":{"x":0.0,"y":0.0},
+         "parameters":{}}
+    ],"edges":[]}"#;
+
     /// Default cube 1.5 m right of the origin (x-orientation probe).
     const CUBE_RIGHT_JSON: &str = r#"{"version":2,"operators":[
         {"id":1,"kind":"cube","name":"Box","parent":null,
@@ -1176,6 +1185,42 @@ mod tests {
         };
         assert_eq!(pick.node, NodeId(1));
         assert!(pick.face <= 1, "front face, got {}", pick.face);
+    }
+
+    #[test]
+    fn center_tap_hits_default_sphere() {
+        // Arrange: default sphere at the origin under the default camera.
+        let mut world = cooked_world(SPHERE_JSON);
+
+        // Act.
+        let pick = world.resolve_pick(0.0, 0.0).unwrap();
+
+        // Assert: node 1 and a face ordinal inside the default budget
+        // (2 * 32 * 15 = 960 triangles). Probes the entity pass against
+        // the sphere's indexed mesh, which no cube test exercises.
+        let Some(pick) = pick else {
+            panic!("center tap must hit the sphere");
+        };
+        assert_eq!(pick.node, NodeId(1));
+        assert!(pick.face < 960, "sphere face, got {}", pick.face);
+    }
+
+    #[test]
+    fn center_tap_hits_framed_sphere() {
+        // Arrange: default sphere, camera fitted via the same frame-all
+        // the UI tests drive with the `f` key.
+        let mut world = cooked_world(SPHERE_JSON);
+        world.frame_all().expect("frame-all fits the sphere");
+
+        // Act.
+        let pick = world.resolve_pick(0.0, 0.0).unwrap();
+
+        // Assert: the framed sphere sits under the center tap.
+        let Some(pick) = pick else {
+            panic!("center tap must hit the framed sphere");
+        };
+        assert_eq!(pick.node, NodeId(1));
+        assert!(pick.face < 960, "sphere face, got {}", pick.face);
     }
 
     #[test]
